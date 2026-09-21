@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+CONFIG="${AI_CODE_CONFIG_DIR:-$HOME/.config/ai-code}/providers/deepseek.env"
+[ -f "$CONFIG" ] && . "$CONFIG"
+exec claude "$@"

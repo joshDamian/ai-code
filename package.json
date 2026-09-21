@@ -1,0 +1,1 @@
+{"name":"ai-code","version":"1.0.0","private":true,"type":"module","bin":{"ai-code":"./bin/ai-code.js"},"scripts":{"test":"node --test tests/*.mjs","start":"node src/server.mjs","cli":"node src/cli.mjs"},"engines":{"node":">=22.5.0"}}

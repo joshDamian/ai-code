@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+DEST="${AI_CODE_INSTALL_DIR:-$HOME/bin}"
+RELEASE_ROOT="${AI_CODE_RELEASE_DIR:-$HOME/.local/share/ai-code/releases}"
+STAMP="$(date +%Y%m%d%H%M%S)"
+RELEASE="$RELEASE_ROOT/$STAMP"
+mkdir -p "$DEST" "$RELEASE_ROOT" "$RELEASE"
+( cd "$ROOT" && tar --exclude='./.ai-code' --exclude='./node_modules' --exclude='./.git' -cf - . ) | ( cd "$RELEASE" && tar -xf - )
+cat > "$DEST/ai-code" <<SCRIPT
+#!/bin/sh
+exec node "$RELEASE/src/cli.mjs" "\$@"
+SCRIPT
+chmod +x "$DEST/ai-code"
+for wrapper in claude-expensive claude-cheap; do
+  if [ -f "$ROOT/bin/$wrapper" ]; then cp "$ROOT/bin/$wrapper" "$DEST/$wrapper"; chmod +x "$DEST/$wrapper"; fi
+done
+printf '%s\n' "Installed AI Code release: $RELEASE" "Stable command: $DEST/ai-code"
