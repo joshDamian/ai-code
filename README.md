@@ -223,11 +223,21 @@ Once the worktree is gone, the branch is the artifact and porting it again repor
 
 A conflict stops the port and names the files. No agent is asked to resolve it — a merge is where mechanical stops and judgement starts. The destination is not moved, and the work stays committed on the task branch, which is what you merge by hand.
 
+### Reading the PORT tab
+
+The tab leads with a verdict rather than with the controls, because the work is in one of a handful of states and they mean very different things. It is landed, or ready to land, or uncommitted in the worktree, or blocked by uncommitted work at the destination, or in conflict, or there is nothing to port. Each one says what it is, what follows from it, and whether anything is left to run.
+
+That verdict is derived in `assess` next to `next`, for the same reason: `task diff` and the tab must not be able to disagree about whether the work has landed. Only a state with a port to make offers the buttons. Landed work says so and offers none, and an empty task says there is nothing to port rather than presenting a merge command for a branch sitting at its own fork point.
+
+Once the work is in the destination the verdict names two commits, because they answer two questions. The task's own commit is the work — what to read to see what the task did — and the commit it landed as is what a `git log` of the destination shows and what a revert or a bisect would point at. A fast-forward makes those the same commit, and the tab says so instead of listing it twice. Before the work has landed there is only the first.
+
+The change below them is labelled by where it was read from, which is not always the worktree: uncommitted work is read from the directory, and work that has been committed is read from the commit even while the directory is still there. An empty pane reads as the work being gone, and it is the one reading this screen exists to prevent.
+
 `--clean` removes the worktree once the work is on a branch. It is opt-in and never automatic: the branch outlives the directory, but nothing does that until the port has run.
 
 What a port does not claim: it does not re-run the tests at the destination. They ran in the worktree, and a fresh tree at the merge commit has none of the destination's ignored files, so a run there fails for reasons that have nothing to do with the change. A fast-forward reproduces the tested tracked state exactly; run the test command in the destination yourself when it matters.
 
-In the dashboard this is the PORT tab on the task: the destination picker, the assessment, the three buttons, and the diff.
+In the dashboard this is the PORT tab on the task: the verdict, the destination picker, whatever is left to run, the buttons, and the change.
 
 ## Development vs stable
 
@@ -243,7 +253,7 @@ This separation is intentional so AI Code can develop itself without destabilisi
 npm test
 ```
 
-The test suite covers workflow transitions, approval enforcement, the planner's read-only rule and the system-prompt countermand to plan mode's plan-file instruction, worktree isolation, the pre-execution gate on uncommitted work a plan depends on, porting a task's work onto a branch, provider fallback, the circuit breaker, context assembly and its budget, per-role spend budgets, capability gating, recovery of a plan abandoned by a dead process, plan extraction from a run's closing message, the background queue and its concurrency caps, cross-process cancellation, the activity feed's rendering of every stored event shape, how a block of model text is rendered, how a unified diff is numbered and paired into two columns, what a port leaves for you to run, and dashboard API behaviour.
+The test suite covers workflow transitions, approval enforcement, the planner's read-only rule and the system-prompt countermand to plan mode's plan-file instruction, worktree isolation, the pre-execution gate on uncommitted work a plan depends on, porting a task's work onto a branch, provider fallback, the circuit breaker, context assembly and its budget, per-role spend budgets, capability gating, recovery of a plan abandoned by a dead process, plan extraction from a run's closing message, the background queue and its concurrency caps, cross-process cancellation, the activity feed's rendering of every stored event shape, how a block of model text is rendered, how a unified diff is numbered and paired into two columns, what a port leaves for you to run, which state a task's work is in and which commits to name it by, and dashboard API behaviour.
 
 The HTTP tests bind an ephemeral port and wait for the child to answer on it before asserting anything. That is not incidental: with a fixed port, a stale server on it makes the child fail to bind and exit while the test polls the stranger and passes, which is exactly how a green suite once hid a broken server.
 

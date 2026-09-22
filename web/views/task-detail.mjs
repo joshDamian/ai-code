@@ -367,121 +367,133 @@ function PortTab({ task, branches, busy, run }) {
 
   const conflicts = view.conflicts || [];
   const blocked = view.blockedBy || [];
-  const pending = view.pending;
-  // The steps come from the server rather than being derived here, so the tab and the
-  // CLI cannot disagree about what a port left for you to do.
+  // The verdict, the steps and the source of the change all come from the server rather
+  // than being derived here, so the tab and the CLI cannot disagree about what state the
+  // work is in or about what a port left for you to run.
+  const st = view.state || { key: 'unknown', tone: 'neutral', badge: 'Unknown', headline: 'No verdict for this task', detail: '' };
   const steps = view.next || [];
+  // Landed work and empty work have no port to offer: one has already arrived and the
+  // other does not exist. Offering the buttons anyway is much of what made a finished
+  // port read as something still waiting to be done.
+  const actionable = st.key !== 'landed' && st.key !== 'empty';
+  // The commits worth being able to name, because "the work is in main" is not something
+  // you can look up later and a hash and a subject line are. A fast-forward leaves no
+  // commit of its own, so the task's commit is what landed and is named once rather than
+  // listed twice under two labels.
+  const landedAs = view.landedAs;
+  const taskCommit = view.taskCommit;
+  const sameCommit = !!(landedAs && taskCommit && landedAs.sha === taskCommit.sha);
+  const refs = [];
+  if (landedAs) refs.push({ ...landedAs, label: sameCommit ? 'Landed as' : 'Merged as' });
+  if (taskCommit && !sameCommit) refs.push({ ...taskCommit, label: 'Task commit' });
   const options = [...new Set([view.target, ...branches].filter(Boolean))].map((b) => ({ value: b, label: b }));
 
   return html`
     <div class="stack">
+      <div class="port-state ${st.tone}">
+        <div class="port-head">
+          <span class="badge badge-${st.tone}">${st.badge}</span>
+          <h2>${st.headline}</h2>
+        </div>
+        <p class="muted">${st.detail}</p>
+        ${refs.length ? html`<div class="refs">${refs.map((r) => html`<div class="ref" key=${r.sha}>
+            <span class="muted">${r.label}</span>
+            <code class="ref-sha">${r.short}</code>
+            <span class="ref-subject">${r.subject}</span>
+          </div>`)}</div>` : null}
+        ${note ? html`<p class="port-result">${portReport(note)}</p>` : null}
+      </div>
+
       <div class="card">
         <h3>Destination</h3>
         <${Select} label="Merge into" value=${target} disabled=${busy} onChange=${setChosen} options=${options} />
-        <p class="muted">
-          ${view.fastForward
-            ? `A fast-forward: ${view.target} contains everything ${view.branch} was cut from, so this lands as-is.`
-            : `${view.target} has moved since ${view.branch} was cut, so this lands as a merge commit.`}
-        </p>
+        ${view.alreadyPorted ? html`<p class="muted">Change this to ask about another branch.</p>` : null}
+      </div>
+
+      ${
+        steps.length
+          ? html`<div class="card">
+              <h3>Next steps</h3>
+              <ol class="steps">
+                ${steps.map(
+                  (s, i) => html`<li key=${i}>
+                    <span>${s.text}</span>
+                    ${s.command ? html`<pre class="code-block">${s.command}</pre>` : null}
+                  </li>`
+                )}
+              </ol>
+            </div>`
+          : null
+      }
+
+      <div class="card">
+        <h3>${actionable ? 'Port' : 'Nothing to do'}</h3>
         ${
-          view.alreadyPorted
-            ? html`<p class="muted">This work is already in ${view.target}.</p>`
-            : null
+          actionable
+            ? html`<div class="row">
+                <button class="btn secondary" disabled=${busy} onClick=${() => port({ to: target, dryRun: true })}>Preview</button>
+                <button class="btn" disabled=${busy} onClick=${() => port({ to: target })}>Port onto ${view.target}</button>
+                ${
+                  view.worktree
+                    ? html`<button class="btn secondary" disabled=${busy} onClick=${() => port({ to: target, clean: true })}>
+                        Port, then remove the worktree
+                      </button>`
+                    : null
+                }
+              </div>
+              <p class="muted">
+                Tests are not re-run here. They ran in the worktree; the destination is a different tree, and
+                this reports what the merge would do rather than vouching for the result.
+              </p>`
+            : html`<p class="muted">
+                Nothing to run. \`ai-code task port ${task.id}\` reports this same verdict.
+              </p>`
         }
       </div>
 
       <div class="card">
-        <h3>Assessment</h3>
+        <h3>${changeLabel(view)}</h3>
+        ${
+          view.diff?.trim()
+            ? html`<${DiffViewer} diff=${view.diff} />`
+            : html`<div class="muted">No change was found for this task.</div>`
+        }
+      </div>
+
+      <div class="card">
+        <h3>Details</h3>
         <div class="list">
-          ${row(
-            'Worktree',
-            !view.worktree
-              ? view.committed
-                ? 'Removed - the work is on the branch'
-                : 'Gone, and the branch holds no commit'
-              : pending
-                ? 'Uncommitted - porting will commit it'
-                : 'Committed'
-          )}
+          ${row('Worktree', worktreeText(view))}
+          ${row('Destination', `${view.target} at ${String(view.targetTip || '').slice(0, 7)}`)}
           ${row('Merge', conflicts.length ? `${conflicts.length} conflict(s)` : view.clean === null ? 'Unknown' : 'Clean')}
           ${row('Touches', `${(view.files || []).length} file(s)`)}
           ${view.untracked?.length ? row('Untracked', view.untracked.map((u) => `${u.path} (${u.bytes} B)`).join(', ')) : null}
           ${blocked.length ? row('Blocked by', blocked.join(', ')) : null}
+          ${conflicts.length ? row('Conflicts', conflicts.join(', ')) : null}
           ${view.premisesMoved?.length ? row('Plan premises moved', view.premisesMoved.join(', ')) : null}
         </div>
-        ${
-          blocked.length
-            ? html`<p class="muted">
-                ${view.target} is checked out with uncommitted changes in files this change touches. Git will
-                refuse the merge, so commit or stash them there first.
-              </p>`
-            : null
-        }
-        ${
-          conflicts.length
-            ? html`<p class="error-text">
-                These files differ in ${view.target}: ${conflicts.join(', ')}. Nothing will be moved.
-              </p>`
-            : null
-        }
-        ${
-          view.checkedOut
-            ? html`<p class="muted">
-                ${view.target} is checked out in a worktree, so the port will not move it. It prints the command
-                instead, and you run that yourself.
-              </p>`
-            : null
-        }
-      </div>
-
-      <div class="card">
-        <h3>Next steps</h3>
-        ${
-          steps.length
-            ? html`<ol class="steps">
-                ${steps.map((s, i) => html`<li key=${i}>
-                  <span>${s.text}</span>
-                  ${s.command ? html`<pre class="code-block">${s.command}</pre>` : null}
-                </li>`)}
-              </ol>`
-            : html`<p class="muted">
-                ${
-                  view.alreadyPorted
-                    ? `${view.target} already contains this work. Nothing to run.`
-                    : `${view.target} is checked out nowhere, so porting moves its ref for you. Nothing to run.`
-                }
-              </p>`
-        }
-        <p class="muted">
-          Shown before you click, because the command is the part that is easy to lose: a port onto a branch you
-          have checked out commits the work and stops there.
-        </p>
-      </div>
-
-      <div class="card">
-        <h3>Port</h3>
-        <div class="row">
-          <button class="btn" disabled=${busy} onClick=${() => port({ to: target, dryRun: true })}>Preview</button>
-          <button class="btn" disabled=${busy} onClick=${() => port({ to: target })}>Port</button>
-          <button class="btn" disabled=${busy} onClick=${() => port({ to: target, clean: true })}>Port and remove worktree</button>
-        </div>
-        <p class="muted">
-          Tests are not re-run here. They ran in the worktree; the destination is a different tree, and this
-          reports what the merge would do rather than vouching for the result.
-        </p>
-        ${note ? html`<pre class="code-block">${JSON.stringify(note, null, 2)}</pre>` : null}
-      </div>
-
-      <div class="card">
-        <h3>Change</h3>
-        ${
-          view.diff?.trim()
-            ? html`<${DiffViewer} diff=${view.diff} />`
-            : html`<div class="muted">Nothing to show: the worktree has no changes.</div>`
-        }
       </div>
     </div>
   `;
+}
+
+// What the diff pane is showing, which is one of three things and they are not
+// interchangeable: work the worktree is still holding, the commit the branch holds, or the
+// change already in the destination. Leaving the label at "Change" is much of what made a
+// landed port read as work still waiting to be ported.
+function changeLabel(view) {
+  if (view.state?.key === 'landed') return `The change, as it landed in ${view.target}`;
+  if (view.from === 'worktree') return 'The change, uncommitted in the worktree';
+  if (view.from === 'commit') return `The change on ${view.branch}`;
+  return 'The change';
+}
+
+// Where the work is held, which is the worktree while it is there and the branch once it
+// is not. A directory that has been removed is not the same as work that has been lost,
+// and the difference is the one this screen exists to make.
+function worktreeText(view) {
+  if (view.worktree) return view.pending ? 'Live, with uncommitted changes' : 'Live, and clean';
+  return view.committed ? 'Removed - the work is on the branch' : 'Gone, and the branch holds no commit';
 }
 
 // What a port did, said from what it returned rather than from which button was

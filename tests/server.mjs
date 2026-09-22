@@ -222,6 +222,8 @@ test('the port routes take their options from the request',async()=>{
     assert.equal(view.target,'staging','the destination comes from the query string');
     assert.match(view.diff,/diff --git a\/app\.mjs/);
     assert.equal(view.pending,true,'the work is uncommitted, and the assessment says so');
+    assert.equal(view.state.key,'pending','and the verdict the tab leads with is served with it');
+    assert.match(view.state.headline,/uncommitted/, 'the verdict is prose, not a key the client expands');
 
     const before=read(root,['rev-parse','staging']);
     const dry=await post(`${s.base}/api/tasks/${taskId}/port`,{to:'staging',dryRun:true});
@@ -233,5 +235,11 @@ test('the port routes take their options from the request',async()=>{
     assert.equal(real.status,200);
     assert.notEqual(read(root,['rev-parse','staging']),before,'and the real one lands');
     assert.match(read(root,['show','staging:app.mjs']),/written by the mock implementer/);
+
+    const landed=JSON.parse((await get(`${s.base}/api/tasks/${taskId}/diff?to=staging`)).body);
+    assert.equal(landed.state.key,'landed','and the tab is told so rather than left to infer it');
+    assert.equal(landed.landedAs.sha,landed.taskCommit.sha,'a fast-forward, so one commit is both the work and how it arrived');
+    assert.match(landed.taskCommit.subject,/port me/,'and it is named by its own message');
+    assert.deepEqual(landed.next,[]);
   }finally{s.stop()}
 });

@@ -304,6 +304,23 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .steps{margin:0;padding-left:20px;display:grid;gap:10px;font-size:13px}
 .steps li{padding-left:2px}
 .steps .code-block{margin:6px 0 0}
+/* The port verdict. The left rule carries the state's tone the way the activity feed's
+   rules carry an event's kind, so the answer is legible before the words are read. */
+.port-state{background:var(--panel);border:1px solid var(--line);border-left-width:3px;border-radius:var(--radius);padding:17px}
+.port-state.good{border-left-color:var(--good)}
+.port-state.warn{border-left-color:var(--warn)}
+.port-state.bad{border-left-color:var(--bad)}
+.port-state.neutral{border-left-color:var(--accent-dim)}
+.port-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:9px}
+.port-head h2{margin:0;font-size:15px;color:var(--text)}
+.port-state p{margin:0}
+.port-result{margin-top:10px;color:var(--good);font-size:13px}
+/* The commits to be able to name. Referenceable rather than described: a hash is what
+   you paste into git, and the subject is what makes it recognisable in a log. */
+.refs{margin-top:12px;display:grid;gap:6px}
+.ref{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:12.5px}
+.ref-sha{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:1px 6px;color:var(--accent)}
+.ref-subject{color:var(--text)}
 .diff-modes{display:flex;gap:6px;justify-content:flex-end;margin-bottom:8px}
 .diff-modes .btn{padding:5px 11px;font-size:11.5px;font-weight:600}
 .diff-modes .btn.on{color:var(--accent);border-color:var(--accent-dim)}

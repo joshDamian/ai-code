@@ -95,3 +95,20 @@ export function setBranch(root,name,ref){return git(root,['branch','-f',name,ref
 // commit` with an empty index exits non-zero, and git() does not catch.
 export function commitAll(dir,msg){git(dir,['add','-A']);git(dir,['commit','-m',msg]);return head(dir)}
 export function removeWorktree(root,dir){return git(root,['worktree','remove','--force',dir])}
+// The commit that first put a task's work into the destination. A fast-forward makes
+// that the task's own commit, because nothing separate was written to carry it; a merge
+// makes it the merge commit, which is the one a `git log` of the destination shows and
+// the one a revert or a bisect would point at. So the merge is looked for first and the
+// task's commit is the answer when there is none - naming the newest commit on the path
+// instead would name whatever landed after it.
+export function landingCommit(root,taskTip,targetTip){
+if(!taskTip||!targetTip)return null;
+try{
+const merges=git(root,['rev-list','--merges','--ancestry-path',`${taskTip}..${targetTip}`]).split('\n').filter(Boolean);
+return merges.length?merges[merges.length-1]:taskTip}catch{return null}}
+// A commit as a surface has to name it: the short hash a person types, the full one a
+// tool takes, and the subject line that makes it recognisable. One place, so every
+// surface names the same commit the same way.
+export function commitRef(root,ref){
+if(!ref)return null;
+try{const [sha,...rest]=git(root,['log','-1','--format=%H%n%s',ref]).trim().split('\n');return {sha,short:sha.slice(0,7),subject:rest.join(' ')||''}}catch{return null}}

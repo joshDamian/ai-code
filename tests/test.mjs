@@ -1616,6 +1616,110 @@ test('a plan written on a detached HEAD records no target rather than the word H
   assert.throws(()=>s.portTarget(s.task(t.id)),/detached/,'and with no way to name one it says why');
 });
 
+// -- the verdict a surface leads with -------------------------------------
+//
+// A port screen has to say which of a handful of states the work is in before any of the
+// detail, and the states are not interchangeable - "there is nothing to port" and "it has
+// already landed" are both quiet and mean opposite things. Derived in `assess` rather than
+// in the tab so the CLI answers the same question the same way.
+
+test('the verdict is uncommitted while the work is only in the worktree',async()=>{
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  const v=s.diff(t.id);
+  assert.equal(v.state.key,'pending');
+  assert.equal(v.committed,false,'nothing has been published yet');
+  assert.ok(v.next.some((x)=>x.command),'and there is something to run, which the state is not saying instead of');
+});
+
+test('the verdict is blocked when the destination is dirty in a file the change touches',async()=>{
+  // Not a conflict, and the difference is the point: git compares the two sides in the
+  // object store, where the destination's uncommitted work does not appear. It refuses
+  // the merge anyway, and telling someone that before they read the diff is the reason
+  // this is assessed at all.
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  s.materialize(t.id);
+  fs.writeFileSync(path.join(root,'app.mjs'),'uncommitted at the destination\n');
+  const v=s.diff(t.id);
+  assert.equal(v.state.key,'blocked');
+  assert.deepEqual(v.blockedBy,['app.mjs']);
+  assert.equal(v.clean,true,'the merge itself is clean, which is why this is its own state');
+});
+
+test('a live worktree with nothing uncommitted reads the change off the commit',async()=>{
+  // The worktree's existence is not the test for where the change is. Using it as one
+  // showed an empty pane for a worktree whose work had already been committed, and an
+  // empty diff is read as the work being gone - which is the reading this screen exists
+  // to prevent.
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  s.materialize(t.id);
+  const v=s.diff(t.id);
+  assert.equal(v.worktree,true,'the directory is still there');
+  assert.equal(v.pending,false,'and it has nothing left uncommitted');
+  assert.equal(v.from,'commit');
+  assert.match(v.diff,/diff --git a\/app\.mjs/,'so the change is shown rather than an empty pane');
+});
+
+test('a task with no work and no commit has no port to offer',async()=>{
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'inspect the module and change nothing');
+  s.prepare(t.id);await s.plan(t.id);s.approve(t.id);await s.implement(t.id);
+  const v=s.diff(t.id);
+  assert.equal(v.state.key,'empty');
+  assert.equal(v.committed,false);
+  assert.deepEqual(v.next,[]);
+  assert.equal(v.from,'none');
+});
+
+test('landing names the merge commit and the work as two different commits',async()=>{
+  // The case a person lands in by running the command a port printed, and the one worth
+  // being able to look up afterwards: the work is a commit of its own and the merge is
+  // another, so "it is in main" is a claim with two hashes behind it rather than one.
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  const target=currentBranch(root);
+  // The destination advances first, so this cannot be a fast-forward and a merge commit
+  // is what carries the work in.
+  fs.writeFileSync(path.join(root,'README.md'),'a newer commit\n');
+  sh(root,['add','.']);commitAs(root,'the target moved on');
+
+  const r=await s.port(t.id,{to:target});
+  const ready=s.diff(t.id,{to:target});
+  assert.equal(ready.state.key,'ready','committed, clean, and waiting on the merge to be run');
+  assert.equal(ready.landedAs,null,'which is why there is no landed commit to name yet');
+
+  sh(root,['merge',t.branch]);
+  const v=s.diff(t.id,{to:target});
+  assert.equal(v.state.key,'landed');
+  // The verdict is prose written from the assessment, so it is asserted on: a state
+  // whose sentence interpolates a field the assessment never carried reads "undefined
+  // already contains this work", which no assertion on the key alone would catch.
+  assert.match(v.state.headline,/main already contains this work/);
+  assert.ok(!JSON.stringify(v.state).includes('undefined'),'no field the verdict names is missing');
+  assert.equal(v.taskCommit.sha,r.commit,"the task's commit is the work");
+  assert.equal(v.taskCommit.short,v.taskCommit.sha.slice(0,7));
+  assert.match(v.taskCommit.subject,/change the button colour/);
+  assert.notEqual(v.landedAs.sha,v.taskCommit.sha,'a merge is its own commit');
+  assert.equal(v.landedAs.sha,sh(root,['rev-parse',target]),'and it is what the destination points at');
+  assert.equal(sh(root,['rev-list','--merges','--count',v.landedAs.sha]),'1');
+  assert.equal(v.next.length,0,'nothing left to run');
+});
+
+test('a fast-forward names the work itself, because no other commit carried it',async()=>{
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  sh(root,['branch','staging',currentBranch(root)]);
+  const r=await s.port(t.id,{to:'staging'});
+  const v=s.diff(t.id,{to:'staging'});
+  assert.equal(v.state.key,'landed');
+  assert.equal(v.landedAs.sha,v.taskCommit.sha,'one commit, and it is both the work and how it arrived');
+  assert.equal(v.landedAs.sha,r.commit);
+});
+
 test('diffLines numbers only the lines that are content',()=>{
   // The gutter bug this replaces: every line that is not content advanced both
   // counters, so one file header, mode change or no-newline note shifted the two
