@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Service } from './service.mjs';
+import { Service, transitions } from './service.mjs';
 
 const a = process.argv.slice(2);
 // Constructing the Service opens the database, so every invocation - including a
@@ -17,7 +17,7 @@ Context
   context enrich <project-id>
 Task
   task create <project-id> <title>
-  task list
+  task list [project-id] [--state <STATE>]
   task show <id>
   task status <id>
   task active
@@ -107,7 +107,14 @@ async function taskCommand(sub, rest) {
     const t = s.createTask(rest[0], rest.slice(1).join(' '));
     return out(s.prepare(t.id));
   }
-  if (sub === 'list') return out(s.store.listTasks());
+  if (sub === 'list') {
+    const si = rest.indexOf('--state');
+    const state = si >= 0 ? rest[si + 1] : undefined;
+    if (si >= 0 && (!state || state.startsWith('--'))) throw new Error('--state needs a value');
+    if (state && !transitions[state]) throw new Error(`Invalid state ${state}; valid states are ${Object.keys(transitions).join(', ')}`);
+    const pid = rest[0] && !rest[0].startsWith('--') ? rest[0] : undefined;
+    return out(s.store.listTasks(pid, state));
+  }
   if (sub === 'show') return out({ task: s.task(rest[0]), runs: s.store.listRuns(rest[0]) });
   // What a background job is doing, which the run rows alone do not answer: a
   // queued job has no run yet, and the job is what says so.

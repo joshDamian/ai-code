@@ -16,7 +16,7 @@ import { isTransient, healthThresholds, effectiveHealth } from './health.mjs';
 const exec = promisify(execFile);
 
 // The workflow state machine. A transition not listed here is rejected.
-const transitions = {
+export const transitions = {
   CREATED: ['CONTEXT_READY'],
   CONTEXT_READY: ['PLANNING'],
   PLANNING: ['AWAITING_APPROVAL', 'FAILED'],

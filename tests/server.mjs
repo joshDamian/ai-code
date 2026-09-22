@@ -35,6 +35,9 @@ function seeded(){
 // looks for the database, so its own path has to be absolute.
 const cliPath=path.resolve('src/cli.mjs');
 
+// A fresh git repo for tests that need separate project directories.
+function gitRepo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-list-'));git(d,['init','-q']);fs.writeFileSync(path.join(d,'README.md'),'x');git(d,['add','.']);git(d,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);return d}
+
 // A port nobody is holding. Hardcoding these is how this suite once went green
 // against a stranger's server: the child failed to bind, exited, and the poll that
 // was supposed to prove the dashboard answered was answered by whatever already had
@@ -243,3 +246,5 @@ test('the port routes take their options from the request',async()=>{
     assert.deepEqual(landed.next,[]);
   }finally{s.stop()}
 });
+
+test('task list passes the project id through and filters by --state',async()=>{const rootA=gitRepo(),rootB=gitRepo();const s=new Service(rootA,{allowMock:true,silent:true});const pa=s.initProject('pa',rootA);const pb=s.initProject('pb',rootB);const t1=s.createTask(pa.id,'in project a, created');const t2=s.createTask(pa.id,'in project a, planning');s.store.updateTask(t2.id,{state:'PLANNING'});const t3=s.createTask(pb.id,'in project b, created');const run=(args)=>new Promise((res)=>{const p=spawn(process.execPath,[cliPath,'task','list',...args],{cwd:rootA,stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});{const {code,out}=await run([pa.id]);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id).sort(),[t1.id,t2.id].sort())}{const {code,out}=await run(['--state','PLANNING']);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id),[t2.id])}{const {code,out}=await run([pa.id,'--state','PLANNING']);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id),[t2.id])}{const {code,err}=await run(['--state','NOT_A_STATE']);assert.equal(code,1);assert.match(err,/Invalid state NOT_A_STATE/);assert.match(err,/CREATED/);assert.match(err,/COMPLETE/)}});
