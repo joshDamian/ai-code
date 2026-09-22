@@ -234,11 +234,13 @@ export class Store {
     return this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
   }
 
-  listTasks(pid) {
-    const q = pid
-      ? 'SELECT * FROM tasks WHERE project_id=? ORDER BY updated_at DESC'
-      : 'SELECT * FROM tasks ORDER BY updated_at DESC';
-    return this.db.prepare(q).all(...(pid ? [pid] : []));
+  listTasks(pid, state) {
+    const where = [];
+    const params = [];
+    if (pid) { where.push('project_id=?'); params.push(pid); }
+    if (state) { where.push('state=?'); params.push(state); }
+    const q = `SELECT * FROM tasks${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY updated_at DESC`;
+    return this.db.prepare(q).all(...params);
   }
 
   updateTask(id, patch) {
