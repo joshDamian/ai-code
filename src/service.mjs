@@ -678,7 +678,10 @@ export class Service {
       const text = this.finalText(r.runId);
       // A verdict counts as FAIL when the word appears anywhere but is never the
       // start of a line - so "PASS" as a standalone verdict is not read as FAIL.
-      const fail = /\bFAIL\b/i.test(text) && !/^\s*PASS\b/im.test(text);
+      // The verdict need not be the bare word: "the implementation fails to meet
+      // item 3" is as much a FAIL as "FAIL", and a reviewer writing prose is the
+      // ordinary case rather than the exception.
+      const fail = /\bfail(?:s|ed|ing|ures?)?\b/i.test(text) && !/^\s*PASS\b/im.test(text);
       if (fail) {
         this.store.updateTask(id, { review: text });
         return this.transition(id, 'REPAIRING');

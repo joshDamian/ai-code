@@ -80,7 +80,7 @@ export async function* runMock(input) {
   if (input.role === 'planner') {
     yield { type: 'message', data: 'Proposed plan: inspect the relevant module, make the smallest change, add/update tests, run verification.' };
   } else if (input.role === 'reviewer') {
-    yield { type: 'message', data: 'Review complete: compare implementation against the approved plan and test results.' };
+    yield { type: 'message', data: input.mockReviewText || 'Review complete: compare implementation against the approved plan and test results.' };
   } else {
     yield { type: 'message', data: `${input.role} completed.` };
   }
@@ -304,6 +304,7 @@ export async function* runAgent(provider, model, input) {
       mockReadPaths: provider.config.readPaths || [],
       mockWrites: provider.config.writes || [],
       mockUsage: provider.config.usage || null,
+      mockReviewText: provider.config.reviewText || null,
       mockFailure: provider.config.failRoles?.includes(input.role) ? 'SIMULATED_FAILURE' : null,
     });
     return;
