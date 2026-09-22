@@ -1,35 +1,403 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Code — Mission Control</title><style>
-:root{--bg:#0a0c10;--panel:#11151b;--panel2:#171c23;--line:#29313c;--text:#edf2f7;--muted:#8e9aaa;--accent:#9fb9ff;--good:#6fe0a1;--warn:#ffd37a;--bad:#ff8585}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px Inter,ui-sans-serif,system-ui,sans-serif}button,input,select,textarea{font:inherit}button{background:#e9eef5;color:#0b0d10;border:0;border-radius:8px;padding:9px 13px;font-weight:650;cursor:pointer}button.secondary{background:var(--panel2);color:var(--text);border:1px solid var(--line)}button.danger{background:#351b1b;color:#ffb5b5}.app{display:grid;grid-template-columns:230px 1fr;min-height:100vh}.side{border-right:1px solid var(--line);padding:22px 14px;background:#0e1115}.logo{font-weight:800;font-size:17px;padding:0 10px 24px}.nav button{display:block;width:100%;text-align:left;background:transparent;color:var(--muted);margin:2px 0}.nav button.active,.nav button:hover{background:var(--panel2);color:var(--text)}main{padding:28px 34px;max-width:1550px;width:100%}.top{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-bottom:26px}.top h1{margin:0;font-size:24px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:17px}.metric{font-size:26px;font-weight:750;margin-top:7px}.muted{color:var(--muted)}.section{margin-top:28px}.section h2{font-size:15px;margin:0 0 10px}.task{display:grid;grid-template-columns:1fr auto;gap:15px;align-items:center;background:var(--panel);border:1px solid var(--line);padding:16px;border-radius:10px;margin:8px 0}.pill{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:4px 8px;color:var(--muted);font-size:12px}.pill.good{color:var(--good)}.pill.warn{color:var(--warn)}.pill.bad{color:var(--bad)}pre{white-space:pre-wrap;background:#090b0e;border:1px solid var(--line);border-radius:10px;padding:14px;max-height:420px;overflow:auto}.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.stack{display:grid;gap:10px}.field{display:grid;gap:6px}.field label{font-size:12px;color:var(--muted)}input,select,textarea{width:100%;background:#0b0e12;color:var(--text);border:1px solid var(--line);padding:10px;border-radius:8px}.table{width:100%;border-collapse:collapse}.table th,.table td{padding:11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.table th{color:var(--muted);font-weight:600}.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:16px 0}.tabs button{background:transparent;color:var(--muted);border-radius:0}.tabs button.active{color:var(--text);border-bottom:2px solid var(--accent)}.modal{position:fixed;inset:0;background:#000c;display:flex;align-items:center;justify-content:center;padding:25px;z-index:5}.modal>div{width:min(1050px,96vw);max-height:92vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}.kv{display:grid;grid-template-columns:170px 1fr;gap:7px;padding:6px 0}.event{border-left:2px solid var(--line);padding:7px 10px;margin:6px 0}.event b{color:var(--accent)}.success{color:var(--good)}.warning{color:var(--warn)}.error{color:var(--bad)}.hidden{display:none}@media(max-width:1000px){.app{grid-template-columns:1fr}.side{display:none}.grid,.grid3{grid-template-columns:1fr 1fr}main{padding:20px}}@media(max-width:650px){.grid,.grid3{grid-template-columns:1fr}.task{grid-template-columns:1fr}}
-</style></head><body><div class="app"><aside class="side"><div class="logo">AI CODE<br><span class="muted">Mission Control</span></div><div class="nav"><button data-view="overview" class="active">Overview</button><button data-view="projects">Projects</button><button data-view="tasks">Tasks</button><button data-view="providers">Providers</button><button data-view="routing">Routing</button><button data-view="runs">Runs</button><button data-view="usage">Usage</button><button data-view="settings">Settings</button></div></aside><main><div id="app"></div></main></div><div id="modal"></div><script>
-const $=s=>document.querySelector(s),state={view:'overview',data:null,taskTab:'plan',taskId:null,taskEvents:[],stream:null};async function api(p,o={}){const r=await fetch(p,o);const x=await r.json();if(!r.ok)throw Error(x.error||'Request failed');return x}async function load(){state.data=await api('/api/overview');render()}function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function btn(label,fn,cls=''){return `<button class="${cls}" onclick="${fn}">${label}</button>`}function shell(title,action=''){return `<div class="top"><h1>${title}</h1><div class="row">${action}</div></div>`}function status(s){const c=s==='COMPLETE'||s==='succeeded'||s==='ok'?'good':s==='FAILED'||s==='failed'?'bad':s==='AWAITING_APPROVAL'||s==='REPAIRING'?'warn':'';return `<span class="pill ${c}">${esc(s)}</span>`}
-function render(){document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===state.view));const d=state.data||{};const views={overview,projects,tasks,providers,routing,runs,usage,settings};$('#app').innerHTML=views[state.view](d)}
-function overview(d){return shell('Overview',btn('+ New task','newTask()'))+`<div class="grid"><div class="card"><span class="muted">Projects</span><div class="metric">${d.projects.length}</div></div><div class="card"><span class="muted">Active tasks</span><div class="metric">${d.tasks.filter(x=>!['COMPLETE','FAILED'].includes(x.state)).length}</div></div><div class="card"><span class="muted">Runs</span><div class="metric">${d.runs.length}</div></div><div class="card"><span class="muted">Providers</span><div class="metric">${d.providers.filter(x=>x.enabled).length}</div></div></div><div class="section"><h2>Active work</h2>${d.tasks.slice(0,10).map(taskCard).join('')||'<div class="card muted">No tasks yet.</div>'}</div><div class="section"><h2>Provider health</h2>${d.providers.map(providerMini).join('')}</div>`}
-function taskCard(t){return `<div class="task"><div><b>${esc(t.title)}</b><div class="muted">${t.id.slice(0,8)} · ${esc(t.project_id)}</div></div><div class="row">${status(t.state)} ${btn('Open',`showTask('${t.id}')`,'secondary')}</div></div>`}
-function providerMini(p){const routable=p.config?.routable!==false&&p.kind!=='mock';return `<div class="task"><div><b>${esc(p.name)}</b><div class="muted">${esc(p.kind)} · ${routable?'Routable':'Test only / disabled for routing'}</div></div>${status(p.enabled?'Enabled':'Disabled')}</div>`}
-function projects(d){return shell('Projects',btn('+ Project','newProject()'))+`<div class="section">${d.projects.map(p=>`<div class="task"><div><b>${esc(p.name)}</b><div class="muted">${esc(p.path)} · ${esc(p.language||'')} · ${esc(p.framework||'')}</div></div><span class="pill">${Object.keys(p.commands||{}).length} commands</span></div>`).join('')||'<div class="card muted">No projects registered.</div>'}</div>`}
-function tasks(d){return shell('Tasks',btn('+ New task','newTask()'))+`<div class="section">${d.tasks.map(taskCard).join('')||'<div class="card muted">No tasks yet.</div>'}</div>`}
-function providers(d){return shell('Providers',btn('+ Provider','addProvider()'))+`<div class="grid3">${d.providers.map(p=>{const models=d.models.filter(m=>m.provider_id===p.id);return `<div class="card"><div class="top"><div><b>${esc(p.name)}</b><div class="muted">${esc(p.kind)}</div></div>${status(p.enabled?'Enabled':'Disabled')}</div><div class="row"><span class="pill">${p.config?.routable===false||p.kind==='mock'?'Not routable':'Routable'}</span><span class="pill">${p.config?.billingMode||'unknown billing'}</span></div><div class="section"><h2>Models</h2>${models.map(modelRow).join('')||'<div class="muted">No models.</div>'}</div><div class="row">${btn('Configure',`configureProvider('${p.id}')`,'secondary')} ${btn('Test connection',`testProvider('${p.id}')`,'secondary')}${p.kind!=='mock'?` ${btn(p.enabled?'Disable':'Enable',`toggleProvider('${p.id}',${!p.enabled})`,'secondary')}`:''}</div></div>`}).join('')}</div>`}
-function modelRow(m){return `<div class="card" style="padding:11px;margin:8px 0"><div class="row" style="justify-content:space-between"><div><b>${esc(m.displayName||m.name)}</b><div class="muted">AI Code ID: <code>${esc(m.id)}</code></div><div class="muted">Provider model: <code>${esc(m.providerModelId||m.name)}</code> · Claude Code invocation: <code>${esc(m.invocationModelId||m.name)}</code></div></div>${status(m.enabled?'Enabled':'Disabled')}</div><div class="muted">${m.capabilities.join(' · ')}</div><div class="muted" style="margin-top:6px">${m.billing_mode||'unknown'} · ${m.input_cost_per_mtok!=null?'$'+m.input_cost_per_mtok+'/M input · $'+m.output_cost_per_mtok+'/M output':'no published price'}${m.pricing_source?' · '+esc(m.pricing_source):''}</div></div>`}
-function routing(d){const roles=['planner','implementer','reviewer','repair'];return shell('Routing',btn('Save routing','saveRouting()'))+`<div class="section stack">${roles.map(role=>routingCard(role,d)).join('')}</div>`}
-function routingCard(role,d){const p=d.routing[role]||{};const cap=role==='planner'?'planning':role==='implementer'?'coding':role==='reviewer'?'review':'repair';const models=d.models.filter(m=>m.enabled&&m.provider_id!=='mock'&&m.capabilities.includes(cap));const pref=p.preferred?.[0]||'';const fall=p.fallback||[];const options=models.map(m=>`<option value="${esc(m.id)}" ${pref===m.id?'selected':''}>${esc(m.displayName||m.name)} — ${esc(m.provider_id)}</option>`).join('');const optionFor=(value)=>`<option value="">None</option>${models.map(m=>`<option value="${esc(m.id)}" ${value===m.id?'selected':''}>${esc(m.displayName||m.name)} — ${esc(m.provider_id)}</option>`).join('')}`;return `<div class="card"><div class="top"><div><b>${role[0].toUpperCase()+role.slice(1)}</b><div class="muted">${esc(p.strategy||'balanced')} routing</div></div><select id="strategy-${role}"><option value="quality" ${p.strategy==='quality'?'selected':''}>Quality</option><option value="balanced" ${p.strategy==='balanced'?'selected':''}>Balanced</option><option value="speed" ${p.strategy==='speed'?'selected':''}>Speed</option><option value="cost" ${p.strategy==='cost'?'selected':''}>Cost</option></select></div><div class="grid3"><div class="field"><label>Preferred model</label><select id="preferred-${role}"><option value="">Automatic</option>${options}</select></div><div class="field"><label>Fallback 1</label><select id="fallback1-${role}">${optionFor(fall[0]||'')}</select><label>Fallback 2</label><select id="fallback2-${role}">${optionFor(fall[1]||'')}</select></div><div class="field"><label>Effort</label><select id="effort-${role}">${['low','medium','high','xhigh','max'].map(x=>`<option value="${x}" ${p.effort===x?'selected':''}>${x}</option>`).join('')}</select></div></div><div class="muted" style="margin-top:9px">Models are selected from the provider registry. AI Code resolves each selection to the provider's valid invocation model ID.</div></div>`}
-function runs(d){return shell('Runs')+`<div class="card"><table class="table"><thead><tr><th>Role</th><th>Provider / Model</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Duration</th></tr></thead><tbody>${d.runs.map(r=>`<tr><td>${esc(r.role)}</td><td>${esc(r.provider_id)}<br><span class="muted">${esc(r.model_id)}</span></td><td>${status(r.status)}</td><td>${Number(r.tokens||0).toLocaleString()}</td><td>$${Number(r.cost||0).toFixed(6)}<br><span class="muted">${esc(r.cost_basis||'')}</span></td><td>${r.duration_ms?Math.round(r.duration_ms/1000)+'s':'—'}</td></tr>`).join('')}</tbody></table></div>`}
-function usage(d){const cost=d.runs.reduce((a,x)=>a+Number(x.cost||0),0),tokens=d.runs.reduce((a,x)=>a+Number(x.tokens||0),0);const by={};d.runs.forEach(r=>{by[r.provider_id]??={tokens:0,cost:0,runs:0};by[r.provider_id].tokens+=Number(r.tokens||0);by[r.provider_id].cost+=Number(r.cost||0);by[r.provider_id].runs++});return shell('Usage')+`<div class="grid"><div class="card"><span class="muted">Recorded cost</span><div class="metric">$${cost.toFixed(4)}</div></div><div class="card"><span class="muted">Recorded tokens</span><div class="metric">${tokens.toLocaleString()}</div></div><div class="card"><span class="muted">Completed</span><div class="metric">${d.runs.filter(x=>x.status==='succeeded').length}</div></div><div class="card"><span class="muted">Fallbacks</span><div class="metric">${d.runs.filter(x=>x.fallback_from).length}</div></div></div><div class="section card"><h2>By provider</h2><table class="table"><tr><th>Provider</th><th>Runs</th><th>Tokens</th><th>Cost</th></tr>${Object.entries(by).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${v.runs}</td><td>${v.tokens.toLocaleString()}</td><td>$${v.cost.toFixed(6)}</td></tr>`).join('')}</table></div>`}
-function settings(d){return shell('Settings',btn('Run Doctor','doctor()'))+`<div class="grid3"><div class="card"><h2>Runtime</h2><p class="muted">AI Code owns workflow state in .ai-code. Provider credentials remain outside SQLite.</p><div class="field"><label>Dashboard refresh</label><select id="refresh"><option>2000</option><option selected>5000</option><option>10000</option></select></div></div><div class="card"><h2>Safety</h2><p class="muted">Planning is guarded by Claude Code plan mode plus Git dirty-state detection. Execution requires explicit approval and an isolated worktree.</p></div><div class="card"><h2>Diagnostics</h2><pre id="doctor">Run Doctor to inspect environment and credentials.</pre></div></div><div class="section card"><h2>Automation</h2><p class="muted">Webhook-ready automation definitions are persisted here. They do not claim to be a scheduler.</p>${(d.automations||[]).map(a=>`<div class="task"><div><b>${esc(a.name)}</b><div class="muted">${esc(a.trigger)} → ${esc(a.action)}</div></div>${status(a.enabled?'Enabled':'Disabled')}</div>`).join('')||'<div class="muted">No automation definitions.</div>'}</div>`}
-async function newProject(){const name=prompt('Project name');if(!name)return;const p=prompt('Absolute project path');if(!p)return;await api('/api/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name,path:p})});await load()}
-async function newTask(){if(!state.data.projects.length)return alert('Add a project first.');const p=prompt('Project ID:\n'+state.data.projects.map(x=>x.id+' — '+x.name).join('\n'));if(!p)return;const title=prompt('Task');if(!title)return;const t=await api('/api/tasks',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({projectId:p,title})});await load();showTask(t.id)}
-async function showTask(id){state.taskId=id;state.taskTab='plan';const x=await api('/api/tasks/'+id+'/show');renderTaskModal(x);connectTaskStream(id)}
-function renderTaskModal(x){const t=x.task;const tab=state.taskTab;let content='';if(tab==='plan')content=`<h3>Plan</h3><pre>${esc(t.plan||'No plan yet.')}</pre>`;if(tab==='execute')content=`<h3>Execution</h3><div class="kv"><b>State</b>${status(t.state)}<b>Worktree</b><code>${esc(t.worktree||'Not created')}</code><b>Branch</b><code>${esc(t.branch||'Not created')}</code><b>Base commit</b><code>${esc(t.base_commit||'Not created')}</code></div><h3>Runs</h3>${x.runs.map(runBlock).join('')}`;if(tab==='review')content=`<h3>Review</h3><pre>${esc(t.review||'No review yet.')}</pre>`;if(tab==='activity')content=`<h3>Live activity</h3><div id="events">${state.taskEvents.map(eventBlock).join('')||'<div class="muted">Waiting for events…</div>'}</div>`;$('#modal').innerHTML=`<div class="modal"><div><div class="top"><div><h1>${esc(t.title)}</h1><div class="row">${status(t.state)} <span class="muted">${t.id}</span></div></div>${btn('Close','closeTask()','secondary')}</div><div class="tabs">${['plan','execute','review','activity'].map(a=>`<button class="${tab===a?'active':''}" onclick="state.taskTab='${a}';renderTaskModal(${JSON.stringify(x).replace(/</g,'\\u003c')})">${a.toUpperCase()}</button>`).join('')}</div>${content}<div class="row" style="margin-top:18px">${t.state==='AWAITING_APPROVAL'?btn('Approve Plan',`action('${t.id}','approve')`):''}${t.state==='APPROVED'?btn('Execute',`action('${t.id}','execute')`):''}${t.state==='REVIEWING'?btn('Review',`action('${t.id}','review')`):''}${t.state==='REPAIRING'?btn('Repair',`action('${t.id}','repair')`):''}</div></div></div>`}
-function runBlock(r){return `<div class="task"><div><b>${esc(r.role)}</b><div class="muted">${esc(r.provider_id)}/${esc(r.model_id)}</div></div><div>${status(r.status)}<div class="muted">${Number(r.tokens||0).toLocaleString()} tokens · $${Number(r.cost||0).toFixed(6)}</div></div></div>`}function eventBlock(e){const d=typeof e.data==='string'?e.data:JSON.stringify(e.data,null,2);return `<div class="event"><b>${esc(e.type)}</b> <span class="muted">${esc(e.created_at)}</span><pre>${esc(d)}</pre></div>`}
-function connectTaskStream(id){if(state.stream)state.stream.close();state.taskEvents=[];state.stream=new EventSource('/api/tasks/'+id+'/stream');state.stream.addEventListener('event',e=>{state.taskEvents.push(JSON.parse(e.data));if(state.taskTab==='activity'){const x={task:state.data.tasks.find(t=>t.id===id)||{},runs:[]};renderTaskModal({...x,task:{...x.task}})}});state.stream.addEventListener('state',async e=>{const task=JSON.parse(e.data).task;const x=await api('/api/tasks/'+id+'/show');renderTaskModal(x);});state.stream.addEventListener('error',()=>{})}
-function closeTask(){if(state.stream)state.stream.close();state.stream=null;$('#modal').innerHTML=''}
-async function action(id,op){try{await api('/api/tasks/'+id+'/'+op,{method:'POST'});await load();const x=await api('/api/tasks/'+id+'/show');renderTaskModal(x)}catch(e){alert(e.message)}}
-async function configureProvider(id){const p=state.data.providers.find(x=>x.id===id),models=state.data.models.filter(x=>x.provider_id===id);$('#modal').innerHTML=`<div class="modal"><div><div class="top"><h1>Configure ${esc(p.name)}</h1>${btn('Close','closeTask()','secondary')}</div><div class="stack"><div class="field"><label>Enabled</label><select id="p-enabled"><option value="true" ${p.enabled?'selected':''}>Enabled</option><option value="false" ${!p.enabled?'selected':''}>Disabled</option></select></div><div class="field"><label>Routable</label><select id="p-routable"><option value="true" ${p.config?.routable!==false&&p.kind!=='mock'?'selected':''}>Eligible for automatic routing</option><option value="false" ${p.config?.routable===false||p.kind==='mock'?'selected':''}>Not eligible</option></select></div>${p.kind==='deepseek'?`<div class="field"><label>API key environment variable</label><input id="p-keyenv" value="${esc(p.config?.apiKeyEnv||'DEEPSEEK_API_KEY')}"></div><div class="field"><label>Default effort</label><select id="p-effort">${['low','medium','high','xhigh','max'].map(x=>`<option ${p.config?.effort===x?'selected':''}>${x}</option>`).join('')}</select></div>`:''}<div class="row">${btn('Save',`saveProvider('${id}')`)}</div><h2>Models</h2>${models.map(m=>`<div class="card"><div class="top"><b>${esc(m.name)}</b>${status(m.enabled?'Enabled':'Disabled')}</div><div class="grid3"><div class="field"><label>Quality</label><input id="q-${m.id}" type="number" step="0.1" value="${m.quality}"></div><div class="field"><label>Speed</label><input id="s-${m.id}" type="number" step="0.1" value="${m.speed}"></div><div class="field"><label>Enabled</label><select id="e-${m.id}"><option value="true" ${m.enabled?'selected':''}>Yes</option><option value="false" ${!m.enabled?'selected':''}>No</option></select></div></div><button class="secondary" onclick="saveModel('${m.id}')">Save model</button></div>`).join('')}</div></div></div>`}
-async function saveProvider(id){const p=state.data.providers.find(x=>x.id===id);const config={...p.config,routable:$('#p-routable').value==='true'};if($('#p-keyenv'))config.apiKeyEnv=$('#p-keyenv').value;if($('#p-effort'))config.effort=$('#p-effort').value;await api('/api/providers/'+id,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({enabled:$('#p-enabled').value==='true',config})});closeTask();await load()}
-async function saveModel(id){await api('/api/models/'+id,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({quality:Number($('#q-'+id).value),speed:Number($('#s-'+id).value),enabled:$('#e-'+id).value==='true'})});closeTask();await load()}
-async function toggleProvider(id,en){await api('/api/providers/'+id,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({enabled:en})});await load()}
-async function testProvider(id){const p=state.data.providers.find(x=>x.id===id);const models=state.data.models.filter(m=>m.provider_id===id&&m.enabled);const pick=prompt('Model ID to test (leave blank for first enabled):',models[0]?.id||'');const r=await api('/api/providers/'+id+'/test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({modelId:pick||undefined})});alert(JSON.stringify(r,null,2));await load()}
-async function addProvider(){const kind=prompt('Provider kind: claude-code or deepseek');if(!kind)return;const id=kind==='deepseek'?'deepseek-claude-code':'anthropic-claude-code';const name=kind==='deepseek'?'DeepSeek via Claude Code':'Anthropic / Claude Code';await api('/api/providers',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id,name,kind,enabled:true,config:{routable:true,apiKeyEnv:kind==='deepseek'?'DEEPSEEK_API_KEY':undefined,effort:'high'}})});await load()}
-async function saveRouting(){const roles=['planner','implementer','reviewer','repair'];const next={...state.data.routing};for(const role of roles){const pref=$('#preferred-'+role).value;const fallback=[$('#fallback1-'+role).value,$('#fallback2-'+role).value].filter(Boolean).filter(x=>x!==pref);next[role]={...next[role],strategy:$('#strategy-'+role).value,preferred:pref?[pref]:[],fallback,effort:$('#effort-'+role).value}}await api('/api/routing',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(next)});await load();alert('Routing saved')}
-async function doctor(){const x=await api('/api/doctor');$('#doctor').textContent=JSON.stringify(x,null,2)}
-document.querySelectorAll('.nav button').forEach(b=>b.onclick=()=>{state.view=b.dataset.view;render()});load();setInterval(()=>{if(!state.taskId)load()},5000);
-</script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>AI Code — Mission Control</title>
+<script type="importmap">
+{
+  "imports": {
+    "preact": "https://cdn.jsdelivr.net/npm/preact@10/dist/preact.module.js",
+    "preact/hooks": "https://cdn.jsdelivr.net/npm/preact@10/hooks/dist/hooks.module.js",
+    "htm": "https://cdn.jsdelivr.net/npm/htm@3/dist/htm.module.js",
+    "marked": "https://cdn.jsdelivr.net/npm/marked@15.0.12/lib/marked.esm.js",
+    "dompurify": "https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.es.mjs",
+    "ai-code/format": "/shared/format.mjs"
+  }
+}
+</script>
+<style>
+:root{
+  --bg:#0a0c10;
+  --panel:#11151b;
+  --panel2:#171c23;
+  --panel3:#1d232c;
+  --line:#29313c;
+  --text:#edf2f7;
+  --muted:#8e9aaa;
+  --accent:#9fb9ff;
+  --accent-dim:#4a6fa5;
+  --good:#6fe0a1;
+  --warn:#ffd37a;
+  --bad:#ff8585;
+  --radius:10px;
+  --radius-sm:6px;
+
+  /* ---- chart tokens ----
+     Categorical hues in fixed slot order (never cycled, never generated), plus
+     the chrome the inline SVG charts draw against. Both the eight hues and the
+     chrome were validated against this theme's --panel surface: every slot sits
+     inside the dark lightness band, clears the chroma floor, holds >= 3:1
+     contrast on the surface, and the worst adjacent pair clears the CVD and
+     normal-vision separation floors. Chart 1 is the default single-series hue. */
+  --chart-surface:#11151b;
+  --chart-grid:#242b35;
+  --chart-axis:#39424f;
+  --chart-1:#3987e5;
+  --chart-2:#d95926;
+  --chart-3:#199e70;
+  --chart-4:#c98500;
+  --chart-5:#d55181;
+  --chart-6:#008300;
+  --chart-7:#9085e9;
+  --chart-8:#e66767;
+  /* A series past the last categorical slot folds into "Other" and wears this
+     neutral instead of a generated hue. It clears 3:1 on --chart-surface. */
+  --chart-other:#8e9aaa;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--text);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Inter",ui-sans-serif,system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+button,input,select,textarea{font:inherit;color:inherit}
+h1,h2,h3{margin:0 0 8px;font-weight:650}
+h1{font-size:22px}
+h2{font-size:15px;color:var(--text)}
+h3{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.muted{color:var(--muted)}
+.link{color:var(--accent);text-decoration:none;font-weight:600}
+.link:hover{text-decoration:underline}
+
+/* ---- app shell ---- */
+.app-shell{display:grid;grid-template-columns:230px 1fr;min-height:100vh}
+.sidebar{border-right:1px solid var(--line);padding:22px 14px;background:#0d1014;display:flex;flex-direction:column}
+.logo{padding:0 10px 26px}
+.logo-title{font-weight:800;font-size:17px;letter-spacing:.03em}
+.logo-sub{font-size:12px;margin-top:2px}
+.nav{display:flex;flex-direction:column;gap:2px}
+.nav-item{display:block;padding:9px 10px;border-radius:var(--radius-sm);color:var(--muted);text-decoration:none;font-weight:550;font-size:13.5px}
+.nav-item:hover{background:var(--panel2);color:var(--text)}
+.nav-item.active{background:var(--panel2);color:var(--text);box-shadow:inset 2px 0 0 var(--accent)}
+.main-col{display:flex;flex-direction:column;min-width:0}
+.app-header{padding:22px 34px 0;max-width:1550px;width:100%}
+.header-title{font-size:22px;font-weight:700}
+.content{padding:18px 34px 40px;max-width:1550px;width:100%}
+
+/* ---- primitives ---- */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:17px}
+.section{margin-top:26px}
+.section.card{margin-top:20px}
+.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.stack{display:grid;gap:12px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
+.kv-grid{display:grid;grid-template-columns:140px 1fr;gap:8px 12px;padding-top:8px}
+
+button{background:var(--accent);color:#0b0d10;border:0;border-radius:var(--radius-sm);padding:9px 14px;font-weight:650;cursor:pointer;transition:opacity .15s}
+button:hover{opacity:.9}
+button:disabled{opacity:.5;cursor:default}
+.btn.secondary{background:var(--panel3);color:var(--text);border:1px solid var(--line)}
+.btn.danger{background:#351b1b;color:#ffb5b5}
+
+.input{width:100%;background:#0b0e12;color:var(--text);border:1px solid var(--line);padding:9px 10px;border-radius:var(--radius-sm);outline:none}
+.input:focus{border-color:var(--accent-dim)}
+.field{display:grid;gap:6px}
+.field-label{font-size:12px;color:var(--muted);font-weight:600}
+.inline-form{display:grid;gap:12px;margin-bottom:16px}
+textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical}
+
+.badge{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px 9px;font-size:11.5px;font-weight:650;color:var(--muted);white-space:nowrap}
+.badge-good{color:var(--good);border-color:#2c5c46}
+.badge-bad{color:var(--bad);border-color:#5c2c2c}
+.badge-warn{color:var(--warn);border-color:#5c4f2c}
+.badge-neutral{color:var(--muted)}
+
+.list{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.list-row{display:flex;justify-content:space-between;align-items:center;gap:15px;background:var(--panel);border:1px solid var(--line);padding:14px 16px;border-radius:var(--radius-sm)}
+.list-row.clickable{cursor:pointer}
+.list-row.clickable:hover{border-color:var(--accent-dim)}
+.list-row-main{display:flex;flex-direction:column;gap:3px}
+.list-row-side{display:flex;align-items:center;gap:12px}
+
+.empty-state{text-align:center;padding:36px 20px;color:var(--muted);display:grid;gap:12px;justify-items:center}
+
+.spinner-wrap{display:flex;align-items:center;gap:10px;padding:18px 4px}
+.spinner{width:16px;height:16px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--accent);animation:spin .7s linear infinite;flex:0 0 auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.toast-stack{position:fixed;top:18px;right:18px;display:flex;flex-direction:column;gap:8px;z-index:1000}
+.toast{background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:11px 16px;box-shadow:0 6px 20px rgba(0,0,0,.35);font-size:13px;min-width:220px;max-width:360px;animation:toast-in .15s ease}
+.toast-success{border-color:#2c5c46;color:var(--good)}
+.toast-error{border-color:#5c2c2c;color:var(--bad)}
+.toast-info{color:var(--text)}
+@keyframes toast-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+
+.code-block{white-space:pre-wrap;word-break:break-word;background:#090b0e;border:1px solid var(--line);border-radius:var(--radius);padding:16px;max-height:480px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.error-text{color:var(--bad)}
+
+/* ---- markdown ---- */
+/* Prose rendered from a plan or a review. Every rule is scoped under .md because
+   the base rules for h1/h2/h3 (:67-70) are sized for chrome, not for a document:
+   h3 is uppercased, letter-spaced and muted, which would render a plan's "### Step"
+   as shouting grey caps. Inheritance is not enough there, so h3 is restated. */
+.md{word-break:break-word;background:#090b0e;border:1px solid var(--line);border-radius:var(--radius);padding:16px;max-height:480px;overflow:auto;font-size:13.5px;line-height:1.65}
+.md h1,.md h2,.md h3{margin:18px 0 8px;font-weight:650;color:var(--text)}
+.md h1{font-size:19px}
+.md h2{font-size:16px}
+.md h3{font-size:14px;color:var(--text);text-transform:none;letter-spacing:normal}
+/* The container's own padding supplies the outer gap, so leading and trailing
+   margins would double it up at the top and bottom of the block. */
+.md> :first-child{margin-top:0}
+.md> :last-child{margin-bottom:0}
+.md p{margin:0 0 11px}
+.md ul,.md ol{margin:0 0 11px;padding-left:20px}
+.md li{margin:2px 0}
+.md li>ul,.md li>ol{margin-bottom:0}
+/* Inline code sits on a lighter surface than the .md background, and a fenced
+   block sits on the card surface so it stays legible as a distinct block rather
+   than a hole in the prose. */
+.md code{background:var(--panel3);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.md pre{margin:0 0 11px;padding:12px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-sm);overflow:auto;white-space:pre}
+.md pre code{background:none;border:0;padding:0;font-size:12.5px}
+.md blockquote{margin:0 0 11px;padding:0 0 0 12px;border-left:2px solid var(--accent-dim);color:var(--muted)}
+.md table{width:100%;border-collapse:collapse;margin:0 0 11px}
+.md th,.md td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.md th{color:var(--muted);font-weight:600;font-size:12.5px}
+.md hr{border:0;border-top:1px solid var(--line);margin:16px 0}
+/* Underlined at rest, unlike the app's own .link: a link inside a document is a
+   link, and every one of these now opens a new tab, which a reader should see
+   coming. Stated explicitly rather than left to the UA stylesheet. */
+.md a{color:var(--accent);text-decoration:underline}
+.md img{max-width:100%}
+
+/* ---- metrics ---- */
+.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+/* min-width:0 stops the charts' measured SVG width from feeding back into the
+   grid track and widening the column past the viewport. */
+.metric-card{display:flex;flex-direction:column;gap:6px;min-width:0}
+.metric-label{font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.metric-value{font-size:27px;font-weight:750}
+.metric-note{font-size:11.5px}
+
+/* ---- charts ---- */
+.chart-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:22px;align-items:start}
+.chart-card{margin:0;min-width:0;overflow:visible}
+.chart-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:4px}
+.chart-head h2{margin:0}
+.chart-toggle{padding:5px 10px;font-size:12px}
+.chart-figure{position:relative;margin-top:10px;min-width:0}
+/* Clamp the first paint (before the ResizeObserver reports) to the container,
+   so a chart never pushes the page wide for a frame. */
+.chart-figure svg{max-width:100%}
+.chart-svg{display:block;outline:none}
+.chart-svg:focus-visible{outline:2px solid var(--accent-dim);outline-offset:2px;border-radius:var(--radius-sm)}
+.chart-hit{cursor:crosshair}
+.chart-tick{fill:var(--muted);font-size:10.5px;font-variant-numeric:tabular-nums}
+.chart-cat{fill:var(--text);font-size:12px}
+.chart-value{fill:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.chart-bar{transition:filter .12s}
+.chart-bar-row:hover .chart-bar{filter:brightness(1.18)}
+.chart-bar-row:focus-visible{outline:2px solid var(--accent-dim);outline-offset:2px}
+.chart-nodata{margin:14px 0}
+.sparkline{margin-top:2px;min-height:34px}
+.sparkline svg{display:block}
+.chart-tip{position:absolute;top:0;transform:translateX(-50%);background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:6px 10px;pointer-events:none;box-shadow:0 6px 20px rgba(0,0,0,.4);white-space:nowrap;z-index:2}
+.chart-tip-row{display:flex;align-items:center;gap:7px}
+.chart-tip-key{width:12px;height:2px;border-radius:1px;flex:0 0 auto}
+.chart-tip-value{font-weight:700;font-size:13px;font-variant-numeric:tabular-nums}
+.chart-tip-label{font-size:11.5px;color:var(--muted);margin-top:1px}
+/* Multi-series tooltip: one row per series, each value beside the swatch that
+   identifies it. Capped so the box can never widen the page - chart cards have
+   no scroll container of their own. */
+.chart-tip-multi{max-width:min(240px,100%);white-space:normal}
+.chart-tip-head{font-size:11.5px;color:var(--muted);margin-bottom:4px}
+.chart-tip-multi .chart-tip-key{width:10px;height:10px;border-radius:2px}
+.chart-tip-multi .chart-tip-value{font-size:11.5px;font-weight:600;margin-left:auto}
+.chart-tip-name{flex:1 1 auto;min-width:0;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Legend: the identity channel for a multi-series chart. The swatch carries the
+   hue, the text stays in an ink token, and the series total rides along so the
+   chart is readable without hovering. */
+.legend{list-style:none;display:flex;flex-wrap:wrap;gap:4px 14px;margin:10px 0 0;padding:0}
+.legend-item{display:flex;align-items:center;gap:6px;font-size:12px;min-width:0}
+.legend-key{width:10px;height:10px;border-radius:2px;flex:0 0 auto}
+.legend-label{color:var(--text)}
+.legend-value{color:var(--muted);font-variant-numeric:tabular-nums}
+.chart-note{margin:10px 0 0;font-size:12px}
+
+/* Refetching keeps the previous render in place at reduced opacity rather than
+   flashing a skeleton and jumping the layout. */
+.is-refetching .metric-grid,.is-refetching .chart-grid,.is-refetching .section{opacity:.55;transition:opacity .15s}
+
+.table-scroll{overflow-x:auto;overscroll-behavior-x:contain}
+
+/* ---- segmented control (period selector) ---- */
+.seg{display:inline-flex;gap:2px;background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:2px}
+.seg-btn{background:transparent;color:var(--muted);padding:6px 12px;border-radius:4px;font-weight:600;font-size:12.5px}
+.seg-btn:hover{color:var(--text);opacity:1}
+.seg-btn.active{background:var(--panel3);color:var(--text)}
+
+/* ---- keyboard shortcuts ---- */
+.kbd{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 6px;background:var(--panel3);border:1px solid var(--line);border-bottom-width:2px;border-radius:var(--radius-sm);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;font-weight:600;color:var(--text)}
+.kbd-keys{display:inline-flex;gap:4px;flex:0 0 auto}
+.kbd-hint{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+.kbd-overlay{position:fixed;inset:0;background:rgba(4,6,9,.62);display:flex;align-items:flex-start;justify-content:center;padding:80px 16px 24px;overflow-y:auto;z-index:900}
+.kbd-legend{width:100%;max-width:440px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.kbd-legend-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+.kbd-list{list-style:none;margin:0;padding:0;display:grid;gap:0}
+.kbd-row{display:flex;align-items:center;gap:14px;padding:9px 4px;border-bottom:1px solid var(--line)}
+.kbd-row:last-child{border-bottom:0}
+.kbd-row-label{font-size:13px}
+
+/* ---- toolbar / tabs ---- */
+.view-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line)}
+.tab{background:transparent;color:var(--muted);border-radius:0;padding:9px 14px;font-weight:600}
+.tab:hover{background:transparent;color:var(--text);opacity:1}
+.tab.active{color:var(--text);border-bottom:2px solid var(--accent)}
+.tab-count{color:var(--muted);font-weight:500;font-size:12px}
+.tab.active .tab-count{color:var(--accent)}
+.tab-content{margin-top:16px}
+
+/* ---- task detail ---- */
+.task-header{display:flex;justify-content:space-between;align-items:flex-start;gap:15px;margin-bottom:6px}
+.task-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px;margin-top:6px}
+.task-description{margin:10px 0 0;color:var(--muted);font-size:13.5px;line-height:1.55;max-width:700px}
+.action-bar{margin-top:22px;padding-top:16px;border-top:1px solid var(--line);display:flex;justify-content:flex-end}
+.activity-box{position:relative;max-height:560px;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
+.activity-notice{position:sticky;top:-14px;z-index:2;margin:-14px -14px 10px;padding:9px 14px;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.link-btn{background:none;border:0;padding:0;color:var(--accent);font:inherit;font-size:12px;font-weight:600;text-decoration:underline;cursor:pointer}
+.link-btn:hover{opacity:1;text-decoration:none}
+.jump-btn{position:sticky;bottom:10px;margin:10px auto 0;display:block}
+
+/* ---- event stream ---- */
+.event-stream{display:flex;flex-direction:column;gap:8px}
+.event-row{display:flex;align-items:baseline;gap:10px;border-left:2px solid var(--line);padding:6px 0 6px 12px;font-size:13px}
+.event-msg{flex:1;word-break:break-word}
+.event-time{font-size:11.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+/* The left rule carries the kind, so a column of rows can be scanned without reading
+   every badge. Quiet kinds - a tool's output, a reasoning trace, a notice - recede
+   to the muted colour; they are context for the row above them, not news. */
+.event-row.kind-said{border-left-color:var(--accent-dim)}
+.event-row.kind-tool{border-left-color:var(--accent)}
+.event-row.kind-done{border-left-color:var(--good)}
+.event-row.kind-error{border-left-color:var(--bad)}
+.event-row.kind-limit{border-left-color:var(--warn)}
+.event-row.kind-out .event-msg,.event-row.kind-think .event-msg,.event-row.kind-note .event-msg{color:var(--muted)}
+.event-row.kind-think .event-msg{font-style:italic}
+
+/* ---- diff viewer ---- */
+/* A diff is read by scrolling down, so a line too wide for the pane wraps rather
+   than scrolling the pane sideways. `pre-wrap` keeps the indentation that makes a
+   diff readable; `anywhere` covers the lines that overflow at all - a minified
+   bundle, a base64 blob, a long path - which `break-word` leaves overflowing. */
+.diff-text{white-space:pre-wrap;overflow-wrap:anywhere;flex:1 1 auto;min-width:0}
+/* Next steps in the port tab: a numbered list where each step may carry the command
+   that performs it. The command is a block rather than inline, so it can be selected
+   and copied whole instead of by drag. */
+.steps{margin:0;padding-left:20px;display:grid;gap:10px;font-size:13px}
+.steps li{padding-left:2px}
+.steps .code-block{margin:6px 0 0}
+.diff-modes{display:flex;gap:6px;justify-content:flex-end;margin-bottom:8px}
+.diff-modes .btn{padding:5px 11px;font-size:11.5px;font-weight:600}
+.diff-modes .btn.on{color:var(--accent);border-color:var(--accent-dim)}
+.diff-viewer{background:#090b0e;border:1px solid var(--line);border-radius:var(--radius);overflow:auto;max-height:520px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.diff-line{display:flex;gap:10px;padding:1px 10px}
+.diff-lineno{color:var(--muted);width:36px;text-align:right;flex:0 0 auto;user-select:none}
+.diff-add{background:rgba(111,224,161,.10);color:var(--good)}
+.diff-del{background:rgba(255,133,133,.10);color:var(--bad)}
+.diff-hunk{color:var(--accent);background:rgba(159,185,255,.08)}
+.diff-file,.diff-meta{color:var(--muted)}
+/* Split view. Each row is its own two-column grid rather than one grid for the whole
+   diff, so a span - a file header, a mode change, a hunk header - takes the width
+   without a row being introduced to hold it. `min-width:0` on the cell and the text
+   is what keeps every row's columns at exactly half: without it a long unbroken line
+   widens its own column and the two halves of the diff stop lining up. */
+.diff-row{display:grid;grid-template-columns:1fr 1fr}
+.diff-cell{display:flex;gap:10px;padding:1px 10px;min-width:0}
+.diff-cell+.diff-cell{border-left:1px solid var(--line)}
+.diff-span{padding:1px 10px}
+.diff-blank{background:rgba(255,255,255,.02)}
+
+/* ---- providers ---- */
+.provider-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.provider-card{display:grid;gap:12px}
+.provider-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+/* Circuit-breaker dot. The state is in the title attribute, so the card head
+   stays one line and needs no extra column. */
+.health{display:inline-block;flex:0 0 auto;width:8px;height:8px;border-radius:50%}
+.health.good{background:var(--good)}
+.health.warn{background:var(--warn)}
+.health.bad{background:var(--bad)}
+.model-list{display:grid;gap:8px}
+.model-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 12px}
+.test-result{border-radius:var(--radius-sm);padding:9px 11px;font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;word-break:break-word}
+.test-result.good{background:rgba(111,224,161,.08);color:var(--good);border:1px solid #2c5c46}
+.test-result.bad{background:rgba(255,133,133,.08);color:var(--bad);border:1px solid #5c2c2c}
+
+/* ---- data table ---- */
+.data-table{width:100%;border-collapse:collapse}
+.data-table th,.data-table td{padding:11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.data-table th{color:var(--muted);font-weight:600;font-size:12.5px;user-select:none}
+.data-table th.sortable{cursor:pointer}
+.data-table th.sortable:hover{color:var(--text)}
+.sort-arrow{margin-left:4px;font-size:10px}
+.data-table tr.clickable{cursor:pointer}
+.data-table tr.clickable:hover td{background:var(--panel2)}
+
+@media(max-width:1000px){
+  .app-shell{grid-template-columns:1fr}
+  .sidebar{display:none}
+  .metric-grid,.provider-grid,.grid3{grid-template-columns:1fr 1fr}
+  .chart-grid{grid-template-columns:1fr}
+  .app-header,.content{padding-left:20px;padding-right:20px}
+}
+@media(max-width:650px){
+  /* Metric cards stay paired - four full-width count cards is a lot of scroll
+     for four short numbers. Everything else goes single column. */
+  .metric-grid{grid-template-columns:1fr 1fr}
+  .provider-grid,.grid3,.chart-grid{grid-template-columns:1fr}
+  .list-row{flex-direction:column;align-items:flex-start}
+  .kv-grid{grid-template-columns:1fr}
+  .app-header,.content{padding-left:14px;padding-right:14px}
+  .app-header{padding-top:16px}
+  .content{padding-bottom:28px}
+  .card{padding:14px}
+  .header-title{font-size:19px}
+  .metric-value{font-size:23px}
+  /* Long titles and paths must break rather than widen the page. */
+  .list-row-main{min-width:0}
+  .list-row-main b,.list-row-main span{overflow-wrap:anywhere}
+  .list-row-side{flex-wrap:wrap}
+  .view-toolbar{gap:8px}
+  .seg-btn{padding:6px 10px}
+  .kbd-overlay{padding:24px 12px}
+  /* Toasts are fixed, so an oversized one is clipped rather than scrolled -
+     pin them to the viewport edges instead. */
+  .toast-stack{left:14px;right:14px}
+  .toast{min-width:0;max-width:none}
+  .data-table th,.data-table td{padding:9px 8px}
+  .md th,.md td{padding:7px 6px}
+  /* A wide table gets its own horizontal scroll instead of pushing the whole
+     page sideways. Chart cards are excluded on purpose: a scroll container on
+     one axis forces the other to auto, which would clip the chart tooltip. */
+  .card:not(:has(.chart-figure)){overflow-x:auto;overscroll-behavior-x:contain}
+}
+/* Narrow phones: a two-up metric row leaves too little room for the value. */
+@media(max-width:400px){
+  .metric-grid{grid-template-columns:1fr}
+  .metric-value{font-size:21px}
+}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script type="module" src="/app.mjs"></script>
+</body>
+</html>

@@ -1,26 +1,348 @@
-import http from 'node:http';import fs from 'node:fs';import {Service} from './service.mjs';
-const root=process.env.AI_CODE_ROOT||process.cwd();const svc=new Service(root);const port=Number(process.env.PORT||4317);
-const json=(res,x,status=200)=>{res.writeHead(status,{'content-type':'application/json; charset=utf-8','access-control-allow-origin':'*'});res.end(JSON.stringify(x))};
-const body=req=>new Promise((resolve,reject)=>{let b='';req.on('data',c=>b+=c);req.on('end',()=>{try{resolve(b?JSON.parse(b):{})}catch(e){reject(e)}})});
-const html=fs.readFileSync(new URL('../web/index.html',import.meta.url),'utf8');
-const noBody=['GET','HEAD'].includes;const routeTask=/^\/api\/tasks\/([^/]+)\/(plan|approve|execute|review|repair|show|activity)$/;const routeRun=/^\/api\/runs\/([^/]+)\/events$/;
-function sse(res){res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache','connection':'keep-alive','access-control-allow-origin':'*'});}
-async function taskStream(req,res,id){sse(res);let last=0;let ticks=0;const timer=setInterval(()=>{try{const task=svc.task(id);const events=svc.store.listTaskEvents(id,last);for(const e of events){last=Math.max(last,e.id);res.write(`event: event\ndata: ${JSON.stringify(e)}\n\n`)}res.write(`event: state\ndata: ${JSON.stringify({task})}\n\n`);if(['COMPLETE','FAILED'].includes(task.state)||ticks++>360){clearInterval(timer);res.end()}}catch(e){clearInterval(timer);res.write(`event: error\ndata: ${JSON.stringify({error:e.message})}\n\n`);res.end()}},500);req.on('close',()=>clearInterval(timer));}
-const server=http.createServer(async(req,res)=>{try{const u=new URL(req.url,`http://${req.headers.host}`);if(u.pathname==='/'){res.writeHead(200,{'content-type':'text/html; charset=utf-8'});return res.end(html)}
-if(u.pathname==='/api/overview')return json(res,{projects:svc.store.listProjects(),tasks:svc.store.listTasks(),runs:svc.store.listRuns(),providers:svc.store.listProviders(),models:svc.store.listModels(),automations:svc.store.listAutomations(),routing:svc.getRouting()});
-if(u.pathname==='/api/projects'){if(req.method==='GET')return json(res,svc.store.listProjects());const b=await body(req);return json(res,svc.initProject(b.name,b.path),201)}
-if(u.pathname==='/api/tasks'){if(req.method==='GET')return json(res,svc.store.listTasks(u.searchParams.get('projectId')));const b=await body(req);const t=svc.createTask(b.projectId,b.title);return json(res,svc.prepare(t.id),201)}
-let m=u.pathname.match(routeTask);if(m){const id=m[1],op=m[2];if(op==='activity')return json(res,{task:svc.task(id),runs:svc.store.listRuns(id),events:svc.store.listTaskEvents(id)});if(op==='show')return json(res,{task:svc.task(id),runs:svc.store.listRuns(id)});const r=op==='plan'?await svc.plan(id):op==='approve'?svc.approve(id):op==='execute'?await svc.execute(id):op==='review'?await svc.review(id):await svc.repair(id);return json(res,r)}
-if(u.pathname.match(/^\/api\/tasks\/([^/]+)\/stream$/)){return taskStream(req,res,u.pathname.split('/')[3])}
-if(u.pathname==='/api/providers'){if(req.method==='GET')return json(res,{providers:svc.store.listProviders(),models:svc.store.listModels()});const b=await body(req);return json(res,svc.addProvider(b),201)}
-const pm=u.pathname.match(/^\/api\/providers\/([^/]+)$/);if(pm){const id=pm[1];if(req.method==='PATCH')return json(res,svc.updateProvider(id,await body(req)));if(req.method==='DELETE'){if(svc.store.getProvider(id)?.kind==='mock')return json(res,{error:'Test provider cannot be deleted'},400);svc.store.updateProvider(id,{enabled:false});return json(res,svc.store.getProvider(id))}}
-const pt=u.pathname.match(/^\/api\/providers\/([^/]+)\/test$/);if(pt){const b=await body(req);return json(res,await svc.testProvider(pt[1],b.modelId))}
-const mm=u.pathname.match(/^\/api\/models\/([^/]+)$/);if(mm&&req.method==='PATCH')return json(res,svc.updateModel(mm[1],await body(req)));
-if(u.pathname==='/api/routing'){if(req.method==='GET')return json(res,svc.getRouting());const b=await body(req);return json(res,svc.saveRouting(b));}
-if(u.pathname==='/api/runs')return json(res,svc.store.listRuns(u.searchParams.get('taskId')));if(u.pathname.match(routeRun))return json(res,svc.store.listEvents(u.pathname.split('/')[3],Number(u.searchParams.get('after')||0)));
-if(u.pathname==='/api/doctor')return json(res,await svc.doctor());
-if(u.pathname==='/api/automations'){if(req.method==='GET')return json(res,svc.store.listAutomations());const b=await body(req);return json(res,svc.store.addAutomation({id:svc.store.id(),name:b.name,trigger:b.trigger,action:b.action,enabled:b.enabled!==false,createdAt:new Date().toISOString()}),201)}
-const am=u.pathname.match(/^\/api\/automations\/([^/]+)$/);if(am&&req.method==='PATCH')return json(res,svc.store.updateAutomation(am[1],await body(req)));
-if(u.pathname.startsWith('/api/webhooks/')){const trigger=u.pathname.split('/').pop();const b=await body(req);const matches=svc.store.listAutomations().filter(a=>a.enabled&&a.trigger===trigger);const created=[];for(const a of matches)if(b.projectId&&b.title)created.push(svc.prepare(svc.createTask(b.projectId,b.title).id));return json(res,{trigger,matched:matches.length,created})}
-return json(res,{error:'not found'},404)}catch(e){return json(res,{error:e.message,stack:process.env.NODE_ENV==='development'?e.stack:undefined},400)}});
-server.listen(port,()=>console.log(`AI Code Mission Control: http://localhost:${port}`));
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { Service } from './service.mjs';
+import { Runner } from './runner.mjs';
+
+const root = process.env.AI_CODE_ROOT || process.cwd();
+// One Service for the whole process. Every request shares it, so the in-process
+// run registry (`svc.active`) is visible to the cancel route.
+// The mock provider is how an install with no real provider still runs a task,
+// and it is the only way to drive this server end to end without spawning a real
+// agent. Off unless the environment asks for it, so no real install can route to
+// it by accident.
+const svc = new Service(root, { allowMock: process.env.AI_CODE_ALLOW_MOCK === '1' });
+// The background queue, and the only thing in the system that runs work the
+// request that asked for it is not waiting on. Sharing the process with the
+// Service is what lets it count a provider's in-flight runs, whichever started them.
+const runner = new Runner(svc);
+svc.runner = runner;
+const port = Number(process.env.PORT || 4317);
+
+const json = (res, x, status = 200) => {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' });
+  res.end(JSON.stringify(x));
+};
+
+const body = (req) =>
+  new Promise((resolve, reject) => {
+    let b = '';
+    req.on('data', (c) => (b += c));
+    req.on('end', () => {
+      try {
+        resolve(b ? JSON.parse(b) : {});
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+
+const routeTask = /^\/api\/tasks\/([^/]+)\/(plan|approve|execute|implement|test|review|repair|reject|replan|refine|diff|port|cancel|show|activity)$/;
+// The one route that always queues rather than blocks. Matched before routeTask,
+// whose pattern has no room for the extra path segment.
+const routeBackground = /^\/api\/tasks\/([^/]+)\/execute\/background$/;
+const routeRun = /^\/api\/runs\/([^/]+)\/events$/;
+
+const sse = (res) => {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+    'access-control-allow-origin': '*',
+  });
+};
+
+// The activity tab replays a bounded backlog on connect, not the whole journal.
+const STREAM_TAIL = 500;
+// Absolute cap on a stream's life. A task that never reaches a terminal state
+// (a cancelled task reverts to APPROVED) would otherwise hold the connection open
+// indefinitely.
+const STREAM_MAX_TICKS = 360;
+
+// The states in which work is happening or about to. A task in one of these is
+// live even if no agent is running this instant - the test command runs in the
+// gap between two runs and is still the task being worked on.
+const WORKING_STATES = new Set(['PLANNING', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING']);
+
+// Server-sent events. Frame types: `meta` once on connect, `event` per new event,
+// and `state` on every tick so the client always ends on the current state.
+function taskStream(req, res, id) {
+  sse(res);
+  let last = 0;
+  let seeded = false;
+  let ticks = 0;
+  // Whether this stream has ever seen the task move. A cancelled task reverts to
+  // APPROVED, so "not working" alone cannot end the stream: a task that was
+  // never working would end it on the first tick, and the Activity tab would
+  // lose its live tail the moment someone opened it on a resting task.
+  let sawLive = false;
+  const timer = setInterval(() => {
+    try {
+      const task = svc.task(id);
+      if (!seeded) {
+        seeded = true;
+        res.write(`event: meta\ndata: ${JSON.stringify({ tail: STREAM_TAIL, total: svc.store.countTaskEvents(id) })}\n\n`);
+      }
+      // The first tick sends the tail; after that, only what arrived since `last`.
+      const events = seeded && !last ? svc.store.tailTaskEvents(id, STREAM_TAIL) : svc.store.listTaskEvents(id, last);
+      for (const e of events) {
+        last = Math.max(last, e.id);
+        res.write(`event: event\ndata: ${JSON.stringify(e)}\n\n`);
+      }
+      // Written before the termination check, so the last frame a client sees is
+      // the terminal state rather than the one before it.
+      res.write(`event: state\ndata: ${JSON.stringify({ task })}\n\n`);
+
+      const live = WORKING_STATES.has(task.state) || svc.store.taskHasLiveRun(id);
+      if (live) sawLive = true;
+      const done = ['COMPLETE', 'FAILED'].includes(task.state) || (!live && sawLive);
+      if (done || ticks++ > STREAM_MAX_TICKS) {
+        clearInterval(timer);
+        res.end();
+      }
+    } catch (e) {
+      clearInterval(timer);
+      res.write(`event: error\ndata: ${JSON.stringify({ error: e.message })}\n\n`);
+      res.end();
+    }
+  }, 500);
+  req.on('close', () => clearInterval(timer));
+}
+
+const webDir = new URL('../web/', import.meta.url).pathname;
+// The dashboard and the CLI share one set of formatters. The one file is
+// published to the browser rather than copied into the web bundle, where it would
+// drift. An allowlist rather than a mount of src/: nothing else in there is
+// browser-safe, and a directory mount would publish all of it.
+const SHARED_MODULES = { '/shared/format.mjs': new URL('../src/format.mjs', import.meta.url).pathname };
+const mimeTypes = {
+  '.html': 'text/html',
+  '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+};
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const u = new URL(req.url, `http://${req.headers.host}`);
+
+    // Anything outside /api is the dashboard's static bundle.
+    if (!/^\/api(\/|$)/.test(u.pathname)) {
+      if (SHARED_MODULES[u.pathname]) {
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'access-control-allow-origin': '*' });
+        return res.end(fs.readFileSync(SHARED_MODULES[u.pathname]));
+      }
+      const staticPath = path.join(webDir, u.pathname === '/' ? 'index.html' : u.pathname);
+      const ext = path.extname(staticPath);
+      // The startsWith check keeps a traversal path from escaping the web root.
+      if (ext && staticPath.startsWith(webDir) && fs.existsSync(staticPath)) {
+        res.writeHead(200, { 'content-type': (mimeTypes[ext] || 'application/octet-stream') + '; charset=utf-8', 'access-control-allow-origin': '*' });
+        return res.end(fs.readFileSync(staticPath));
+      }
+    }
+
+    if (u.pathname === '/api/overview') {
+      return json(res, {
+        projects: svc.store.listProjects(),
+        tasks: svc.store.listTasks(),
+        runs: svc.store.listRuns(),
+        providers: svc.store.listProviders(),
+        models: svc.store.listModels(),
+        automations: svc.store.listAutomations(),
+        routing: svc.getRouting(),
+        health: svc.providerHealthList(),
+        // Only the ones still moving. A finished job is history, and the overview
+        // is the view that answers "what is happening right now".
+        jobs: svc.store.activeJobs(),
+      });
+    }
+
+    if (u.pathname === '/api/projects') {
+      if (req.method === 'GET') return json(res, svc.store.listProjects());
+      const b = await body(req);
+      return json(res, svc.initProject(b.name, b.path), 201);
+    }
+
+    if (u.pathname === '/api/tasks') {
+      if (req.method === 'GET') {
+        let tasks = svc.store.listTasks(u.searchParams.get('projectId'));
+        const states = u.searchParams.get('state');
+        if (states) tasks = tasks.filter((t) => states.split(',').includes(t.state));
+        return json(res, tasks);
+      }
+      const b = await body(req);
+      const t = svc.createTask(b.projectId, b.title);
+      return json(res, svc.prepare(t.id), 201);
+    }
+
+    // Queued work, answered with the job row. `enqueue` throws when the task
+    // already has a job, which the error handler turns into a 400 that says so.
+    const bg = u.pathname.match(routeBackground);
+    if (bg) return json(res, runner.enqueue(bg[1], 'execute'), 202);
+
+    // A PATCH on /plan is the plan editor, handled below, so it is excluded here.
+    let m = u.pathname.match(routeTask);
+    if (m && !(m[2] === 'plan' && req.method === 'PATCH')) {
+      const id = m[1];
+      const op = m[2];
+      if (op === 'activity') {
+        const limit = Math.min(Number(u.searchParams.get('limit') || 500) || 500, 2000);
+        const before = Number(u.searchParams.get('before') || 0);
+        return json(res, {
+          task: svc.task(id),
+          runs: svc.store.listRuns(id),
+          events: before ? svc.store.pageTaskEvents(id, before, limit) : svc.store.tailTaskEvents(id, limit),
+          total: svc.store.countTaskEvents(id),
+        });
+      }
+      // The branch list rides on `show` rather than getting an endpoint of its own:
+      // it is a fixed read of the repository, and the port form needs it on the same
+      // render as the task it would port.
+      if (op === 'show') return json(res, { task: svc.task(id), runs: svc.store.listRuns(id), branches: svc.destinations(id) });
+      if (op === 'refine') {
+        const b = await body(req);
+        return json(res, await svc.refine(id, b.feedback));
+      }
+      // Read-only, so its one option rides in the query string: the dashboard asks
+      // this with a GET, unlike every other op here.
+      if (op === 'diff') return json(res, svc.diff(id, { to: u.searchParams.get('to') || undefined }));
+      // The one verb here that moves a ref. Its options come from the body, and
+      // everything it declines to do it declines without writing anything.
+      if (op === 'port') {
+        const b = await body(req);
+        return json(res, await svc.port(id, { to: b.to, dryRun: !!b.dryRun, clean: !!b.clean }));
+      }
+      // The three step routes run inline unless the caller asks for a job, which
+      // is what keeps the dashboard's existing buttons on their blocking contract.
+      // execute reads the body too: it reaches implement() through execute(), and
+      // that is where an override of the dirty-baseline refusal is honoured.
+      let opts = {};
+      if (op === 'implement' || op === 'execute' || op === 'test' || (op === 'review' && req.method === 'POST')) {
+        const b = await body(req);
+        if (b.background) return json(res, runner.enqueue(id, op), 202);
+        opts = { force: !!b.force };
+      }
+      const r =
+        op === 'plan' ? await svc.plan(id)
+        : op === 'approve' ? svc.approve(id)
+        : op === 'execute' ? await svc.execute(id, opts)
+        : op === 'implement' ? await svc.implement(id, opts)
+        : op === 'test' ? await svc.runTests(id)
+        : op === 'review' ? await svc.review(id)
+        : op === 'repair' ? await svc.repair(id)
+        : op === 'reject' ? svc.reject(id)
+        : op === 'replan' ? svc.replan(id)
+        : op === 'cancel' ? svc.cancelTask(id)
+        : null;
+      if (r === null) return json(res, { error: 'unknown operation' }, 400);
+      return json(res, r);
+    }
+
+    const planMatch = u.pathname.match(/^\/api\/tasks\/([^/]+)\/plan$/);
+    if (planMatch && req.method === 'PATCH') {
+      const b = await body(req);
+      return json(res, svc.updatePlan(planMatch[1], b.plan));
+    }
+    if (u.pathname.match(/^\/api\/tasks\/([^/]+)\/stream$/)) {
+      return taskStream(req, res, u.pathname.split('/')[3]);
+    }
+
+    if (u.pathname === '/api/providers') {
+      if (req.method === 'GET') return json(res, { providers: svc.store.listProviders(), models: svc.store.listModels(), health: svc.providerHealthList() });
+      const b = await body(req);
+      return json(res, svc.addProvider(b), 201);
+    }
+
+    // The circuit-breaker state for one provider. `providerHealthList` is already
+    // computed for the whole set, so there is no separate single-provider query.
+    const ph = u.pathname.match(/^\/api\/providers\/([^/]+)\/health$/);
+    if (ph) {
+      const one = svc.providerHealthList().find((h) => h.providerId === ph[1]);
+      if (!one) return json(res, { error: 'not found' }, 404);
+      return json(res, one);
+    }
+
+    const pm = u.pathname.match(/^\/api\/providers\/([^/]+)$/);
+    if (pm) {
+      const id = pm[1];
+      if (req.method === 'PATCH') return json(res, svc.updateProvider(id, await body(req)));
+      if (req.method === 'DELETE') {
+        // The seeded test provider is not something the user added, so refusing to
+        // delete it keeps a routable fallback in place.
+        if (svc.store.getProvider(id)?.kind === 'mock') return json(res, { error: 'Test provider cannot be deleted' }, 400);
+        svc.store.updateProvider(id, { enabled: false });
+        return json(res, svc.store.getProvider(id));
+      }
+    }
+
+    const pt = u.pathname.match(/^\/api\/providers\/([^/]+)\/test$/);
+    if (pt) {
+      const b = await body(req);
+      return json(res, await svc.testProvider(pt[1], b.modelId));
+    }
+
+    const mm = u.pathname.match(/^\/api\/models\/([^/]+)$/);
+    if (mm && req.method === 'PATCH') return json(res, svc.updateModel(mm[1], await body(req)));
+
+    if (u.pathname === '/api/routing') {
+      if (req.method === 'GET') return json(res, svc.getRouting());
+      const b = await body(req);
+      return json(res, svc.saveRouting(b));
+    }
+
+    if (u.pathname === '/api/jobs') return json(res, svc.store.listJobs(u.searchParams.get('taskId') || undefined));
+
+    if (u.pathname === '/api/usage') return json(res, svc.usage(u.searchParams.get('period') || '7d'));
+    if (u.pathname === '/api/runs') return json(res, svc.store.listRuns(u.searchParams.get('taskId')));
+    if (u.pathname.match(routeRun)) return json(res, svc.store.listEvents(u.pathname.split('/')[3], Number(u.searchParams.get('after') || 0)));
+
+    if (u.pathname === '/api/doctor') return json(res, await svc.doctor());
+
+    if (u.pathname === '/api/automations') {
+      if (req.method === 'GET') return json(res, svc.store.listAutomations());
+      const b = await body(req);
+      return json(res, svc.store.addAutomation({ id: svc.store.id(), name: b.name, trigger: b.trigger, action: b.action, enabled: b.enabled !== false, createdAt: new Date().toISOString() }), 201);
+    }
+
+    const am = u.pathname.match(/^\/api\/automations\/([^/]+)$/);
+    if (am && req.method === 'PATCH') return json(res, svc.store.updateAutomation(am[1], await body(req)));
+
+    if (u.pathname.startsWith('/api/webhooks/')) {
+      const trigger = u.pathname.split('/').pop();
+      const b = await body(req);
+      const matches = svc.store.listAutomations().filter((a) => a.enabled && a.trigger === trigger);
+      const created = [];
+      for (const a of matches) {
+        if (b.projectId && b.title) created.push(svc.prepare(svc.createTask(b.projectId, b.title).id));
+      }
+      return json(res, { trigger, matched: matches.length, created });
+    }
+
+    return json(res, { error: 'not found' }, 404);
+  } catch (e) {
+    // Every route reports its own failure the same way, so the UIs need one path.
+    return json(res, { error: e.message, stack: process.env.NODE_ENV === 'development' ? e.stack : undefined }, 400);
+  }
+});
+
+// The agents this process spawns are detached, so they lead their own process
+// groups. Without this, Ctrl-C kills the server and leaves every agent it started
+// running with nothing watching it and no way to stop it.
+let closing = false;
+function shutdown() {
+  if (closing) return;
+  closing = true;
+  runner.shutdown();
+  server.close();
+  // The aborts are asynchronous. A stuck agent does not get to hold the terminal,
+  // and the timer is unref'd so a clean exit does not wait on it.
+  const t = setTimeout(() => process.exit(0), 5000);
+  t.unref();
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+server.listen(port, () => console.log(`AI Code Mission Control: http://localhost:${port}`));
