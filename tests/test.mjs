@@ -1368,6 +1368,10 @@ test('a task branch that does not descend from the target is not treated as a fa
   const view=s.diff(t.id,{to:'moved-target'});
   assert.equal(view.fastForward,false,'the branch is not ahead of the target');
   assert.equal(view.alreadyPorted,false);
+  // The other side of the same sentence: checked out nowhere, so the port does land, and
+  // the step promising it is describing the command it prints rather than a hope.
+  assert.match(view.next.find((n)=>n.command&&n.command.includes('task port')).text,/land it on moved-target/);
+  assert.equal(view.next.some((n)=>n.command&&n.command.startsWith('git merge')),false,'and there is no merge left to run');
 
   const r=await s.port(t.id,{to:'moved-target'});
   assert.equal(r.command,null,'a target that is checked out nowhere is moved directly, not left with a command');
@@ -1532,6 +1536,11 @@ test('the read-only assessment names the steps a port would leave to you',async(
   const published=d.next.find((n)=>n.command&&n.command.includes('task port'));
   assert.ok(published,'porting is the step that makes the merge possible');
   assert.equal(published.command,`ai-code task port ${t.id} --to ${target}`);
+  // The text has to match what the command does. A checked-out destination means the port
+  // stops at the commit and the merge is the next step's job, so this one must not claim
+  // the landing it will not perform - the two steps read as a sequence, and a first step
+  // that promises what the second one delivers is a contradiction in the same list.
+  assert.ok(!/land it on/.test(published.text),`"${published.text}" promises a landing ${target} being checked out rules out`);
   assert.ok(d.next.some((n)=>n.command===`git merge --ff-only ${t.branch}`),'and the merge is named before anything runs');
   // Reading it wrote nothing: the worktree is there and the branch is still at its base.
   assert.equal(fs.existsSync(t.worktree),true);

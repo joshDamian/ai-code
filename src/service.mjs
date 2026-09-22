@@ -159,9 +159,14 @@ function nextSteps(t, branch, target, a) {
   if (!a.committed && !a.pending) return [];
   const steps = [];
   // Nothing is on the branch yet, so nothing can be merged anywhere. This is the step
-  // that makes the rest possible.
+  // that makes the rest possible. A port lands as well as commits, except when the
+  // destination is checked out - where it commits and prints, and the step below is the
+  // landing. Promising both here left the next step to contradict it, in the same list.
   if (a.pending) {
-    steps.push({ text: `Commit the worktree onto ${branch} and land it on ${target}:`, command: `ai-code task port ${t.id} --to ${target}` });
+    steps.push({
+      text: a.checkedOut ? `Commit the worktree onto ${branch}:` : `Commit the worktree onto ${branch} and land it on ${target}:`,
+      command: `ai-code task port ${t.id} --to ${target}`,
+    });
   }
   // git refuses a merge that would overwrite uncommitted work rather than overwriting
   // it, so this is a step before the merge and not a warning about it.
