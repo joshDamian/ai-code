@@ -7,6 +7,56 @@ test('worktree is isolated',async()=>{const root=repo();const s=new Service(root
 test('provider fallback',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);s.addProvider({id:'bad',name:'Bad',kind:'mock',enabled:true,config:{failRoles:['planner']}});s.addProvider({id:'good',name:'Good',kind:'mock',enabled:true,config:{}});for(const id of ['bad','good'])s.store.addModel({id:id+'-m',providerId:id,name:id,capabilities:['planning','coding','review','repair'],speed:10,cost:0,quality:id==='bad'?20:10,contextLength:100000});const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);const runs=s.store.listRuns(t.id);assert.equal(runs.filter(r=>r.status==='failed').length,1);assert.equal(runs.filter(r=>r.status==='succeeded').length,1)});
 
 
+test('a failed chain reports the failure and why nothing was left to try',async()=>{
+  // The production shape. One provider dies on an auth failure, the only other one is
+  // already at its concurrency limit, and the message that reached the user named the
+  // auth failure alone: a key that had just been corrected looked like a key that had
+  // never been set, and the provider that could have taken over was never mentioned.
+  //
+  // The provider is deepseek because its missing key throws before any process is
+  // spawned (agents.mjs), which is the same 37ms failure the user hit, deterministically.
+  const root=repo();
+  const s=new Service(root,{allowMock:false});
+  s.addProvider({id:'ds',name:'DeepSeek',kind:'deepseek',enabled:true,config:{routable:true,apiKeyEnv:'AICODE_TEST_KEY_THAT_IS_NEVER_SET'}});
+  s.addProvider({id:'cc',name:'Anthropic',kind:'claude-code',enabled:true,config:{routable:true}});
+  s.addModel({id:'ds-m',providerId:'ds',name:'deepseek',capabilities:['planning'],speed:10,quality:12,cost:0,contextLength:100000});
+  s.addModel({id:'cc-m',providerId:'cc',name:'claude',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  // The seam eligible() already calls through, so this is the real concurrency check
+  // and not a stand-in for one. DeepSeek scores higher, so it is the attempt that fails.
+  s.runner={atCapacity:(p)=>p.id==='cc',runningByProvider:()=>1,limitFor:()=>1};
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  await assert.rejects(()=>s.plan(t.id),(e)=>{
+    assert.equal(e.code,'AUTH_FAILURE','the failure that emptied the chain keeps its code: plan() reads it to decide whether the task itself is at fault');
+    assert.match(e.message,/Missing AICODE_TEST_KEY_THAT_IS_NEVER_SET/,'the real failure is still the headline');
+    assert.match(e.message,/DeepSeek was already tried in this chain/,'the provider that failed is named as the attempt it was');
+    assert.match(e.message,/Anthropic is at its concurrency limit/,'and the one that could not take over is named, with the reason');
+    // Every install seeds a mock provider, so a clause about it would trail every dead
+    // end a user ever reads while never naming anything they could act on.
+    assert.doesNotMatch(e.message,/mock/i,'the seeded mock provider is not a routing option, so it is not a reason');
+    return true;
+  });
+  assert.equal(s.task(t.id).state,'PLANNING','a routing dead end is not a property of the task');
+});
+
+test('a routing dead end names what was blocking each provider',()=>{
+  // An empty list is the one routing outcome a user reads, and the message carried no
+  // clue which of these two configurations they were in.
+  const root=repo();
+  const s=new Service(root,{allowMock:false});
+  s.addProvider({id:'a',name:'Alpha',kind:'claude-code',enabled:true,config:{routable:true}});
+  s.addModel({id:'a-m',providerId:'a',name:'a',capabilities:['coding'],speed:10,quality:10,cost:0,contextLength:100000});
+  s.addProvider({id:'b',name:'Beta',kind:'claude-code',enabled:false,config:{routable:true}});
+  let err;
+  try{s.select('planner')}catch(e){err=e}
+  assert.equal(err.code,'NO_MODEL');
+  assert.equal(err.message,'No available model capable of planner','the shape every caller matches on is unchanged');
+  const why=err.rejections.map(r=>`${r.name} ${r.detail}`).join('; ');
+  assert.match(why,/Alpha has no enabled model capable of planner/);
+  assert.match(why,/Beta is disabled/);
+  assert.equal(err.rejections.length,2,'the seeded mock provider contributes no clause: it is reachable only through the last resort, never by routing');
+});
+
 test('production routing excludes mock',()=>{const root=repo();const s=new Service(root,{allowMock:false});const p=s.initProject('p',root);s.addProvider({id:'mock2',name:'Mock2',kind:'mock',enabled:true,config:{routable:true}});s.addModel({id:'mock2m',providerId:'mock2',name:'Mock2',capabilities:['planning'],speed:10,quality:10,cost:0});assert.throws(()=>s.select('planner'),/No available model/)});
 test('preferred model is honoured',()=>{const root=repo();const s=new Service(root);const p=s.initProject('p',root);s.addProvider({id:'a',name:'A',kind:'claude-code',enabled:true,config:{routable:true}});s.addModel({id:'slow',providerId:'a',name:'slow',capabilities:['planning'],speed:1,quality:10,cost:1});s.addModel({id:'fast',providerId:'a',name:'fast',capabilities:['planning'],speed:10,quality:8,cost:1});s.saveRouting({...s.getRouting(),planner:{...s.getRouting().planner,preferred:['a:slow']}});assert.equal(s.select('planner').m.id,'slow')});
 test('provider model controls persist',()=>{const root=repo();const s=new Service(root);s.addProvider({id:'a',name:'A',kind:'claude-code',enabled:true,config:{routable:true}});s.addModel({id:'m',providerId:'a',name:'m',capabilities:['planning'],enabled:true});assert.equal(s.updateProvider('a',{enabled:false}).enabled,false);assert.equal(s.updateModel('m',{enabled:false}).enabled,false)});
