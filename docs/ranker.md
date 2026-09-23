@@ -1071,7 +1071,9 @@ say more than a label would, and the two facts are independently true. There is 
 **`WEAK` and `DEGRADED` are withheld rather than faked.** `WEAK`'s condition is
 "`NQC ≈ 0` or top `normScore` below the floor", and §5.7's floor is unshipped
 because §5.10 measured it as having nothing to calibrate against — precision flat
-at 35.7% across every candidate floor. `DEGRADED`'s condition is "heuristic floor
+at 35.7% across every candidate floor, and phase 8's three replacements for it
+(`cov`, `terms`, `rarest`) buy their precision with two thirds of the offered
+answers. Both grains are needed and neither clears the rule, so neither ships. `DEGRADED`'s condition is "heuristic floor
 only (entry points + configs + recent)", and no such fallback path exists: the
 ranker's priors are *additive to* lexical evidence rather than a fallback from its
 absence, so there is no branch that reaches entry points alone. Shipping the two
@@ -1080,12 +1082,12 @@ labels would mean shipping two `case` arms no input can reach. §9 records both.
 ### 5.10 Observability
 
 Persist a debug record behind a config flag: per candidate
-`{path, score, normScore, components, accepted, reason}`, plus `ceil(q)`, `NQC`,
-the branch that ran, the config hash, tree hash, and timings. 20 KB per run on
-this repository's 68 candidates, capped at 200 candidates so it stays bounded on a
-large tree. `normScore` and `ceil(q)` are the calibration inputs §5.7 needs;
-without them the floor cannot be tuned. Without any of it the next regression is diagnosed the way
-this one was — by reading a transcript.
+`{path, score, normScore, cov, terms, rarest, components, accepted, reason}`, plus
+`ceil(q)`, `NQC`, the branch that ran, the config hash, tree hash, and timings.
+20 KB per run on this repository's 68 candidates, capped at 200 candidates so it
+stays bounded on a large tree. `normScore` and `ceil(q)` are the calibration inputs
+§5.7 needs; without them the floor cannot be tuned. Without any of it the next
+regression is diagnosed the way this one was — by reading a transcript.
 
 **Built and measured — phase 5.** `debugRecord()` in `src/context.mjs`, behind
 `context.debug`, default off. It carries every field above. `components` records the
@@ -1113,20 +1115,76 @@ the harness's 14 scored runs, 155 gold candidates against 797 non-gold:
 Gold sits at twice the non-gold median, so the signal is real — but the range runs
 to 4.9, not the `[0,1)` §5.7 defines, because the numerator is our `W/(W+df)` score
 and the denominator is an `idf_L` sum. They are different scales that happen to
-share a monotone direction in `df`. The consequence is measurable: precision on the
-offered set is **35.7% at every floor from 0.10 to 0.50**, moving only at 0.70
-(36.4%) and 1.00 (37.2%) — and 1.00 costs recall, 75 offered gold down to 61. The
-doc's "start at 0.25, expect 0.2–0.4" has nothing to bite on here.
+share a monotone direction in `df`.
 
-Coverage fails as a predictor too, and in the opposite direction: the three runs
-with the *best* recall have 1 in-vocabulary term out of 19, and the three worst
-have 5 of 32. `QUERY_IDF_FLOOR` as a percentile of per-term idf is 1.214 for this
-corpus against `ceil` values of 3.3 to 35.1, so it would never fire.
+**Phase 8's correction: the flat curve was truncation, not scale, and the missing
+column says so.** `normScore` is monotone in `score`, so a floor on it admits a
+top-`j` slice of the ranking, and for `j >= limit` the offered set is
+**bit-identical** — the same 15 files, in the same order, at every floor. Re-read
+with `admitted` reported, the phase-5 table is explaining itself:
 
-The gate therefore stays unshipped, which is the correct outcome: the record now
-answers the question the last regression was diagnosed by reading a transcript to
-answer, and the floor it was built to tune has been shown to have no signal to
-tune against on this corpus. §9 carries the caveat.
+| `normScore` floor | `admitted` | `offered` | `offeredGold` | precision |
+|---|---|---|---|---|
+| 0.10 | 893 | 221 | 83 | 37.6% |
+| 0.20 | 794 | 221 | 83 | 37.6% |
+| 0.30 | 699 | 221 | 83 | 37.6% |
+| 0.40 | 604 | 221 | 83 | 37.6% |
+| 0.50 | 510 | 221 | 83 | 37.6% |
+| 0.60 | 472 | 219 | 82 | 37.4% |
+| 0.70 | 451 | 212 | 77 | 36.3% |
+| 0.90 | 375 | 198 | 76 | 38.4% |
+| 1.00 | 285 | 172 | 63 | 36.6% |
+
+`admitted` falls by 68% across the flat region while `offered` does not move once.
+The requirement for a quantity that can gate is therefore **not monotone in
+`score`** — stronger than §9 previously stated, and now stated as a precondition
+rather than as a hope.
+
+**Phase 8 built three such quantities and the precondition holds; the calibration
+still fails, for a different reason.** `cov` (the idf share of the in-vocabulary
+query the file's own path carries), `terms` (the unweighted share) and `rarest`
+(the largest idf among its matched terms) are per-file, bounded, finite without
+flooring, and read off the path index — nothing is re-read. Spearman ρ against
+`score` over the pooled candidates is **0.338, 0.332 and 0.342** against
+`normScore`'s 0.730, so all three are genuinely non-monotone and a floor on any of
+them admits a set that is not a prefix.
+
+They are recorded per candidate by `debugRecord`. What they cannot do is trade:
+
+| quantity | best floor | precision | `offeredGold` | vs 83 |
+|---|---|---|---|---|
+| `cov` | 0.1 | 51.9% | 28 | −66% |
+| `terms` | 0.2 | 55.3% | 26 | −69% |
+| `rarest` | 1.0–3.0 | 49.2% | 29 | −65% |
+
+Every quantity buys its precision with most of the offered answers, which is the
+pre-declared stop condition: a floor ships only on a ≥ 5-point precision gain for a
+≤ 10% `offeredGold` cost. **The reason is the distribution, not the definition.**
+Of 952 pooled candidates, 813 sit below `cov = 0.05` at 15.1% precision and only 22
+sit above 0.3. There is no middle to put a floor in. The one high-precision region —
+6 candidates at `cov = 1`, all gold — is a single in-vocabulary term carrying the
+whole query, which §5.7's one-token exemption rules out by construction; exempt
+those and nothing in the corpus reaches `cov` 0.5.
+
+`rarest` is recorded but not a dial: its floor is flat from 1.0 to 3.0 because
+path-token idf is coarse at this corpus size, and it admits **zero** candidates at
+4.0. `NQC` fails the other half. At `k = limit` the whole corpus spans 0.1475 to
+0.1905 — no floor separates anything — and at the paper's `k = 100` it spans 0.161
+to 0.269 with no monotone relation to recall. §9's "the right `k` is a guess" is now
+a measured statement rather than a hedge.
+
+Coverage also fails as an *answerability* test, and phase 8 sharpened why. Over the
+path vocabulary the same numbers hold — the three best-recall runs have 1
+in-vocabulary term of 19 and the three worst 5 of 32, and `QUERY_IDF_FLOOR` is 1.214
+against `ceil` values of 3.3 to 35.1, so it never fires. Over the **reference**
+vocabulary the question dissolves: every query term appears as a name somewhere in
+the tree on all 14 runs (61 of 62 on the worst), so "is this query answerable" is
+always yes, and a floor on it can never fire at all.
+
+The gate therefore stays unshipped, and phase 8's verdict is narrower than phase
+5's. The floor has no signal to tune against because this corpus's coverage
+distribution is bimodal with no interior, not because the quantity was wrong —
+which is a claim that can be falsified on a larger repository, and §9 says so.
 
 ### 5.11 Determinism
 
@@ -1793,6 +1851,25 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   recency are *added to* every score rather than substituted when nothing matches,
   so "entry points only" is not a state the code can be in. Both are withheld
   rather than emitted by arms no input reaches.
+- **The flat precision curve was truncation, and the stronger requirement that
+  replaces it holds but is still not enough.** A quantity that can gate must not be
+  monotone in `score`, because a monotone one's floor admits a top-`j` slice and for
+  `j >= limit` the offered set is bit-identical — which is what phase 5 measured for
+  68% of the candidate range without being able to see it. Phase 8 built three
+  non-monotone per-file quantities and they clear that bar (Spearman ρ 0.33 against
+  `normScore`'s 0.73). They fail the calibration anyway, and the reason is
+  corpus-shaped rather than design-shaped: 813 of 952 pooled candidates sit below
+  `cov = 0.05` and only 22 above 0.3, so there is no interior to put a floor in, and
+  the one high-precision region is one-token queries, which §5.7 exempts. **The
+  claim that can be falsified is "a larger repository has a coverage interior"; this
+  one does not.** NQC fails independently: it spans 0.1475–0.1905 at `k = limit` and
+  has no monotone relation to recall at `k = 100`, so §9's "the right `k` is a
+  guess" is now measured rather than hedged.
+- **Coverage as an answerability test cannot fire if it is asked of references.**
+  Every query term appears as an identifier somewhere in this tree on all 14 runs
+  (61 of 62 on the worst), so a floor on the reference vocabulary is a no-op; over
+  the path vocabulary the same test never fires either, because `QUERY_IDF_FLOOR` is
+  1.214 against `ceil` values of 3.3 to 35.1. Both were measured in phase 8.
 - **§5.7's relaxation retry is not built, and as the state is defined it cannot
   help.** `NO_RESULTS` fires when `Σ_{t∈q∩V} idf(t) = 0` — no task term is in the
   corpus's vocabulary at all — so dropping a term or OR-ing the rest changes no

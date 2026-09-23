@@ -825,6 +825,38 @@ test('the query ceiling counts only the terms this repository can answer',()=>{
   assert.ok(many.debug.terms.length>one.debug.terms.length,'even though the query is longer');
 });
 
+test('the coverage quantities are recorded per candidate, and a file is measured against its own path',()=>{
+  // §5.10's calibration input. What separates these from `normScore` is that they
+  // are per-file and read off the path index, so a floor on them admits a set that
+  // need not be a top-`j` slice of the ranking - which is the property §5.10's flat
+  // curve turned out to be an artefact of not having. The definition is what this
+  // pins: a file's own path decides its quantities, and none of the three can leave
+  // its range.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','widget.mjs'),'export const w=1;\n');
+  fs.writeFileSync(path.join(root,'src','index.mjs'),'export const i=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const r=relevantFiles(p,{id:'t',title:'widget',description:'',plan:null},{cwd:root,config:{debug:true}});
+  const byPath=new Map(r.debug.candidates.map((c)=>[c.path,c]));
+  const w=byPath.get('src/widget.mjs');
+  const i=byPath.get('src/index.mjs');
+  assert.ok(w,'the file the task named is a candidate');
+  assert.ok(i,'and so is the entry point, which scored on a prior rather than on the query');
+  for(const c of r.debug.candidates){
+    assert.ok(c.cov>=0&&c.cov<=1,`cov is a share: ${c.path}`);
+    assert.ok(c.terms>=0&&c.terms<=1,`terms is a share: ${c.path}`);
+    assert.ok(c.rarest>=0,`rarest is an idf: ${c.path}`);
+    if(c.terms===0) assert.equal(c.cov,0,'no matched term is no coverage');
+    if(c.terms===0) assert.equal(c.rarest,0,'and no rarest term either');
+  }
+  assert.equal(w.terms,1,'the whole query is in this file\'s path');
+  assert.equal(w.cov,1,'so its coverage is total');
+  assert.ok(w.rarest>0,'and the file that carries the term carries its idf');
+  assert.equal(i.terms,0,'the entry point carries none of it');
+  assert.equal(i.rarest,0,'which is what a zero rarest means');
+});
+
 test('the budget is derived from the window, and the ladder that spends it is total',()=>{
   // §5.6. Three regimes, and the sweep below covers all of them: the cap is the
   // ceiling when the window is roomy, the share is what binds in the middle, and

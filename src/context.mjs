@@ -369,6 +369,17 @@ function idf(df, n) {
   return Math.log(1 + (n - df + 0.5) / (df + 0.5));
 }
 
+// The tokens a file's path contributes to the lexical score. `scoreFile` tokenizes
+// the stem and the directory separately because it weights them 10 and 4; the
+// *membership* is the union, and it is the union §5.7's per-file coverage
+// quantities are defined over. Derived from the path alone, so it costs nothing
+// and, unlike §6.3's removed content index, re-reads nothing.
+function pathTokens(file, floor) {
+  const base = path.basename(file);
+  const stem = base.replace(/\.[^.]+$/, '');
+  return new Set([...tokenize(stem, floor), ...tokenize(path.dirname(file), floor)]);
+}
+
 // §5.7's attainable-score ceiling, restricted to the in-vocabulary terms. The
 // restriction is load-bearing and §5.7 says why: an out-of-vocabulary term scores
 // the *largest* idf in the collection under this formula, so counting the absent
@@ -1186,10 +1197,47 @@ function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected,
   const n = rankable.length;
   const { ceil, coverage } = ceilQuery(tokens, df, n);
   const accepted = new Map(selected.map((p, i) => [p, i]));
+  // §5.7's coverage quantities (§5.10 for the calibration, §9 for the verdict).
+  //
+  // The requirement §5.10 established is not "a floor on a score" but a quantity
+  // that is **not monotone in `score`**, because a monotone quantity's floor
+  // admits a top-`j` set and for `j >= limit` the offered set is bit-identical -
+  // which is exactly the flat curve §5.10 recorded and misread as a fact about the
+  // scorer's units. `normScore` is monotone by construction. `terms` and `cov` sum
+  // over the same membership the score sums, so they are close to monotone too.
+  // `rarest` is a max over terms against a sum-based score, and is the one
+  // candidate that is structurally not.
+  //
+  // All three are bounded, per-file, finite without flooring, and computed from the
+  // path index the scorer already built - no content is read.
+  const vocab = [];
+  for (const t of [...tokens].sort()) {
+    const d = df.get(t) || 0;
+    if (d > 0) vocab.push({ t, v: idf(d, n) });
+  }
+  const idfSum = vocab.reduce((a, x) => a + x.v, 0);
+  const coverageOf = (file) => {
+    const pt = pathTokens(file, cfg.floor);
+    let cov = 0;
+    let terms = 0;
+    let rarest = 0;
+    for (const x of vocab) {
+      if (!pt.has(x.t)) continue;
+      cov += x.v;
+      terms += 1;
+      if (x.v > rarest) rarest = x.v;
+    }
+    return {
+      cov: idfSum > 0 ? round(cov / idfSum) : null,
+      terms: vocab.length ? round(terms / vocab.length) : null,
+      rarest: round(rarest),
+    };
+  };
   const candidates = scored.slice(0, DEBUG_CANDIDATES).map((f) => ({
     path: f.path,
     score: round(f.score),
     normScore: ceil > 0 ? round(f.score / ceil) : null,
+    ...coverageOf(f.path),
     // A file the path pass never scored has no parts, but it does have a reason to
     // be here, and that reason is the whole content of its component record.
     components: f.parts || f.define || f.graph
