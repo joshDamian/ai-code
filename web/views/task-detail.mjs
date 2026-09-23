@@ -117,6 +117,15 @@ export function TaskDetail({ id, navigate }) {
             `
           : null
       }
+      ${
+        task.state !== 'COMPLETE' && task.state !== 'CANCELLED' && !live
+          ? html`
+              <div class="action-bar">
+                <button class="btn danger" disabled=${busy} onClick=${() => run(() => api.taskClose(task.id), 'Task closed.')}>Close</button>
+              </div>
+            `
+          : null
+      }
     </div>
   `;
 }

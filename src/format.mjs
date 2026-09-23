@@ -251,7 +251,7 @@ export function formatState(s) {
     CREATED: 'Created', CONTEXT_READY: 'Context Ready', PLANNING: 'Planning',
     AWAITING_APPROVAL: 'Awaiting Approval', APPROVED: 'Approved',
     IMPLEMENTING: 'Implementing', TESTING: 'Testing', REVIEWING: 'Reviewing',
-    REPAIRING: 'Repairing', COMPLETE: 'Complete', FAILED: 'Failed'
+    REPAIRING: 'Repairing', COMPLETE: 'Complete', FAILED: 'Failed', CANCELLED: 'Cancelled'
   };
   return map[s] || s;
 }

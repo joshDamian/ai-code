@@ -17,17 +17,18 @@ const exec = promisify(execFile);
 
 // The workflow state machine. A transition not listed here is rejected.
 export const transitions = {
-  CREATED: ['CONTEXT_READY'],
-  CONTEXT_READY: ['PLANNING'],
-  PLANNING: ['AWAITING_APPROVAL', 'FAILED'],
-  AWAITING_APPROVAL: ['APPROVED', 'PLANNING'],
-  APPROVED: ['IMPLEMENTING'],
-  IMPLEMENTING: ['TESTING', 'FAILED', 'APPROVED'],
-  TESTING: ['REVIEWING', 'FAILED'],
-  REVIEWING: ['COMPLETE', 'REPAIRING', 'FAILED'],
-  REPAIRING: ['TESTING', 'FAILED', 'REVIEWING'],
+  CREATED: ['CONTEXT_READY', 'CANCELLED'],
+  CONTEXT_READY: ['PLANNING', 'CANCELLED'],
+  PLANNING: ['AWAITING_APPROVAL', 'FAILED', 'CANCELLED'],
+  AWAITING_APPROVAL: ['APPROVED', 'PLANNING', 'CANCELLED'],
+  APPROVED: ['IMPLEMENTING', 'CANCELLED'],
+  IMPLEMENTING: ['TESTING', 'FAILED', 'APPROVED', 'CANCELLED'],
+  TESTING: ['REVIEWING', 'FAILED', 'CANCELLED'],
+  REVIEWING: ['COMPLETE', 'REPAIRING', 'FAILED', 'CANCELLED'],
+  REPAIRING: ['TESTING', 'FAILED', 'REVIEWING', 'CANCELLED'],
   COMPLETE: [],
-  FAILED: ['PLANNING'],
+  FAILED: ['PLANNING', 'CANCELLED'],
+  CANCELLED: [],
 };
 
 // Which capability a role requires a model to declare.
@@ -1134,6 +1135,18 @@ export class Service {
     // Read before a cross-process owner has written its state back, so this is the
     // pre-cancel snapshot. Callers reload; nothing depends on the returned state.
     return this.task(id);
+  }
+
+  closeTask(id) {
+    const t = this.task(id);
+    if (!transitions[t.state]?.includes('CANCELLED')) {
+      throw new Error(`Cannot close a task that is already ${t.state}`);
+    }
+    if (this.store.taskHasLiveRun(id) || this.store.activeJobs().some((j) => j.task_id === id)) {
+      throw new Error('This task has a run or job in flight; cancel it first with `task cancel`');
+    }
+    if (t.worktree) removeWorktree(this.project(t.project_id).path, t.worktree);
+    return this.transition(id, 'CANCELLED');
   }
 
   // -- routing --------------------------------------------------------------

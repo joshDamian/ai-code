@@ -12,6 +12,7 @@ const TABS = [
   { id: 'awaiting', label: 'Awaiting', states: ['AWAITING_APPROVAL'] },
   { id: 'complete', label: 'Complete', states: ['COMPLETE'] },
   { id: 'failed', label: 'Failed', states: ['FAILED'] },
+  { id: 'cancelled', label: 'Cancelled', states: ['CANCELLED'] },
 ];
 
 export function Tasks({ navigate }) {

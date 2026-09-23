@@ -255,6 +255,7 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
     const binds = [['1-4', 'tabs'], ['Esc', 'back']];
     if (task) {
       if (activeRun) binds.push(['c', 'cancel']);
+      if (!activeRun && task.state !== 'COMPLETE' && task.state !== 'CANCELLED') binds.push(['x', 'close']);
       if (tab === 'plan') {
         if (task.state === 'PLANNING' && !activeRun) binds.push(['p', 'start planning']);
         if (task.state === 'AWAITING_APPROVAL') binds.push(['a', 'approve'], ['r', 'reject'], ['f', 'refine'], ['E', 'edit']);
@@ -280,6 +281,7 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
       // Cancel is offered whenever an agent is live, from any tab. It is not
       // gated on the task state for the same reason the footer bind is not.
       if (input === 'c' && activeRun) return run('Cancel', () => api.cancel(taskId));
+      if (input === 'x' && !activeRun && task.state !== 'COMPLETE' && task.state !== 'CANCELLED') return run('Close', () => api.close(taskId));
 
       if (tab === 'plan') {
         if (input === 'p' && task.state === 'PLANNING' && !activeRun) return run('Planning', () => api.plan(taskId));

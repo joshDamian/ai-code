@@ -37,7 +37,7 @@ const body = (req) =>
     });
   });
 
-const routeTask = /^\/api\/tasks\/([^/]+)\/(plan|approve|execute|implement|test|review|repair|reject|replan|refine|diff|port|cancel|show|activity)$/;
+const routeTask = /^\/api\/tasks\/([^/]+)\/(plan|approve|execute|implement|test|review|repair|reject|replan|refine|diff|port|cancel|close|show|activity)$/;
 // The one route that always queues rather than blocks. Matched before routeTask,
 // whose pattern has no room for the extra path segment.
 const routeBackground = /^\/api\/tasks\/([^/]+)\/execute\/background$/;
@@ -236,6 +236,7 @@ const server = http.createServer(async (req, res) => {
         : op === 'reject' ? svc.reject(id)
         : op === 'replan' ? svc.replan(id)
         : op === 'cancel' ? svc.cancelTask(id)
+        : op === 'close' ? svc.closeTask(id)
         : null;
       if (r === null) return json(res, { error: 'unknown operation' }, 400);
       return json(res, r);

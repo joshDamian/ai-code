@@ -155,6 +155,7 @@ export function createApi(baseUrl) {
     replan: (id) => post(`/api/tasks/${id}/replan`),
     refine: (id, feedback) => post(`/api/tasks/${id}/refine`, { feedback }),
     cancel: (id) => post(`/api/tasks/${id}/cancel`),
+    close: (id) => post(`/api/tasks/${id}/close`),
     updatePlan: (id, plan) => patch(`/api/tasks/${id}/plan`, { plan }),
 
     providers: () => get('/api/providers'),

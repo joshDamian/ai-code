@@ -9,7 +9,7 @@ const COLOR = { good: 'green', bad: 'red', warn: 'yellow' };
 
 function colorForRaw(raw, key) {
   if (raw === 'running') return 'cyan';
-  if (raw === 'cancelled') return 'gray';
+  if (raw === 'cancelled' || raw === 'CANCELLED') return 'gray';
   return COLOR[key] || 'blue';
 }
 
