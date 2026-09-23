@@ -46,6 +46,11 @@ export const CONTEXT_DEFAULTS = {
   // it imports and is imported by. 0 turns the graph off, which is how the
   // harness measures it rather than asserting it - see the note on the value.
   edge: 3,
+  // §5.1's def rule: how hard a task term pulls on the files that declare a name
+  // containing it. 0 turns symbol retrieval off, same reason as `edge`. Measured
+  // flat from 6 to 20 with the cliff at 25; 12 is the middle of that. See the note
+  // on the rejected undivided variant in `declaredBy`.
+  define: 12,
 };
 
 export function contextConfig(configured) {
@@ -444,6 +449,116 @@ function frontier(seeds, scores, graph, weight) {
   return pull;
 }
 
+// -- declarations -----------------------------------------------------------
+
+// The forms that name a thing a task can ask for, one per family: `function`/
+// `const`/`class`/`interface`/`type` for JS and TS, `def`/`class` for Python and
+// Ruby. §5.1 also names Rust's `struct` and `impl`, and those are not here because
+// `SOURCE_FILE` carries no `.rs` - a pattern on a language no repository can hand
+// this function is a pattern nothing tests. The Python and Ruby forms are carried
+// on the opposite argument: `.py` and `.rb` *are* in `SOURCE_FILE`, so they fire on
+// another repository. This tree holds neither, which makes them untested here
+// rather than dead.
+//
+// Column 0 is the filter that does the work. A `const` inside a function body is
+// a local binding, not the API the task names, and counting them inflates every
+// common word's fan-out: `input` resolved to two files instead of one and `task`
+// to thirteen instead of seven, on `const input = usage.inputTokens` and
+// `const task = await store.task(id)`. Aider gets this from tree-sitter's
+// `is_important` scope filter; at this size, requiring the match to start the line
+// separates the two: top-level-only reproduces §2.4's table (`input` 1, `field` 1,
+// `description` 0) where the unrestricted extractor does not. A false positive
+// costs a low-weight edge, not a wrong answer.
+const DECLARATION = [
+  /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/gm,
+  /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)/gm,
+  /^(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/gm,
+  /^(?:export\s+)?(?:interface|type|enum)\s+([A-Za-z_$][\w$]*)/gm,
+  /^(?:async\s+)?def\s+([A-Za-z_]\w*)/gm,
+  /^class\s+([A-Za-z_]\w*)/gm,
+];
+
+// Which files declare a name, keyed both by the identifier and by each of its
+// sub-tokens. This is a second pass over the source files, not a share of
+// `importGraph`'s: measured at 8.8 ms against the graph's 7.0 ms, and 15.1 ms for
+// the pair inside a 45.8 ms `relevantFiles`. It is the cheapest signal in the
+// ranker after the path, but it is not free, and the reads are where its cost
+// sits rather than the regexes.
+//
+// The key is the sub-token because that is what a task text produces: a task says
+// "input", never `TextInput`. §5.1 also asks for the whole identifier to be
+// emitted alongside its sub-tokens, on both sides, and that half was built and
+// then removed: keyed here and on the query, it moved the summary by 0.000000 on
+// all four metrics, because `tokenize` splits camelCase before either side sees
+// it - so the only whole multi-word forms a task text contains are words like
+// `PLAN`, whose lowercase form is already a sub-token. The sub-token key is the
+// whole mechanism.
+export function declarations(root, files) {
+  const defines = new Map();
+  for (const file of files) {
+    if (!SOURCE_FILE.test(file)) continue;
+    const text = readText(path.join(root, file));
+    if (!text || text.includes('\u0000')) continue;
+    const names = new Set();
+    for (const re of DECLARATION) {
+      // `matchAll` clones the regex and copies `lastIndex`, so a shared global
+      // pattern is safe only while nothing leaves it advanced. Resetting says so
+      // rather than relying on it.
+      re.lastIndex = 0;
+      for (const m of text.matchAll(re)) names.add(m[1]);
+    }
+    for (const name of names) {
+      for (const key of new Set(tokenize(name))) {
+        if (!defines.has(key)) defines.set(key, new Set());
+        defines.get(key).add(file);
+      }
+    }
+  }
+  return defines;
+}
+
+// What the task's own words pull in, as a path -> weight map. The query token is
+// the key and the declaring file is the target, which is the direction the import
+// graph cannot go: an edge there runs from a file that already won a slot, and a
+// task naming a symbol the tree was never ranked against has no such file.
+//
+// §5.3's self-normalising rule, in the one place it is load-bearing: the weight
+// falls with the number of files declaring the name, so vocabulary shared across
+// the tree cannot outvote a symbol that appears once. §5.2's flat `>5 files ->
+// x0.1` demotion was replaced by this continuous fall - it is the same rule with
+// the threshold taken out.
+function declaredBy(tokens, defines, weight) {
+  const pull = new Map();
+  // Sorted, not in Set order: the accumulation is a float sum, and a sum whose
+  // order depends on how the task text happened to tokenize is a sum that can
+  // differ in the last bits between two runs of the same task.
+  for (const token of [...tokens].sort()) {
+    const files = defines.get(token);
+    if (!files || !files.size) continue;
+    // §5.2's `sqrt(n)` term, at the scale of the corpus rather than of one file:
+    // the pull a name generates is divided across the files declaring it. `sqrt`
+    // and not `n`, because a name eleven files declare and one a single file
+    // declares differ by about 3x on the evidence rather than 11x - the count is a
+    // weak proxy for how common the name is and should not speak with a strong
+    // voice.
+    //
+    // **Undivided measured higher and was rejected anyway.** With no divisor at
+    // all the macro recall is 0.873 against 0.855 here, every metric better and a
+    // wider leave-one-out margin - and on a task whose tokens are all common
+    // vocabulary it fills all fifteen slots with files that merely declare those
+    // words, returning zero relevant files out of 22 gold. Measured on the Mission
+    // Control runs: 0.182, 0.250 and 0.211 become 0.000, where this divisor leaves
+    // them at 0.045, 0.063 and 0.053. A ranker that can hand back an empty-relevant
+    // window has failed in a way recall@15 averaged over a corpus cannot express,
+    // and one constant buys its absence back. §5.3's rule is what does it: a signal
+    // whose weight does not fall with its coverage is a signal that will drown the
+    // window on the queries where coverage is all it has.
+    const w = weight / Math.sqrt(files.size);
+    for (const file of files) pull.set(file, (pull.get(file) || 0) + w);
+  }
+  return pull;
+}
+
 // Ranks every file in the tree against the task and returns the best few, with
 // their contents. Deterministic: no model is consulted, and the same task against
 // the same tree always produces the same list.
@@ -469,6 +584,25 @@ export function relevantFiles(project, task, options = {}) {
   // a cosmetic difference.
   const byPath = (a, b) => b.score - a.score || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   scored.sort(byPath);
+
+  // The task names a symbol; the file that declares it is the file the task is
+  // about. Runs before the graph pass for the reason §5.1 gives: a file the graph
+  // could reach but had no seed for is reachable now, because this pass supplies
+  // the seed. The defining file enters the list above the edge pass, so it is
+  // within `seeds` and its own imports are followed.
+  if (cfg.define > 0) {
+    const entry = new Map(scored.map((f) => [f.path, f]));
+    const defines = declarations(root, rankable);
+    for (const [p, add] of declaredBy(tokens, defines, cfg.define)) {
+      const hit = entry.get(p);
+      // `define` marks a score that came from a declaration rather than from the
+      // path, for the same reason `graph` does: it is the first thing a reader of
+      // this list will ask about.
+      if (hit) hit.score += add;
+      else scored.push({ path: p, score: add, define: true });
+    }
+    scored.sort(byPath);
+  }
 
   // One hop out from the files the lexical pass picked, which is where the seven
   // named misses in §2.4 live: they score nothing lexically - `src/service.mjs`

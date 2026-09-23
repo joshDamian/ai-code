@@ -166,6 +166,45 @@ The discriminator is not "how often does this document use the query's words". I
 is **"which file declares the thing the query names."** Those are different
 signals, and the second one is cheap.
 
+**Built and measured — phase 4.** `declarations()` and `declaredBy()` in
+`src/context.mjs`, shipping as `define: 12`. Three departures from the section
+above, one of them a deletion:
+
+1. **The scope filter is the column, not the file.** Aider gets "this is a
+   declaration worth ranking" from tree-sitter's `is_important` scope. A regex has
+   to decide for itself, and the decision is the difference between the mechanism
+   working and not working: with every `const` counted, `input` resolved to two
+   files instead of the one this section is built on, and `task` to thirteen
+   instead of seven, on `const input = usage.inputTokens` and
+   `const task = await store.task(id)`. Requiring the match to start the line —
+   no leading whitespace — separates a declaration from a binding, and reproduces
+   §2.4's table exactly where the unrestricted extractor does not. It is one
+   character class standing in for a scope filter, and it is the load-bearing part
+   of the design.
+
+2. **The whole-identifier half was built, measured at zero, and removed.** This
+   section asks for the identifier *and* its sub-tokens to be emitted, on both
+   sides. Implemented faithfully — keyed in `defines`, emitted from the task text —
+   it moved all four metrics by 0.000000. The reason is structural rather than a
+   property of this corpus: `tokenize` splits camelCase before either side sees it,
+   so the only whole multi-word forms a task text contains are words like `PLAN`,
+   whose lowercase form is already a sub-token of the identifier. The sub-token key
+   *is* the mechanism; the sentence about emitting the whole form did not survive
+   contact, and the code does not carry it.
+
+3. **Rust's `struct` and `impl` are not matched, but Python's `def` and Ruby's
+   `class` are.** The distinction is not the language, it is reachability: `SOURCE_FILE`
+   carries no `.rs`, so a Rust pattern could never fire on any repository, and a
+   pattern that cannot fire is a pattern nothing tests. `.py` and `.rb` *are* in
+   `SOURCE_FILE`, so those patterns fire on any repository containing them — this
+   one contains neither, which makes them untested here rather than dead. §9
+   records that.
+
+Cost, measured rather than asserted: 8.8 ms against the graph's 7.0 ms, 15.1 ms
+for the pair inside a 45.8 ms `relevantFiles`. The cost is the reads, not the
+regexes — and it is a *second* pass over the source files, not a share of the
+graph's, which the first draft of this section claimed and the timer contradicted.
+
 **But fan-out's yield is narrow, and the table above is why.** Score it against the
 seven misses rather than against the intuition:
 
@@ -221,6 +260,73 @@ a score multiplier it evicts the seeds it expands from and the window fills with
 one seed's neighbours. Dividing by the seed's fan-out is likewise not optional:
 undivided, *every* weight is worse than disabling the graph (macro recall 0.691 →
 0.544). Both are recorded in §5.2.
+
+**Built and measured — phase 4.** The declaration scan of §5.1, over the same 14
+runs, same tree, same process. Each mechanism ablated against the other:
+
+| | unoffered | recall@15 macro | micro | MRR | nDCG@15 |
+|---|---|---|---|---|---|
+| both off (§2.6 baseline) | 22 | 0.691 | 0.600 | 0.644 | 0.559 |
+| graph only (phase 3) | 20 | 0.744 | 0.636 | 0.657 | 0.581 |
+| symbol only (phase 4) | 19 | 0.773 | 0.655 | 0.644 | **0.620** |
+| **both (shipped)** | **15** | **0.855** | **0.727** | **0.658** | 0.585 |
+
+**The two mechanisms are superadditive on recall, which is the design's own claim
+confirmed.** Graph alone is +5.3 points, symbol alone +8.2, and together +16.4 —
+22% more than the sum of the parts, with unoffered files falling from 22 to 15
+where the two halves predict 17. §5.1 said symbol retrieval is what the graph
+cannot do from a cold start, "an import edge needs a seed, and this is what
+supplies it"; the arithmetic says that is not a figure of speech. The fan-out hands
+the graph seeds it otherwise never gets, and the graph then reaches the
+neighbourhood of files that no lexical pass had any reason to look at.
+
+**The target miss is recovered.** §2.4's decisive case — `input` resolving to
+`web/components/form.mjs`, the file that task is about — was ranked 48th and
+unoffered. It is now rank 6 of 16, and the fan-out is the only pass that put it
+there: it shares no token with the task text and the graph had no seed for it.
+
+**The trade is real and is not hidden in the mean.** Per run, 4 improved, 4
+regressed, 6 unchanged. Every one of the four regressions is the same task —
+"Improve the Mission Control task detail view so PLAN, EXECUTE, REVIEW…" — whose
+gold set is 16 to 27 files out of 53. A task whose answer is most of the
+repository is one where any reordering costs, and the fan-out reorders: `plan`,
+`review`, `activity` and `api` are all declared widely, so the pass pulls a crowd.
+Recall on its four runs falls 0.18→0.05, 0.25→0.06, 0.21→0.05 and 0.40→0.32. The
+gains are larger and elsewhere: 0.46→0.64 and 0.60→0.67 on the two `input` runs,
+0.50→0.75 and 0.50→1.00 on the two `cleanup mechanism` runs. Leave-one-out over
+all 14 runs is positive in every fold, worst +6.2 points — including every fold
+that drops one of the regressing runs, which is the check that says the mean is
+not being carried by a single task in either direction.
+
+**The divisor is the whole of the normalisation, and the variant that measured
+highest was rejected.** The pull a name generates is divided across the files that
+declare it, and the exponent decides how hard:
+
+| divisor on the declaring-file count | macro | micro | nDCG@15 | unoffered | leave-one-out worst fold | worst single run |
+|---|---|---|---|---|---|---|
+| none | **0.873** | **0.764** | **0.605** | **13** | +8.3 | **0.000** |
+| `1/sqrt(n)` | 0.855 | 0.727 | 0.585 | 15 | +6.2 | 0.045 |
+| `1/n` | 0.855 | 0.727 | 0.587 | 15 | +6.2 | — |
+
+Undivided wins every column but the last, and the last is why it is not shipped.
+On a task whose tokens are all common vocabulary — `plan`, `review`, `activity`,
+`api`, `view`, `detail` — an undivided pull fills all fifteen slots with files
+that merely declare those words. Measured on three Mission Control runs: 0.182 →
+**0.000**, 0.250 → **0.000**, 0.211 → **0.000**, with none of 22 gold files
+offered and every slot taken by a fan-out file. `1/sqrt(n)` leaves the same three
+runs at 0.045, 0.063 and 0.053.
+
+A macro mean cannot express the difference between 0.05 and 0.00 — both round to
+nothing — but a ranker that hands back an empty-relevant window has failed
+categorically rather than marginally, and one constant buys its absence back.
+**§5.3's rule predicted this exact failure and the headline metric said to ignore
+it.** The per-run floor is what caught it, which is why this phase reports per-run
+deltas beside the mean and why §9 keeps the argument open.
+
+`1/n` and `1/sqrt(n)` are indistinguishable where both peak — 0.855 each — and it
+is their agreement, rather than either one's number, that says the flattening is
+doing the work. Shipped at 12, the middle of a plateau that runs 6 to 20 with the
+cliff at 25.
 
 ### 2.5 The tokenizer discards the tokens that discriminate
 
@@ -390,6 +496,10 @@ Verified against source unless noted.
 | Planner at root, implementer in worktree | Stated invariant | Both re-rank different trees; the gate uses the planner's set. Divergence is by design but undocumented |
 | Import specifier is an alias, a glob or built at runtime | Resolve, or draw no edge | **Phase 3** — only relative and Python-dotted specifiers resolve; `@/lib/x` and a computed path draw nothing and contribute no frontier. Degrades to the pre-phase-3 ranking rather than throwing |
 | Import scan reads a file it cannot open | Skip, continue | **Phase 3** — `readText()` returns null and the file contributes no edges; a binary read as UTF-8 is rejected on its NUL |
+| Declaration scan reads a file it cannot open | Skip, continue | **Phase 4** — the same `readText()` guard and the same NUL rejection, so the two scans degrade identically and a file neither can read is ranked on its path alone |
+| A file declares nothing | Contribute nothing, stay rankable | **Phase 4** — a declaration only ever *adds* pull, so a file with no declarations is ranked exactly as before. A config, a doc and a stylesheet are all in this class and none is made worse by the pass |
+| A declaration regex fires on a comment or a string | Contribute a low-weight edge | **Phase 4** — accepted. `define: 12` divided by the fan-out makes a false positive worth a fraction of a real one, and §2.4's measured effect is +11.1 macro recall against it. §9 records that neither error direction is measured |
+| The same name is declared in many files | Speak with less than a name one file declares | **Phase 4** — the pull divides by `sqrt(n)`, not by `n`: measured, `1/n` is too blunt to reorder the mid-field and its plateau ends in a cliff. A file declaring a name that is *only* declared alongside ten others is not distinguished from them, which is correct and was the first thing the test for this asserted wrongly |
 
 ---
 
@@ -430,7 +540,7 @@ Aider's edge weights compound. The portable set, with the reason for each:
 | mentioned in the task text | ×10 | `input` → the one file that declares it |
 | long snake/kebab/camel identifier (≥8 chars) | ×10 | proxies "this name carries meaning" |
 | leading underscore (private) | ×0.1 | privacy convention as a relevance signal |
-| **defined in >5 files** | **×0.1** | demotes `task` (7) and `line` (5) — the ambiguous tokens |
+| **defined in >5 files** | ~~×0.1~~ → `1/sqrt(n)`, continuous | demotes `task` (7) and `line` (5) — the ambiguous tokens |
 | referenced *from an already-selected file* | ~~×50~~ **×3** | the dominant term; turns global popularity into frontier expansion |
 | reference count | `sqrt(n)` | a file that says `logger` 200× must not swamp a rare domain symbol |
 
@@ -468,6 +578,40 @@ The generalisable finding: on this corpus the value is in *breaking the alphabet
 tie toward adjacency*, not in a dominant term. §2.2's failure was 59 files tied at
 an identical score; a pull of a few points settles that, and 750 does not — it
 replaces one arbitrary order with another.
+
+**Measured in phase 4, and the same rule decides the fan-out's exponent.** The
+`>5 files → ×0.1` row above is the threshold form of a rule that does not want a
+threshold in it; the shipped form is `1/sqrt(n)` applied to every value of `n`,
+which is the same demotion with the step taken out, and the table's own `sqrt(n)`
+row is where the exponent came from. The three candidate divisors were measured
+against each other and they are not close:
+
+| divisor on the declaring-file count | macro recall | micro | nDCG | unoffered | shape of the sweep |
+|---|---|---|---|---|---|
+| none | **0.873** | **0.764** | **0.605** | **13** | 0.826 at 6–15, then 0.873 at 20–40, then 0.848 at 60 |
+| `1/n` | 0.855 | 0.727 | 0.587 | 15 | flat 10–25, 0.797 at 30 |
+| `1/sqrt(n)` | 0.855 | 0.727 | 0.585 | 15 | flat 6–20, 0.814 at 25 |
+| inverse-document-frequency | 0.848 | 0.709 | **0.591** | 16 | flat, lower recall at every weight |
+
+**The rule held for the edge and did not hold for the token, and that is the
+finding.** Undivided is the best variant on the mean by a wide margin — better
+macro, micro, nDCG, unoffered and leave-one-out floor than any divisor — and it is
+rejected because of a per-run failure the mean cannot show: on three of the Mission
+Control runs it fills all fifteen slots with files that merely declare the task's
+common vocabulary and returns **zero** of 22 gold files. §2.4 has the table.
+
+The asymmetry with the graph edge has a reason, and the reason is why this is not a
+contradiction of §5.3 but a boundary on it. A hub file's degree says a great deal
+about how much of a seed's pull is signal: nine imports from one file is a
+different kind of evidence from one. A token's document frequency says very little
+about whether the *task* is about that token — `plan` and `review` are declared
+widely because that is what the product is about, and their width is not evidence
+against the task naming them. So the edge needs the divisor and the token does not
+on the evidence, while the token needs it anyway on the failure mode. Both land on
+`sqrt`, for different reasons, and §9 keeps the disagreement.
+
+IDF is recorded because it is the principled form and it wins nDCG; it is not
+shipped because it loses macro recall at every weight tried.
 
 ### 5.3 Every signal must be self-normalising
 
@@ -989,6 +1133,31 @@ adversarial orders blow it up.
 4. **Symbol-level retrieval with definition fan-out** (§5.1). **1 of 7** misses,
    but the one the graph cannot reach from a cold start — an import edge needs a
    seed, and this is what supplies it.
+
+   **Landed — `declarations()` and `declaredBy()` in `src/context.mjs`.** The
+   declaration scan is six regexes and one character class, and the character class
+   is the design: requiring a match to start the line is what separates a
+   declaration from a function-local binding, without which `input` resolves to two
+   files rather than the one the whole phase rests on. Three departures, all in
+   §5.1: the scope filter is the column, the **whole-identifier half of the section
+   was built, measured at exactly 0.000000, and removed**, and the Rust patterns are
+   not carried because no file here is Rust.
+
+   The result is +11.1 macro recall / −5 unoffered against phase 3, and the
+   ablation in §2.4 is the part worth keeping: graph +5.3, symbol +8.2, together
+   +16.4 — superadditive, 22% more than the sum, which is §5.1's "an import edge
+   needs a seed" turned into arithmetic. The cost is the four regressing runs, all
+   one task whose gold is most of the repository.
+
+   **The divisor is the one place this phase did not ship its best number.** The
+   undivided pull beats the shipped `1/sqrt(n)` on every aggregate and zeroes three
+   runs doing it, so the phase ships the variant with the lower mean and the higher
+   floor. §2.4 and §5.2 both carry the table; §9 carries the argument for and
+   against, unresolved. A later phase that measures what a consumer does with a
+   wrong window — §6.3's index, or the reranking tier — should revisit it.
+
+   Reversible by construction: `define: 0` is the phase-3 ranking exactly, to six
+   decimals on all four metrics, and a test asserts it still is.
 5. **Self-normalising weights and the floor** (§5.3). The tokenizer floor ships here,
    as a pair with step 3's `1/(1+df)` weight — see the note in phase 1. Also the
    **debug record** (§5.10), moved here from phase 2: `normScore` and `ceil(q)`
@@ -1060,6 +1229,41 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
 - §5.13's field weight (`w = 5` on every non-content field) is borrowed from
   Sourcegraph's constant, not measured on this corpus. The `b = 0` on the path
   fields follows from the model's structure rather than from a measurement.
-- §2.4's fan-out table probes 5 tokens out of ~15. A token not probed (`add`,
-  `lines`, `better`, …) might resolve to a needed file; the "1 of 7" figure is a
-  floor, not the final count.
+- §2.4's fan-out table probes 5 tokens out of ~15, so its "1 of 7" is a floor, not
+  a count. The floor was the right number to carry into phase 4 anyway: the token
+  it named is the one the phase recovers, and it is recovered for the reason the
+  table gave.
+- **Phase 4 ships the second-best divisor, and the argument for it is a
+  judgment call.** Undivided beats `1/sqrt(n)` on macro (0.873 against 0.855),
+  micro, nDCG (0.605 against 0.585), unoffered (13 against 15) and the
+  leave-one-out floor (+8.3 against +6.2). It is rejected solely because it zeroes
+  three of fourteen runs where the shipped variant leaves them at ~0.05. That is
+  the right call if an empty-relevant window is categorically worse than a weak
+  one, which is the position taken here and is not measured — nothing in this
+  corpus says how a consumer behaves when it is handed fifteen wrong files instead
+  of one right one. A preference for the mean, or a downstream stage that reranks
+  hard enough to survive a drowned window, would flip the choice.
+- **IDF is the principled divisor and loses on one metric.** It wins nDCG (0.591)
+  and loses macro recall (0.848) at every weight tried. Recall is the headline here
+  because §2.1 asks how much of what the planner needed was offered at all, but a
+  consumer that cares which correct file comes *first* rather than how many arrive
+  would pick IDF. Nothing measured settles which is right.
+- **The column-0 scope filter is a proxy, not an analysis.** It counts a
+  declaration form at the start of a line inside a comment or a template literal,
+  and misses a genuine declaration that is indented for any reason — inside a class
+  body, a namespace, an IIFE, or a `describe` block. Both error directions are
+  unmeasured beyond the five tokens in §2.4's table. It is a scope filter that
+  works on this corpus, not a scope analysis, and a repository that wraps its
+  declarations would need the real thing.
+- **Phase 4's four regressing runs are one task, and the pass has no way to tell
+  that task from the others.** The Mission Control task's gold set is 16–27 files
+  of 53; the fan-out reorders a window that was already overflowing and loses
+  ground. There is no per-task guard — the pass cannot distinguish "the answer is
+  most of the repository" from "the answer is three files". Whether the trade is
+  worth taking depends on the task mix, and 14 runs of one repository is not that
+  mix.
+- **The Python and Ruby declaration patterns are untested.** They are reachable
+  (`.py` and `.rb` are in `SOURCE_FILE`) and this tree contains no file of either
+  language, so `def` and `class` have never matched anything here. They are carried
+  on the argument that another repository will exercise them, which is the argument
+  the Rust patterns were cut for not having.

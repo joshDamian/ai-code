@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,inspect,importGraph} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,inspect,importGraph,declarations} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -858,6 +858,86 @@ test('the graph is reversible with edge 0, and deterministic either way',()=>{
   const b=relevantFiles(p,task,{cwd:root,config:{edge:0}}).paths;
   assert.deepEqual(a,b);
   assert.ok(!a.includes('src/deep.mjs'),'edge 0 is the ranking as it was before the graph, so a change it causes is attributable');
+});
+
+test('a declaration at the top level counts and a binding inside a function does not',()=>{
+  // The column-0 rule, which is the whole reason the extractor is a regex and not
+  // a tree-sitter query. Measured on the real tree: without it `input` resolved to
+  // two files rather than one and `task` to thirteen rather than seven, because
+  // `const input = usage.inputTokens` is a binding, not a declaration of the thing
+  // a task names. The scope filter is what makes the fan-out mean "which file
+  // declares this" rather than "which files mention this word".
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','top.mjs'),'export const TextInput = 1;\n');
+  // On its own indented line, which is the shape the rule exists for and the shape
+  // the real tree has: `src/service.mjs` binds `input` four spaces in. A
+  // single-line body does not exercise the rule at all - an anchor that merely
+  // *allows* leading whitespace never gets the chance to fire on it.
+  fs.writeFileSync(path.join(root,'src','local.mjs'),`export function f(){
+  const input = 1;
+  return input;
+}
+`);
+  const defines=declarations(root,['src/top.mjs','src/local.mjs']);
+  assert.deepEqual([...defines.get('input')],['src/top.mjs'],'the top-level declaration is the one that names the symbol');
+  assert.ok(!defines.get('input').has('src/local.mjs'),'the function-local binding of the same word is not a declaration of it');
+  assert.ok(defines.get('text').has('src/top.mjs'),'and the identifier is keyed by its sub-tokens, which is what a task text contains');
+});
+
+test('a file the task never names is offered for the name it declares',()=>{
+  // §2.4's decisive case, on a fixture: `input` resolves to exactly one file in
+  // the repository and that file is the one the task is about. It shares no token
+  // with the task text, so it scores nothing lexically and the import graph cannot
+  // reach it either - there is no seed for it to expand from. This is the miss
+  // that only symbol retrieval can recover.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','form.mjs'),'export const TextInput = 1;\n');
+  fs.writeFileSync(path.join(root,'src','other.mjs'),'export const other = 1;\n');
+  const p={id:'p',name:'p',path:root};
+  const task={id:'t',title:'input',description:'',plan:null};
+  const off=relevantFiles(p,task,{cwd:root,config:{edge:0,define:0}});
+  const on=relevantFiles(p,task,{cwd:root,config:{edge:0}});
+  assert.ok(!off.paths.includes('src/form.mjs'),'with the def pass off the file is invisible to the task');
+  assert.ok(on.paths.includes('src/form.mjs'),'the file that declares the name the task uses is offered');
+  assert.equal(on.scores.find(f=>f.path==='src/form.mjs').define,true,'and it is marked as entering on a declaration rather than on its path');
+});
+
+test('a name one file declares speaks louder than a name the whole tree declares',()=>{
+  // §5.3's rule, and the exponent is the part the sweep had to settle: undivided,
+  // a name declared eleven times fills the window and the ranking becomes a
+  // popularity contest; divided by 11 the common name is too weak to move
+  // anything. Divided by sqrt(11) the rare name still outranks it.
+  //
+  // The comparison is across two names, not within one: the divisor is the token's
+  // own document frequency, so every file declaring the same name receives the
+  // same pull and no ordering between them is implied - which is the correct
+  // behaviour and the first thing this test asserted wrongly.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','rare.mjs'),'export const zebra = 1;\n');
+  for(const i of [...Array(10)].map((_,i)=>i))fs.writeFileSync(path.join(root,'src',`common${i}.mjs`),'export const widget = 1;\n');
+  const p={id:'p',name:'p',path:root};
+  const picked=relevantFiles(p,{id:'t',title:'zebra widget',description:'',plan:null},{cwd:root,config:{edge:0}});
+  const rank=(f)=>picked.paths.indexOf(f);
+  assert.ok(rank('src/common0.mjs')>=0,'the widely declared name still contributes its files');
+  assert.ok(rank('src/rare.mjs')<rank('src/common0.mjs'),'the name only one file declares is ranked above every file declaring the common one');
+});
+
+test('the def pass is reversible with define 0, and deterministic either way',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','form.mjs'),'export const TextInput = 1;\n');
+  fs.writeFileSync(path.join(root,'src','other.mjs'),'export const other = 1;\n');
+  const p={id:'p',name:'p',path:root};
+  const task={id:'t',title:'input',description:'',plan:null};
+  // The pull accumulates into a float sum from a Map, which is the iteration §5.11
+  // names as the hazard, so the second call is the assertion.
+  const a=relevantFiles(p,task,{cwd:root,config:{edge:0,define:0}}).paths;
+  const b=relevantFiles(p,task,{cwd:root,config:{edge:0,define:0}}).paths;
+  assert.deepEqual(a,b);
+  assert.ok(!a.includes('src/form.mjs'),'define 0 is the ranking as it was before symbol retrieval, so a change it causes is attributable');
 });
 
 test('vendored and editor directories are dropped at the walk',()=>{
