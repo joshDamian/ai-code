@@ -471,6 +471,19 @@ function scoreFile(file, tokens, recentRank, ctx = {}) {
   const stem = base.replace(/\.[^.]+$/, '');
   const dir = path.dirname(file);
   const { df, half = 0, gain = 1, floor = 3, parts = false } = ctx;
+  // §5.3 step 3's shape, and phase 8 asked the remaining question about it: the
+  // strictly-positive `idf` (§5.3 step 4) is the principled weight, and §9 carried
+  // "IDF is the principled divisor and loses on one metric" as an unresolved bullet.
+  // Blended as `w = (1 - idfWeight)·(half/(half+df)) + idfWeight·(idf/idfMax)` and
+  // swept in one process against one tree, every non-zero setting is a tie or a loss
+  // on the metrics that ship: 0.25 and 0.5 read 0.8805/0.7818, identical to `half`'s
+  // own, with windows that are *not* the same (the blend reorders without changing
+  // what the window scored), and 0.75 and 1 fall to 0.8435/0.7636 with unoffered
+  // 12 to 13. The only movement anywhere is MRR rising 0.0119 at 0.25 while nDCG
+  // falls 0.0026 - phase 7's distrust shape at its smallest. So the design's formula
+  // as written stays on the path, and the resolution §9 hoped for - recall weight on
+  // the path, IDF on the symbol edge - is unavailable, because the symbol edge was
+  // rejected in this same phase. The bullet is scoped, not closed.
   const w = (t) => (half > 0 && df ? gain * (half / (half + (df.get(t) || 0))) : 1);
   // The priors - entry point, config, recency - are deliberately left at their
   // absolute values rather than scaled with the token hits, and that was measured
@@ -479,8 +492,31 @@ function scoreFile(file, tokens, recentRank, ctx = {}) {
   // 0.6218) and one unoffered file. So the priors are strong against the new token
   // scale and the harness prefers it that way. The cost is a small tree where the
   // recency bucket (~5) rivals a basename hit (~5), which the tie test in
-  // tests/test.mjs pins; on this repo recency coverage is 100%, so that bucket is
-  // ordering rather than signal. §9 records it as unresolved.
+  // tests/test.mjs pins.
+  //
+  // Phase 8 re-asked this jointly, with the priors swept as one scale against a
+  // scorer carrying the declaration fan-out as a fourth signal, and the third
+  // rejection is the same shape as the first two: macro and micro plateau from 0.75
+  // to 1.5 (0.8805/0.7818 at every setting, on windows that are not identical), and
+  // everything above 1.5 moves only MRR and nDCG upward while macro falls to 0.8551,
+  // micro to 0.7273 and unoffered rises 12 to 15. Phase 7's rule - "MRR and nDCG
+  // rise while recall falls, which is the shape to distrust" - is why the bar for
+  // this one was set at +3 macro rather than the +2 the rest of the phase used, and
+  // no setting reaches it. So the priors keep their absolute values, and §9's
+  // bullet is now a third measurement rather than a carried caveat.
+  //
+  // **§5.3's `1 − coverage` recency weight was implemented, measured, and not
+  // shipped, and the number is the finding.** Recency coverage here is exactly
+  // 1.0000 - all 68 rankable files appear in the last 200 commits - so the section's
+  // own rule sets the bonus to zero everywhere. Doing that costs macro 0.8805 to
+  // 0.7889, micro 0.7818 to 0.5818, unoffered 12 to 23, and takes `zeroRuns` 0 to 3.
+  // §5.3 is right that the signal carries no information; what the measurement adds
+  // is that on this corpus the bonus carries nine points of macro recall anyway,
+  // because the gold set is what an agent *read* and that is itself correlated with
+  // what changed recently. The benchmark cannot separate "found the right file" from
+  // "listed the file git just touched", which is a fact about the corpus and not
+  // about the correction. Recorded in §9; the correction is unshipped rather than
+  // the bonus being justified.
   let score = 0;
   // A basename hit is the strongest signal available without reading the file: the
   // task named the thing, and this file is called that.
@@ -633,6 +669,14 @@ export function importGraph(root, files, cache) {
 //
 // Deterministic: the max is over a Set, but only the pull is kept, so the order
 // two equal pulls are discovered in cannot reach the output.
+// `1 + n` rather than `n`, so a seed with one neighbour keeps most of its pull and
+// the divisor only bites on a seed that fans out. Swept as its own axis in phase 8
+// against `1 + sqrt(n)` and against no divisor at all, in one process on one tree:
+// removing it reads macro 0.8805 to 0.6954, micro 0.7818 to 0.4182, unoffered 12 to
+// 32, and `zeroRuns` 0 to 3 - the three Mission Control runs, which is the
+// phenomenon `declaredBy` records for the *other* relation and which phase 8 found
+// reproduces here at the shipped weight. `sqrt` is between the two and loses to both
+// on the shipping metrics. §9's divisor bullet is corroborated on this relation.
 function frontier(seeds, scores, graph, weight) {
   const pull = new Map();
   for (const seed of seeds) {
@@ -838,17 +882,27 @@ function declaredBy(tokens, defines, weight) {
     // weak proxy for how common the name is and should not speak with a strong
     // voice.
     //
-    // **Undivided measured higher and was rejected anyway.** With no divisor at
-    // all the macro recall is 0.873 against 0.855 here, every metric better and a
-    // wider leave-one-out margin - and on a task whose tokens are all common
-    // vocabulary it fills all fifteen slots with files that merely declare those
-    // words, returning zero relevant files out of 22 gold. Measured on the Mission
-    // Control runs: 0.182, 0.250 and 0.211 become 0.000, where this divisor leaves
-    // them at 0.045, 0.063 and 0.053. A ranker that can hand back an empty-relevant
-    // window has failed in a way recall@15 averaged over a corpus cannot express,
-    // and one constant buys its absence back. §5.3's rule is what does it: a signal
-    // whose weight does not fall with its coverage is a signal that will drown the
-    // window on the queries where coverage is all it has.
+    // **Undivided was rejected, and phase 8 re-measured why it was rejected.**
+    // §5.3's rule is the argument: a signal whose weight does not fall with its
+    // coverage is a signal that will drown the window on the queries where coverage
+    // is all it has. The numbers originally recorded here - 0.873 undivided against
+    // 0.855, and the three Mission Control runs going from 0.182/0.250/0.211 to
+    // 0.000 - were measured at a different constant set and **do not reproduce on
+    // this tree**. What the phase-8 sweep finds at the shipped `define: 12` is the
+    // weaker version: undivided reads 0.8630/0.7455 with unoffered 14 against
+    // 0.8805/0.7818 with 12, and `zeroRuns` stays 0 for every divisor including
+    // none, so at this weight the fan-out never takes a window to zero relevant
+    // files. `linear` (dividing by the full count) is 0.8551/0.7273/15, worse still.
+    //
+    // The empty-window phenomenon is real and phase 8 found where it lives: on the
+    // *import* edge, at the shipped `edge: 2`, where removing that divisor takes
+    // `zeroRuns` 0 to 3 - the same three Mission Control runs - and unoffered 12 to
+    // 32. On this edge it takes `define: 60` to reproduce (zeroRuns 0 to 3), and at
+    // that weight the undivided variant is *better* on every metric, which says the
+    // divisor here is damping a harm the weight itself causes rather than preventing
+    // one. So the two divisors are not one argument made twice: `1 + n` on the import
+    // edge is load-bearing at full strength, and `sqrt(n)` here is a scale choice
+    // that the ordinary metrics prefer. §9 carries both readings.
     const w = weight / Math.sqrt(files.size);
     for (const file of files) pull.set(file, (pull.get(file) || 0) + w);
   }

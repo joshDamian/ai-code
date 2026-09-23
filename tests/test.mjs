@@ -1528,6 +1528,45 @@ test('the def pass is reversible with define 0, and deterministic either way',()
   assert.ok(!a.includes('src/form.mjs'),'define 0 is the ranking as it was before symbol retrieval, so a change it causes is attributable');
 });
 
+test('every score decomposes to the signals it turned on, and each signal is attributable to one config key',()=>{
+  // §5.3's third reversibility claim (`docs/ranker.md`): the phase-4 configuration
+  // is recoverable by turning the later signals off, and each is attributable to the
+  // key that owns it. The two tests above check one key each against one outcome; this
+  // is the general form, and it is why it is the only one that needs `debug` - the
+  // breakdown is the thing being asserted, so the call has to build it.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','hub.mjs'),"import {d} from './deep.mjs';\nexport function widgetHub(){}\n");
+  fs.writeFileSync(path.join(root,'src','deep.mjs'),'export const d=1;\n');
+  fs.writeFileSync(path.join(root,'src','other.mjs'),'export const o=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const task={id:'t',title:'widget deep',description:'',plan:null};
+  const sum=(f)=>(f.parts?.stem||0)+(f.parts?.dir||0)+(f.parts?.entry||0)+(f.parts?.config||0)+(f.parts?.recent||0);
+  // The same call twice: a Map-order float sum is §5.11's hazard, so deterministic
+  // is the property that has to hold before anything else is worth asserting.
+  const run=(config)=>relevantFiles(p,task,{cwd:root,config:{...config,debug:true}});
+  const off=run({edge:0,define:0});
+  assert.deepEqual(run({edge:0,define:0}).paths,off.paths);
+  const on=run({edge:2,define:12});
+  for(const r of [off,on]){
+    assert.ok(r.scores.length>0);
+    for(const f of r.scores){
+      // Each signal is a component of `score`, not a re-scoring of it. `hub.mjs`
+      // carries all three - a path hit, a declaration pull and an import pull - so
+      // this is checked on a file where every term is non-zero at once.
+      assert.equal(f.score,sum(f)+(f.define||0)+(f.graph||0),`${f.path} in ${JSON.stringify(r.debug.config)}`);
+    }
+  }
+  assert.ok(off.scores.every(f=>f.define===undefined&&f.graph===undefined),'the two later signals are absent, not zero, when their keys are off');
+  assert.ok(off.scores.every(f=>f.score===sum(f)),'and the score is then exactly the phase-4 sum of parts');
+  assert.ok(on.scores.some(f=>f.define>0),'define on puts a declaration pull on the file that declares the named symbol');
+  assert.ok(on.scores.some(f=>f.graph>0),'edge on puts an import pull on the seed\'s neighbour');
+  // Reversal is a claim about the ranking, not only about the arithmetic: turning
+  // the two signals off has to change which files are offered, or "reversible" would
+  // be describing a no-op.
+  assert.notDeepEqual(on.paths,off.paths);
+});
+
 test('a file that merely mentions a name is not the file that declares it',()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
   fs.mkdirSync(path.join(root,'src'),{recursive:true});

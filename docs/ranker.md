@@ -261,6 +261,28 @@ one seed's neighbours. Dividing by the seed's fan-out is likewise not optional:
 undivided, *every* weight is worse than disabling the graph (macro recall 0.691 →
 0.544). Both are recorded in §5.2.
 
+**Phase 8 corroborated the divisor on a metric that does not average, and found it
+on the other relation's territory.** Swept at `contentHash ae85afc28f59` as `1 + n`
+(shipped) against `1 + sqrt(n)` and against no divisor at all, in one process on one
+tree:
+
+| divisor | macro | micro | unoffered | `zeroRuns` |
+|---|---|---|---|---|
+| `1 + n` (shipped) | 0.8805 | 0.7818 | 12 | 0 |
+| `1 + sqrt(n)` | 0.7995 | 0.6000 | 22 | 3 |
+| none | 0.6954 | 0.4182 | 32 | 3 |
+
+The last column is the point. §5.1's note on the *declaration* divisor argues the
+fan-out has to fall with coverage because otherwise a common-vocabulary query fills
+the window with files that merely mention the terms, "returning zero relevant files
+out of 22 gold". At the shipped constants that does not happen on the declaration
+edge — `zeroRuns` stays 0 there for every divisor — and it happens **here**, at the
+shipped edge weight, on the same three Mission Control runs. So the empty-window
+argument is this relation's, and it is now measured at the shipped value rather
+than asserted for a different one. Removing the divisor takes unoffered from 12 to
+32: a ranker that can hand back a window with nothing relevant in it has failed in a
+way `recall@15` averaged over a corpus cannot express, and this counts it.
+
 **Built and measured — phase 4.** The declaration scan of §5.1, over the same 14
 runs, same tree, same process. Each mechanism ablated against the other:
 
@@ -322,6 +344,21 @@ categorically rather than marginally, and one constant buys its absence back.
 **§5.3's rule predicted this exact failure and the headline metric said to ignore
 it.** The per-run floor is what caught it, which is why this phase reports per-run
 deltas beside the mean and why §9 keeps the argument open.
+
+**Phase 8 re-measured it, and the specific figure does not reproduce.** The table
+above is phase 4's, at phase 4's constants (`edge: 3`, `floor: 3`, no `dfHalf`).
+Re-swept in one process on one tree at `contentHash ae85afc28f59`, undivided reads macro
+**0.8630**, micro 0.7455, unoffered 14 — worse than `1/sqrt(n)`'s 0.8805/0.7818/12,
+in the same direction as before but by a much smaller margin — and **`zeroRuns` is
+0 for every divisor including none**. So at `define: 12` the fan-out no longer takes
+a window to zero relevant files, and the argument this section makes for the
+divisor is not the one the current constants show. The phenomenon is real and it
+moved: it reproduces on the **import** edge at the shipped weight (`1 + n` → none
+takes `zeroRuns` 0 → 3 on the same three Mission Control runs; §5.2 carries it), and
+here it needs `define: 60`, where the undivided variant is *better* on every metric
+— which says the divisor is damping a harm the weight causes rather than preventing
+one. `1/sqrt(n)` keeps its place on the ordinary metrics at the shipped weight, and
+that is now the stated reason rather than the empty-window one.
 
 `1/n` and `1/sqrt(n)` are indistinguishable where both peak — 0.855 each — and it
 is their agreement, rather than either one's number, that says the flattening is
@@ -837,7 +874,75 @@ The cost of that choice is visible on a small tree. With a df=1 basename hit wor
 file the task named** in a fixture whose source files are uncommitted. On this
 repository recency coverage is **100%** — all 69 paths appear in the last 200
 commits — so the prior is pure ordering with no coverage signal behind it, which is
-exactly the shape §5.3 opens by warning about. Left unresolved; §9 carries it.
+exactly the shape §5.3 opens by warning about.
+
+**Built and measured — phase 8, against the phase-5 objection directly.** This
+section opens with the correction and phase 5 shipped without it, so phase 8
+implemented it: the recency bonus multiplied by `1 − coverage`, coverage being the
+share of the 68 rankable files the last 200 commits touched. Measured at
+**1.0000** — 68 of 68 — so the faithful implementation sets the bonus to zero
+everywhere. It is not a no-op, and that is the finding.
+
+Every sweep in this block and the two below was run in one process against one
+tree, `contentHash ae85afc28f59`, the tree the sweep keys were built on. The keys
+were removed afterwards — none of them shipped — and the shipped configuration
+re-measured at `contentHash f1ac7a80e04c` reproduces the base arm exactly: macro
+0.8805, micro 0.7818, unoffered 12, MRR 0.6667, nDCG 0.6442, `zeroRuns` 0, tailShare
+0.7386. So every non-zero value in the tables below is a property of the *setting*
+and not of the scaffolding tree it was measured on.
+
+| arm | macro | micro | MRR | nDCG | unoffered | `zeroRuns` |
+|---|---|---|---|---|---|---|
+| recency as shipped | 0.8805 | 0.7818 | 0.6667 | 0.6442 | 12 | 0 |
+| × `1 − coverage` | 0.7889 | 0.5818 | 0.6012 | 0.5254 | 23 | 3 |
+| all priors off | 0.7815 | 0.5636 | 0.6012 | 0.5207 | 24 | 3 |
+
+The correction costs **9.2 points of macro recall and 20 of micro**, and takes
+`zeroRuns` from 0 to 3. Removing every prior including entry point and config costs
+9.9 and 21.8, so recency alone accounts for almost all of it.
+
+The section is right that the signal carries no information. What the number adds is
+that the bonus carries nine points of this benchmark anyway, and the reason is the
+benchmark: gold is the set of files an agent *read*, and what an agent reads is
+itself correlated with what git just touched. **Recall@15 here cannot separate
+"found the right file" from "listed the file that changed"** — which is a fact about
+the corpus, not about the correction, and it is the reason this is recorded rather
+than shipped. Shipping it would trade a measured 9 points for a mechanism no
+measurement here can see. §9 carries both halves.
+
+**The prior scale was re-swept a third time** — this phase adds the declaration
+fan-out as a fourth term, so the joint question is not the one rejected twice. The
+bar was raised deliberately, to +3 macro rather than this phase's +2, because two
+rejections justify requiring more of the third attempt. Nothing reaches it. Macro
+and micro **plateau** from 0.75 to 1.5 — 0.8805/0.7818 at every setting, on windows
+that are not identical, so the plateau is a tie in score and not in order — and
+everything above 1.5 moves only in the distrust shape: 2 and 3 read MRR 0.7211 and
+0.7500 against 0.6667, with macro down to 0.8551 and 0.8450, micro down to 0.7273
+and 0.7091, and unoffered up to 15 and 16. The priors keep their absolute values.
+Zero lowers them out: macro 0.7815, micro 0.5636, `zeroRuns` 3.
+
+**The path token's weight has now been swept past `half/(half + df)` itself.**
+§5.3 step 4 asks for Lucene's IDF and §9 carried "IDF is the principled weight and
+loses on one metric" as a statement about the *symbol fan-out* only. Blended on the
+path — `w = (1 − idfWeight)·(half/(half+df)) + idfWeight·(idf/idfMax)`, both terms at
+their own scale so that `idfWeight = 0` is the design's formula exactly — every
+non-zero setting is a tie or a loss on the metrics that ship:
+
+| `idfWeight` | macro | micro | MRR | nDCG | unoffered |
+|---|---|---|---|---|---|
+| 0 (shipped) | 0.8805 | 0.7818 | 0.6667 | 0.6442 | 12 |
+| 0.25 | 0.8805 | 0.7818 | 0.6786 | 0.6416 | 12 |
+| 0.50 | 0.8805 | 0.7818 | 0.6607 | 0.6350 | 12 |
+| 0.75 | 0.8435 | 0.7636 | 0.6250 | 0.6159 | 13 |
+| 1 (IDF alone) | 0.8435 | 0.7636 | 0.6095 | 0.6145 | 13 |
+
+0.25 and 0.5 tie macro, micro and unoffered **exactly** and the windows are not the
+same — the guard reports `equal: false` — so the blend reorders the window without
+changing what it scored. The only movement anywhere is MRR up 0.0119 at 0.25 while
+nDCG falls 0.0026, which is phase 7's distrust shape at its smallest. So the design's
+formula as written stays, and the resolution §9 hoped for — recall weight on the
+path, IDF on the tie-breaking symbol edge — is **unavailable**, because the symbol
+edge was rejected in this same phase (see §5.1). The bullet is scoped, not closed.
 
 ### 5.4 Rank hierarchically
 
@@ -2098,8 +2203,59 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
 - §5.2's measured weights come from 14 gold-bearing runs over 6 tasks, with 5 runs
   capped and two tasks carrying 8 of the 14. The *direction* of the two findings
   is well supported — the sweeps are monotone across a wide range and the
-  leave-one-out is positive in every fold — but the values 3 and `1 + n` are not
-  fitted, and §5.3's calibration phase can move them.
+  leave-one-out is positive in every fold — but the values are not fitted, and
+  §5.3's calibration phase can move them. Phase 8 re-swept `edge`, `define` and both
+  divisors on the final scorer and **moved none of them**: `edge: 2`, `define: 12`,
+  `1 + sqrt(n)` on the declarations and `1 + n` on the imports all still win their
+  own grids. The number in this bullet used to read "3"; it is 2, which phase 5 set
+  when the token weight changed and this bullet did not follow.
+- **The two divisors are not one argument made twice, and phase 8 separated them.**
+  The fan-out rule §5.3 states — a signal whose weight does not fall with its
+  coverage will drown the window on a query whose only evidence is coverage — is
+  measured **on the import edge at the shipped weight**: replacing `1 + n` with no
+  divisor takes macro 0.8805 → 0.6954, micro 0.7818 → 0.4182, unoffered 12 → 32, and
+  `zeroRuns` 0 → 3. On the declaration edge at the shipped `define: 12` the same
+  removal is merely worse on the ordinary metrics (0.8805 → 0.8630) and `zeroRuns`
+  stays 0; the empty-window effect needs `define: 60`, where the undivided variant
+  wins every metric, so there the divisor damps a harm the weight causes. §5.1's
+  phase-4 table — undivided at 0.873 with three runs at 0.000 — was measured at
+  phase 4's constants and **does not reproduce**; the section now says so inline.
+  Neither divisor is therefore a judgment call any more; each is load-bearing on its
+  own relation, and the empty-window argument belongs to §5.2.
+- **§5.3's `1 − coverage` recency weight was implemented and measured, and the
+  number is a finding about the benchmark.** Recency coverage on this repository is
+  exactly **1.0000** — all 68 rankable files appear in the last 200 commits — so the
+  section's own rule sets the bonus to zero everywhere. Doing it costs macro 0.8805
+  → 0.7889, micro 0.7818 → 0.5818, unoffered 12 → 23, `zeroRuns` 0 → 3; dropping
+  every prior instead (entry point, config and recency together) costs 0.7815, so
+  recency alone carries almost all of it. §5.3 is right that the signal has no
+  information; **the bonus nevertheless carries nine points of this benchmark**,
+  because gold is the set of files an agent *read* and reading is correlated with
+  recent change. Recall@15 here cannot separate "found the right file" from "listed
+  the file git just touched". The correction is unshipped — trading a measured 9
+  points for a mechanism no measurement here can see — and this is a validity limit
+  on every recall figure in §2 and §5, not just on recency.
+- **§5.3 step 4's IDF has now been swept as the path token's weight, and §9's old
+  bullet was about the wrong signal.** "IDF is the principled weight and loses on
+  one metric" was measured on the *symbol fan-out*, where the tie-breaking job is
+  nDCG's question. Blended onto the path itself
+  (`w = (1 − idfWeight)·(half/(half+df)) + idfWeight·(idf/idfMax)`), every non-zero
+  setting is a tie or a loss on the metrics that ship: 0.25 and 0.5 match
+  0.8805/0.7818/12 exactly on windows that are **not** the same, 0.75 and 1 fall to
+  0.8435/0.7636 with unoffered 13, and the only movement anywhere is MRR +0.0119 at
+  0.25 against nDCG −0.0026 — phase 7's distrust shape at its smallest. The design's
+  formula stays. The resolution — recall weight on the path, IDF on the symbol edge
+  — is unavailable because the symbol edge was rejected in the same phase, so the
+  bullet is scoped rather than closed.
+- **The prior scale was rejected a third time, and the bar was raised to make it
+  meaningful.** Because two prior rejections already existed, this sweep required
+  **+3 macro** rather than the +2 the rest of the phase used, no micro loss and no
+  `zeroRuns` rise. Nothing reaches it: macro and micro plateau across 0.75–1.5
+  (identical scores, non-identical windows) and everything above 1.5 moves only MRR
+  and nDCG upward — 0.7211 and 0.7500 against 0.6667 — while macro falls to 0.8551
+  and 0.8450 and unoffered rises to 15 and 16. The priors keep their absolute
+  values. The higher bar is stated here so a later reader does not read it as
+  inconsistency with the rest of the phase.
 - The import scan resolves a specifier only within the repository. An alias
   (`@/lib/x`) or a path built at runtime draws no edge, so a repository that uses
   either gets less frontier than the design assumes — untested, and this
