@@ -74,10 +74,16 @@ function toolPaths(events) {
 }
 
 // The files the planner's prompt was assembled from, persisted by prepare() with
-// the planner role before the plan existed.
+// the planner role before the plan existed. Two shapes are in the database: the
+// current manifest stores `files` as `{path, tokens}`, and an older one stored bare
+// path strings. Both name the same thing, and a task prepared under the old shape
+// is planned and executed under this one, so the read accepts either. Reading only
+// `.path` returned [] for the string form, which silently dropped the context half
+// of the read set - a gate that then could not fire on the files it exists for.
 function contextPaths(task) {
   try {
-    return (JSON.parse(task.context || '{}').files || []).map((f) => f.path).filter(Boolean);
+    const files = JSON.parse(task.context || '{}').files || [];
+    return files.map((f) => (typeof f === 'string' ? f : f?.path)).filter(Boolean);
   } catch {
     return [];
   }

@@ -1611,6 +1611,27 @@ test('execution is refused when a file the plan was written against is still dir
   assert.equal(s.task(t.id).worktree,null,'no worktree was built for a run that never happened');
 });
 
+test('the execution gate reads a legacy string context manifest',async()=>{
+  // prepare() persists the context manifest, and its shape changed: an older build
+  // wrote bare path strings, the current one writes {path, tokens}. Both are still
+  // in the database, and reading only `.path` collapsed the string form to [] - so
+  // the context half of the read set vanished and the gate could not fire on the
+  // very files it exists to protect. The fixture is the same refusal as the test
+  // above, reached through the old shape.
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  s.updateProvider('mock',{config:{readPaths:[]}});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  s.store.updateTask(t.id,{context:JSON.stringify({project:{id:p.id},task:{id:t.id},files:['app.mjs']})});
+  fs.writeFileSync(path.join(root,'app.mjs'),'export const version=2;\n');
+  await s.plan(t.id);
+  s.approve(t.id);
+  const err=await s.implement(t.id).then(()=>null,e=>e);
+  assert.equal(err.code,'PLAN_BASE_DIRTY');
+  assert.equal(JSON.parse(s.task(t.id).plan_base).seen.includes('app.mjs'),true,'the legacy path reached the baseline');
+});
+
 test('a dirty file the plan never depended on does not block execution',async()=>{
   // The other direction. This repository is nearly always mid-change, so a gate
   // that fired on any dirty file would fire on every task and mean nothing.
