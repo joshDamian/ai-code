@@ -961,6 +961,120 @@ test('an empty repository is labelled EMPTY rather than looking like a bad ranki
   assert.equal(no.manifest.state,'EMPTY','nothing scored is EMPTY whether or not the terms exist');
 });
 
+// §5.5's render fixtures. `WORDS` is a list of declarations no two of which share
+// a token, so a task can name exactly one of them; the bodies are longer than
+// `OUTLINE_ABOVE` so the outline has something to elide.
+const WORDS=['alpha','bravo','charlie','delta','echo','foxtrot','golf','hotel','india','juliet','kilo','lima','mike','november','oscar','papa','quebec','romeo','sierra','tango','uniform','victor','whiskey','xray'];
+function surfaceSource(){
+  const lines=['// The module comment of widget, which is what a reader sees first.','import x from "y";',''];
+  for(const w of WORDS){
+    lines.push(`// What ${w} does, for widget.`,`// The second line of the comment for ${w}.`,`export function ${w}(input) {`);
+    for(let j=0;j<6;j++) lines.push(`  const step${j} = input + ${j}; // padding so the body is worth eliding`);
+    lines.push('}','');
+  }
+  return lines.join('\n');
+}
+function renderOf(files,title,config,root){
+  root=root||fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  for(const [name,text] of Object.entries(files)) fs.writeFileSync(path.join(root,'src',name),text);
+  const p={id:'p',name:'p',path:root};
+  const r=relevantFiles(p,{id:'t',title,description:'',plan:null},{cwd:root,limit:1,config});
+  return r.contents.length?r.contents[0].text:null;
+}
+
+test('a file past the render threshold is sent as its surface, and its numbers are the file\'s',()=>{
+  // §5.5. The old render sent the first 12000 characters of a file. On this
+  // repository that is 55% of the slots in a typical context, and what it cut was
+  // usually the declaration the task was about.
+  const body=surfaceSource();
+  assert.ok(body.length>12000,'the fixture is over the threshold');
+  const text=renderOf({'widget.mjs':body},'widget');
+  assert.ok(text.length<body.length,'the surface is smaller than the file it stands for');
+  for(const w of WORDS) assert.ok(text.includes(`export function ${w}(input) {`),`${w} is listed`);
+  assert.ok(!text.includes('const step0 = input'),'and no body is, since the task named none of them');
+  assert.match(text,/⋮\.\.\./,'with what was dropped marked as dropped');
+  // The strong half: every number beside a row is the file's own line number, which
+  // is what makes the range readable back out with a ranged read.
+  const lines=body.split('\n');
+  for(const w of ['alpha','mike','xray']){
+    const n=lines.findIndex(l=>l.startsWith(`export function ${w}(`))+1;
+    assert.ok(text.includes(`${String(n).padStart(4)} │export function ${w}(input) {`),`${w} carries line ${n}`);
+    const c=lines.findIndex(l=>l.includes(`// What ${w} does`))+1;
+    assert.ok(text.includes(`${String(c).padStart(4)} │// What ${w} does, for widget.`),`and its comment carries line ${c}`);
+  }
+  for(const row of text.split('\n')){
+    if(row.startsWith('     ⋮')) continue;
+    const m=row.match(/^(\s*\d+) │(.*)$/);
+    assert.ok(m,`every drawn row carries a number: ${JSON.stringify(row)}`);
+    assert.ok(m[2].length<=100,`and is capped at the section's column: ${m[2].length}`);
+  }
+  // The listing stops at the cap, and says how much of itself it dropped. No file in
+  // this repository reaches that - the largest has 56 declarations and the cap is
+  // characters, not declarations - so it is exercised by shrinking the cap.
+  const capped=renderOf({'widget.mjs':body},'widget',contextConfig({fileChars:400}));
+  assert.match(capped,/⋮\.\.\. \(\d+ more declarations\)/);
+  assert.ok(!capped.includes('export function xray'),'and the tail of the file is not listed');
+});
+
+test('a file at or under the cap is sent whole, byte for byte',()=>{
+  // The cap is where the head began, so nothing that used to arrive whole arrives as
+  // a summary of itself.
+  const short='// widget\n'+'export const widget = 1;\n'.repeat(8);
+  assert.ok(short.length<=300,'the fixture is under the shrunken cap');
+  assert.equal(renderOf({'widget.mjs':short},'widget',contextConfig({fileChars:300})),short);
+  const long=short+'// widget padding, which takes it over the cap.\n'.repeat(10);
+  assert.ok(long.length>300);
+  const surface=renderOf({'widget.mjs':long},'widget',contextConfig({fileChars:300}));
+  assert.notEqual(surface,long,'over the cap, a surface');
+  // And the invariant that makes the render free: it never spends more characters
+  // than the head it replaces, because it is cut to the same cap. One row of slack,
+  // since a row is measured before it is drawn.
+  assert.ok(surface.length<=300+106,`${surface.length} characters`);
+});
+
+test('the outline carries the body of the declaration the task names',()=>{
+  // §5.4's second stage - file, then function. Without it the surface is a table of
+  // contents for a file the agent then has to read in full anyway.
+  const body=surfaceSource();
+  const text=renderOf({'widget.mjs':body},'widget bravo');
+  assert.ok(text.includes('const step0 = input + 0; // padding so the body is worth eliding'),'the named declaration is drawn in full');
+  const untold=renderOf({'widget.mjs':body},'widget');
+  assert.ok(!untold.includes('const step5 = input + 5;'),'and an unnamed one is not');
+});
+
+test('a file with nothing to outline falls back to the head it always sent',()=>{
+  // Declaration-less source and non-source alike: the surface is a listing of
+  // declarations, and a file that has none has no listing to give.
+  const blob='widget '.repeat(4000)+'\n';
+  const noDecl=renderOf({'widget-blob.mjs':blob},'widget');
+  assert.match(noDecl,/… \(truncated, \d+ chars total\)$/);
+  assert.ok(!noDecl.includes('⋮...'));
+  const prose='# widget\n'+'the widget paragraph, at length.\n'.repeat(600);
+  const md=renderOf({'widget-notes.md':prose},'widget');
+  assert.match(md,/… \(truncated, \d+ chars total\)$/);
+  assert.ok(!md.includes('⋮...'),'a markdown file is never outlined');
+});
+
+test('the surface is never the larger of the two, however small the cap',()=>{
+  // The render is cut to the same `fileChars` the head is cut to, so it cannot cost
+  // more than what it replaces at any setting - including one small enough that the
+  // head's own 12 lines do not fit in it.
+  const body=surfaceSource();
+  for(const cap of [200,800,4000]){
+    const text=renderOf({'widget.mjs':body},'widget',contextConfig({fileChars:cap}));
+    assert.ok(text.length<=cap+106,`${text.length} characters at a ${cap} cap`);
+  }
+});
+
+test('the render is deterministic',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  const body=surfaceSource();
+  const a=renderOf({'widget.mjs':body},'widget bravo',null,root);
+  const b=renderOf({'widget.mjs':body},'widget bravo',null,root);
+  assert.equal(a,b);
+});
+
 test('an acronym run splits off the word that follows it',()=>{
   const root=repo();
   fs.mkdirSync(path.join(root,'src'),{recursive:true});

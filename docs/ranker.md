@@ -511,6 +511,7 @@ Verified against source unless noted.
 | All candidates tie | Deterministic order | `localeCompare` — locale-sensitive |
 | Ranker throws | Degrade, never throw | **Phase 6** — `FAILED`: `Service#ranked()` catches on both call sites (`prepare()` was unwrapped), returns a tree-only context with the error in `manifest.note`, and the run continues. Persisted as `runs.context_state` |
 | Binary / >2 MB file | Path only | Handled, silently |
+| **File larger than the per-file cap** | Emit its surface, not its head | ~~**First 12 000 characters, whatever they contained**~~ **Phase 7** — §5.5's surface: head, every declaration with its line number, the comment above each, and the body of any declaration the task names. 190 of the harness's 347 slots render this way; the other 157 are inlined whole because they always were. A file with no declarations — or not source — still gets the head, and the surface is capped at the same `fileChars` the head is, so it is never the larger of the two |
 | Symlinked directory | Follow or report | `Dirent.isDirectory()` is false for a symlink → pushed as a file, never recursed |
 | Filename containing a newline | Correct parsing | `git log --name-only` split on `\n` yields garbage entries |
 | Monorepo, 200k files | Bounded work | Full sync walk ×2; `tree: 400` is an alphabetical prefix, so anything past the 400th path is undiscoverable |
@@ -742,6 +743,14 @@ still ~38% — file localisation is necessary but not sufficient. Windsurf's Fas
 Context and Sourcegraph both converge on **files plus line ranges** as the output
 shape, which is also the shape that makes the output verifiable.
 
+**Built and measured — phase 7.** The second stage ships inside the render rather
+than as a second retrieval pass: a declaration whose name the task's own tokenizer
+matches against the task's tokens has its body inlined in full, up to
+`matchedChars` (2000 characters, shared across at most two of them), above the
+list of names. The third stage is what the line numbers are for — every row of a
+surface carries its 1-based line, so the file side of "files plus line ranges" is
+exact even where the body is not sent.
+
 ### 5.5 Render hierarchy, not whole bodies
 
 The current assembler inlines up to 12 KB per file and truncated nine of fifteen.
@@ -749,6 +758,61 @@ Aider renders a file header plus selected definition lines with `⋮...` elision
 and 100-character line truncation, giving the model the API surface and enough
 structure to ask for more. This is the largest token-efficiency lever available
 and it is pure string formatting.
+
+**Built and measured — phase 7.** `fileChars` is the whole per-file cap, and the
+three forms are three ways of spending it. A file at or under it is inlined whole
+and nothing about the render changed. A larger source file is sent as its surface:
+the head, as many declarations as the cap allows with each one's line number and
+the comment block immediately above it, and the body of the declarations the task
+names. Anything else — a file with no declarations, or one that is not source — is
+still cut to its first `fileChars`. `⋮...` marks content that was dropped and only
+that; every drawn row is cut at 100 columns.
+
+**The surface is cut to the same cap as the head, and that is the whole claim: the
+same budget spent on better characters.** It cannot cost more than the form it
+stands in for, at any setting, which is why there is no fallback to the head for a
+source file that has declarations — the surface is never the larger of the two. Two
+consequences fall out of the one decision. A file's prompt cost is unchanged by
+this phase, so the render needs no budget of its own. And the render is not a
+trade of completeness for size at the file level: what it drops, it drops inside
+the file, marked, with the count of what it dropped.
+
+Over the 22 harness cases at the shipped 50 000-token budget:
+
+| render | file slots held | bodies dropped by the ladder | context tokens |
+|---|---|---|---|
+| first 12 000 characters | 129 of 347 | 218 | 716 730 |
+| surface (§5.5) | 347 of 347 | 0 | 444 184 |
+| every file whole, no budget | 347 of 347 | 0 | 2 866 912 |
+
+Under the old render, file bodies were 96.1% of the assembled context and 55% of
+the slots were truncated — 73 of them inside a budget the ladder then had to claw
+back by dropping 218 bodies entirely. The surface is 15.0% of the source it stands
+for, so the same 50 000 tokens that previously held a third of the ranking now hold
+all of it.
+
+**The comment block above a declaration is the one thing an outline must not
+drop.** A list of signatures is a list of names, and this codebase writes the *why*
+in the comment and the *what* in the signature. Keeping the comment lines
+immediately above each declaration — Aider's rule — costs 101 815 tokens across the
+22 cases, and buys the difference between an agent that knows what `windowBudget` is
+called and one that knows what it is for. The rule needs no parser: a line starting
+with a comment marker is a comment line, and being wrong about a line inside a
+template literal costs a line of a string.
+
+**The render moves no eval number, which is the evidence it is not a ranking
+change.** `ai-code eval` scores `paths`, and the five metrics are identical to the
+digit across this commit: 0.8805 macro / 0.7818 micro / 12 unoffered / 0.6667 MRR /
+0.6440 nDCG. Every figure above is a property of the tree it was measured on —
+§5.12 item 5 — and a render change has to be judged in tokens rather than in recall.
+
+**One branch a repository does not reach and one it does.** The fallback to the head
+is reached only by a source file with no declarations and by anything that is not
+source — a markdown file is never outlined, so it is cut exactly as it was before —
+and both are ordinary. The listing's trailer, `⋮... (N more declarations)`, is
+reached only by shrinking `fileChars`: at the shipped cap `src/context.mjs` is the
+largest file here at 56 declarations and still fits, so the branch is exercised by a
+test rather than by a file.
 
 ### 5.6 Budget from the window
 
@@ -1437,6 +1501,18 @@ adversarial orders blow it up.
 7. **Hierarchical render and content tier** (§5.4–5.5, §5.13), then the content
    index of §6.3 — and a *persistent* index only past the §6.1 threshold.
 
+   **The render has landed; the content tier has not.** §5.4's file → function stage
+   ships inside the render rather than as a second ranking pass, and §5.5's surface
+   is measured above: the harness's 347 file slots all survive the 50 000-token
+   budget, where the old render held 129 and dropped 218 bodies. §5.13's BM25F
+   content tier and §6.3's index are untouched by this and remain the rest of the
+   item.
+
+   The render is **not** an eval-number change, and could not be one: the harness
+   scores `paths` and the ranking produces the same `paths` to the digit. Its
+   measurement is the table in §5.5, and its risk is the one §5.12 item 5 names —
+   a figure quoted across a commit boundary is not a comparison.
+
 Phase 2 precedes 3 and 4 deliberately: without the baseline number, you cannot
 tell whether graph expansion or definition fan-out earned the improvement. Phases 3
 and 4 come before the content tier because together they reach 4 of the 7 misses at
@@ -1494,6 +1570,28 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   service then checks `fixed + context ≤ window × 0.85` using the same 0.85 and the
   same `ceil` estimates, so it holds — but the two are separate arithmetic, and a
   future caller that derives its own budget would have to keep them in step.
+- **§5.5's surface is measured in tokens, not in outcomes.** The table shows what it
+  costs and what it fits; it does not show that an agent given a file's surface and
+  line numbers does better work than one given the first 12 000 characters of it.
+  Nothing in the harness can: `ai-code eval` scores the ranking, and a render is
+  downstream of it. The argument for the render is that it is strictly smaller and
+  strictly more complete over the file, which is a fact about the strings, and the
+  claim that this is *better* is an inference from §5.4's prior art rather than a
+  measurement here.
+- **§5.5's render has three unchosen constants.** `matchedChars` (2000),
+  `OUTLINE_BODIES` (2) and `OUTLINE_ABOVE` (3) are set by judgement: no sweep exists
+  for them, because no metric in the harness moves with a render. `fileChars` is the
+  exception and is argued in §5.5 — it is the head the surface replaces, so the
+  render's whole per-file cost is the number that was already there.
+- **§5.4's declaration end is a heuristic: a declaration ends where the next one
+  begins.** That is wrong for a declaration inside a body — a nested function's body
+  is bounded by its sibling at the outer level — so a task-named inner function can
+  be inlined with the rest of its enclosing function after it. Unmeasured; the
+  alternative is brace counting, which is a parser in disguise.
+- **§5.5's comment rule is a regex, not a lexer.** A line that starts with `*`, `#`
+  or `--` inside a template literal, a string, or a markdown fence is drawn as a
+  comment line. The cost of being wrong is a line of prose in the surface, not a
+  wrong row, which is why it ships this way.
 - §5.2's measured weights come from 14 gold-bearing runs over 6 tasks, with 5 runs
   capped and two tasks carrying 8 of the 14. The *direction* of the two findings
   is well supported — the sweeps are monotone across a wide range and the

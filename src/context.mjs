@@ -35,7 +35,12 @@ export const CONTEXT_DEFAULTS = {
   budget: 50000,
   // How many files are read in full. The file *list* is always included.
   files: 15,
-  // Per-file character cap, so one large file cannot consume the whole budget.
+  // Per-file character cap, so one large file cannot consume the whole budget. It
+  // is also §5.5's render threshold and the surface's own cap, which is deliberate:
+  // a file at or under it is inlined whole, a larger source file is rendered as its
+  // surface within the same cap, and anything else is cut to its first `fileChars`.
+  // So the render cannot make a file cost more than it did before - it is the same
+  // number of characters spent on better ones.
   fileChars: 12000,
   // Paths listed in full. A tree is how the agent finds what the ranking did not
   // pick, but it is not free, and it grows with the repo rather than the task.
@@ -82,6 +87,11 @@ export const CONTEXT_DEFAULTS = {
   // flat from 6 to 20 with the cliff at 25; 12 is the middle of that. See the note
   // on the rejected undivided variant in `declaredBy`.
   define: 12,
+  // §5.5: how much of a task-named declaration's body a surface carries, in
+  // characters, and how much of the cap is held back from the listing so that body
+  // survives. A task that names three symbols in one file is a task about the file,
+  // so this is deliberately most of a small one.
+  matchedChars: 2000,
   // §5.10's record. Off by default: it is a few KB per run and nothing in the
   // prompt path reads it.
   debug: false,
@@ -446,20 +456,6 @@ function testSiblings(files, selected) {
   return files.filter((f) => TEST_FILE.test(f) && stems.has(path.basename(f).replace(/\.[^.]+$/, '').replace(/\.(test|spec)$/, '')));
 }
 
-// Reads a file, truncated to the per-file cap. Binary-looking and oversized files
-// are represented by their path alone rather than by a wall of noise.
-function readForPrompt(root, file, maxChars) {
-  try {
-    const stat = fs.statSync(path.join(root, file));
-    if (stat.size > 2 * 1024 * 1024) return null;
-    const text = fs.readFileSync(path.join(root, file), 'utf8');
-    if (text.includes('\u0000')) return null;
-    return text.length > maxChars ? `${text.slice(0, maxChars)}\n… (truncated, ${text.length} chars total)` : text;
-  } catch {
-    return null;
-  }
-}
-
 // -- the import graph -------------------------------------------------------
 
 // Extensions worth a regex pass for imports. Anything else - a lockfile, a
@@ -707,6 +703,165 @@ function declaredBy(tokens, defines, weight) {
   return pull;
 }
 
+// -- the render -------------------------------------------------------------
+
+// §5.5's render constants. `OUTLINE_HEAD` is 12 because a file's first lines are
+// its imports and its module comment, which are the one part of a file whose
+// position is guaranteed; `OUTLINE_COLS` is the section's own 100; `OUTLINE_BODIES`
+// is small because a task that names three symbols in one file is a task about the
+// file, and 2000 characters is already most of it.
+const OUTLINE_HEAD = 12;
+const OUTLINE_COLS = 100;
+const OUTLINE_BODIES = 2;
+
+// Reads a file for the prompt: whole, as its surface, or as the head of it.
+// Binary-looking and oversized files are represented by their path alone rather
+// than by a wall of noise. `tokens` is the task's own token set, which is what
+// decides whose body the surface carries.
+function readForPrompt(root, file, tokens, cfg) {
+  try {
+    const stat = fs.statSync(path.join(root, file));
+    if (stat.size > 2 * 1024 * 1024) return null;
+    const text = fs.readFileSync(path.join(root, file), 'utf8');
+    if (text.includes('\u0000')) return null;
+    // §5.5. `fileChars` is the whole per-file cap and the three forms are three
+    // ways of spending it: a file at or under it is inlined whole and nothing about
+    // the render changed, a larger source file is sent as its surface, and anything
+    // else is sent as the head it always was. Before this the second case was the
+    // third: on this repository that truncated nine of fifteen slots in a typical
+    // context, and what it cut was usually the declaration the task was about.
+    if (text.length <= cfg.fileChars) return text;
+    const surface = SOURCE_FILE.test(file) ? outline(text, tokens, cfg) : null;
+    if (surface !== null) return surface;
+    return `${text.slice(0, cfg.fileChars)}\n… (truncated, ${text.length} chars total)`;
+  } catch {
+    return null;
+  }
+}
+
+// One-based lines: the outline's numbers are line numbers, and the agent is meant
+// to read them back out with a ranged read.
+function lineStarts(text) {
+  const starts = [0];
+  for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) starts.push(i + 1);
+  return starts;
+}
+
+// Binary search rather than a running counter, because the declaration pass walks
+// matches in index order across six patterns at once and a cursor would have to be
+// rewound per pattern.
+function lineOf(starts, index) {
+  let lo = 0;
+  let hi = starts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (starts[mid] <= index) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo + 1;
+}
+
+// The lines directly above a declaration that are comments. This is the part of a
+// file a reader reaches for and the part an outline of signatures alone throws away
+// entirely: this repository writes the *why* in the comment and the *what* in the
+// signature, so a list of signatures is a list of names. Aider's rule, and it needs
+// no parser - a line that starts with a comment marker is a comment line. Being
+// wrong about a line inside a template literal costs a line of a string.
+const COMMENT_LINE = /^\s*(\/\/|#|\/\*|\*|--)/;
+
+// How many of those lines are kept. Three covers the two- and three-line comments
+// this codebase writes above nearly every declaration.
+const OUTLINE_ABOVE = 3;
+
+// §5.5's render. The declaration patterns are the ones the `define` pass matches
+// with, deliberately: the outline shows exactly the things retrieval treats as
+// symbols, so a file cannot be an answer for a name its own outline does not show.
+//
+// `⋮...` marks content that was dropped, and only that: what is drawn is the head,
+// as many declarations as the cap allows with the comment block above each one, and
+// the body of any declaration the task names.
+//
+// The cap is `fileChars` - the same cap the head it replaces is cut to - so the
+// surface can never be larger than the form it stands in for. That is the whole
+// claim: it is the same budget spent on better characters. `null` means this file
+// has nothing to render, and the caller should send the head.
+function outline(text, tokens, cfg) {
+  const lines = text.split('\n');
+  const starts = lineStarts(text);
+  const decls = new Map();
+  for (const re of DECLARATION) {
+    re.lastIndex = 0;
+    for (const m of text.matchAll(re)) {
+      const n = lineOf(starts, m.index);
+      if (!decls.has(n)) decls.set(n, m[1]);
+    }
+  }
+  const rows = [...decls.keys()].sort((a, b) => a - b);
+  if (!rows.length) return null;
+
+  // The declarations the task names, which is §5.4's second stage - file, then
+  // function - and the thing that keeps the outline from being a table of contents
+  // for a file the agent then has to read in full anyway. Matched on the same
+  // tokenizer the retriever scores with, so a name the ranking could not see is a
+  // name the outline will not carry either.
+  const named = new Set();
+  for (let i = 0; i < rows.length && named.size < OUTLINE_BODIES; i++) {
+    if (tokenize(decls.get(rows[i]), 2).some((t) => tokens.has(t))) named.add(rows[i]);
+  }
+
+  const out = [];
+  let spent = 0;
+  let body = 0;
+  // The listing is drawn in file order, so a long file's early declarations would
+  // spend the cap before reaching the one the task named. The reserve is what makes
+  // the named body survive that - §5.4 says the file then the function, and a
+  // function the listing elided on the way past is not a narrowing.
+  const listing = cfg.fileChars - (named.size ? Math.min(cfg.matchedChars, cfg.fileChars / 2) : 0);
+  const draw = (n, whole) => {
+    const t = lines[n - 1] || '';
+    const row = `${String(n).padStart(4)} │${whole ? t : t.slice(0, OUTLINE_COLS)}`;
+    spent += row.length + 1;
+    out.push(row);
+  };
+  const head = Math.min(rows[0] - 1, OUTLINE_HEAD);
+  for (let i = 0; i < head && spent < listing; i++) draw(i + 1);
+  let prev = head;
+  let rest = rows.length;
+  for (let i = 0; i < rows.length; i++) {
+    const n = rows[i];
+    // Walk up from the declaration through its comment block, stopping at the
+    // previous declaration so a file whose every declaration is commented cannot
+    // draw the same line twice.
+    const lead = [];
+    for (let k = n - 1; k > prev && lead.length < OUTLINE_ABOVE && COMMENT_LINE.test(lines[k - 1] || ''); k--) lead.unshift(k);
+    // One blank line above the block belongs to it: it is the separation from
+    // whatever came before, and drawing it costs a line and saves a `⋮...`.
+    if (lead.length && lead[0] > prev + 1 && !(lines[lead[0] - 2] || '').trim()) lead.unshift(lead[0] - 1);
+    // A row is at most `OUTLINE_COLS` characters plus its gutter, so the group is
+    // measured at its worst rather than drawn and then measured.
+    if (spent + (OUTLINE_COLS + 6) * (lead.length + 1) > listing) { rest = i; break; }
+    if ((lead.length ? lead[0] : n) - prev - 1 > 0) out.push('     ⋮...');
+    for (const k of lead) draw(k);
+    draw(n);
+    prev = n;
+    if (!named.has(n)) continue;
+    // A declaration ends where the next one starts, which is the only end available
+    // without a parser and is wrong only for code that declares inside a body.
+    const end = i + 1 < rows.length ? rows[i + 1] - 1 : lines.length;
+    let cut = false;
+    for (let j = n; j < end && j < lines.length; j++) {
+      const len = lines[j].length + 1;
+      if (body + len > cfg.matchedChars || spent + len > cfg.fileChars) { cut = true; break; }
+      body += len;
+      draw(j + 1, true);
+      prev = j + 1;
+    }
+    if (cut) out.push('     ⋮...');
+  }
+  if (rest > 0) out.push(`     ⋮... (${rest} more declarations)`);
+  return out.join('\n');
+}
+
 // Ranks every file in the tree against the task and returns the best few, with
 // their contents. Deterministic: no model is consulted, and the same task against
 // the same tree always produces the same list.
@@ -801,7 +956,7 @@ export function relevantFiles(project, task, options = {}) {
 
   const contents = [];
   for (const file of selected) {
-    const text = readForPrompt(root, file, cfg.fileChars);
+    const text = readForPrompt(root, file, tokens, cfg);
     if (text !== null) contents.push({ path: file, text, tokens: estimateTokens(text) });
   }
   const rankState = rankingState(scored, tokens, df, rankable.length);
