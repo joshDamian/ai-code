@@ -602,9 +602,64 @@ the most pressure — the five Mission Control runs carry 5, 5, 5, 9 and 7 answe
 window never offered. That is a positive signal for the PageRank in §5.2 and it is
 the reason phase 8.2 goes ahead rather than stopping here.
 
-Cost: 29 ms for the scan on this tree, more than half of a 45 ms call, measured
-under `debug` in this commit. It becomes unconditional in 8.2, and if the graph does
-not earn its place the scan goes with it.
+**The symbol graph was built on that basis in 8.2 and removed again.** The edge list
+is Aider's two-level `(file, ident)` graph collapsed to files,
+`w(g → f) = refs(g, t) / Σ refs(·, t) / |definers(t)|` — §5.3's fan-out rule applied
+to the two coverages a reference edge has — and the rank is PageRank over it at 20
+iterations and damping 0.85, seeded on the lexical scores taken before the import
+pass. `symbolDir` sweeps the direction, and it is the one thing the relation does not
+decide by itself: `'use'` is §5.1's own claim, a file that uses a name pulling on the
+file that defines it, and `'def'` is its reverse, mass flowing out of a definition to
+its users.
+
+Measured at `contentHash 2fa486a012f9`, where the shipped scorer reads macro 0.8805,
+micro 0.7818, unoffered 12, MRR 0.6667, nDCG 0.6440:
+
+| arm | macro | micro | unoffered | MRR | nDCG |
+|---|---|---|---|---|---|
+| shipped (`symbol: 0`) | 0.8805 | 0.7818 | 12 | 0.6667 | 0.6440 |
+| `use`, `max`, 2 | 0.8260 | 0.7273 | 15 | 0.6310 | 0.6115 |
+| `use`, `max`, 5 | 0.8260 | 0.7273 | 15 | 0.6339 | 0.6294 |
+| `use`, `seed`, 5 | 0.8376 | 0.6909 | 17 | 0.6488 | 0.6245 |
+| `def`, `max`, 3 | 0.8885 | 0.8000 | 11 | 0.6339 | 0.6407 |
+| `def`, `max`, 5 | 0.8885 | 0.8000 | 11 | 0.6378 | 0.6412 |
+| `def`, `seed`, 3 | 0.8784 | 0.7818 | 12 | 0.6131 | 0.6301 |
+| `def`, `seed`, 5 | **0.9038** | **0.8364** | **9** | 0.6786 | 0.6545 |
+| `def`, `seed`, 8 | **0.9038** | **0.8364** | **9** | 0.8095 | 0.6785 |
+
+**The doc's own direction loses to the shipped scorer outright.** `use` is −5.5 macro
+and −5.5 micro at both weights tried, with three more unoffered files, and no weight
+rescues it. `def` wins instead, and it clears the ship rule it was given before the
+sweep: +2.3 macro, micro up, unoffered down, no run's window driven to zero, and a
+leave-one-out that is positive in all 14 folds. The rejection therefore needs its own
+argument rather than the numbers.
+
+**The argument is that the relation's output does not depend on the query.** The
+graph was rebuilt against this tree and asked eight task texts spanning an HTTP
+client, a CSS grid, a WebSocket transport, flaky CI, the tokenizer, an empty string,
+and `zzzz qqqq wwww` — a query with no in-vocabulary term at all. Under `def` there
+is **one** distinct top-two pair across all eight: `tests/test.mjs` first and
+`src/service.mjs` second, every time, empty string included. Under `use` there are
+two, and the top node is `src/context.mjs` on all eight. A signal whose output is a
+function of the tree alone is a prior, not a retrieval, and the reason this prior
+scores well is the corpus rather than the relation: `src/service.mjs` is gold in
+**14 of 14** scored runs and `tests/test.mjs` in 8 of 14, and the seven runs that
+gain a hit are seven of those eight. §5.2 rejected this exact shape once already, for
+the import graph — summing makes a file's rank a function of its degree — and the
+symbol graph reproduces it with a sharper edge, since the file that mentions the most
+names wins and `tests/test.mjs` mentions the most names in this repository.
+
+Whether the relation degenerates on every repository or only on one with a hub this
+dominant is not answerable from one corpus. §2.6's warning about single-task evidence
+applies with more force to a single-repository prior, and the record says so rather
+than claiming generality. What the phase can say is narrower and sufficient: on this
+repository, the version that measures better is the version that ignores the task.
+
+**Cost, and what stayed.** The scan is 24.8 ms of a 41 ms call, the expensive pass by
+a factor of three, and it now buys only the record. It stays anyway, because `ref`
+is what turns "would a wider index help here" into a standing question with an
+answer, and because the answer is also what a *future* proposal of the same shape
+will have to argue against.
 
 ### 5.2 Score multiplicatively, not additively
 
@@ -1174,6 +1229,14 @@ came back flat. Five additions, all in `src/ranker-eval.mjs`, `src/context.mjs` 
   did with a wrong window, and this counts the windows that handed it nothing.
 - **`--arms`**, so a sweep runs every configuration in one process against one tree.
   Two CLI invocations are two trees until `contentHash` says otherwise.
+- **The corpus is the working tree, and that includes scratch.** Eight `.mjs` files
+  left in a gitignored directory during the phase-8 sweeps were walked as source,
+  took the corpus from 68 files to 78, and moved the shipped scorer's macro recall
+  from 0.8805 to 0.8435 — 3.7 points, the same magnitude item 5 measured for renaming
+  a function, and enough to have reversed a sweep's conclusion had the baseline not
+  been re-measured after the directory was removed. `contentHash` catches this only
+  if a reader re-reads it; the durable fix is that a scratch file belongs outside the
+  repository, not merely out of `git status`.
 
 An arm may declare `guard: <other arm>` — a claim that its `paths` are identical to
 that arm's, checked by the instrument rather than by each caller, because it is the
@@ -1709,6 +1772,19 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   `define` index, because the function's name contained a token one gold case's
   task mentions. Phase 6's own eval number is therefore recorded as unmeasurable
   against phase 5's, not as a change.
+- **§5.1's symbol graph was built, measured, and removed.** Its PageRank over the
+  reference relation is the phase's largest piece, and it lost on the argument rather
+  than on the numbers. `'use'`, the direction §5.1 states, is worse than the shipped
+  scorer on every metric at every weight tried; `'def'` clears the pre-declared ship
+  rule (+2.3 macro, no micro fall, no unoffered rise, a positive leave-one-out in all
+  14 folds) and is still a constant of the tree — **one** distinct top-two pair across
+  eight task texts, including one with no in-vocabulary term. A relation whose output
+  does not depend on the query is a prior, and §5.2 had already rejected that shape
+  in writing for the import graph. The code is deleted rather than left at
+  `symbol: 0`, which is the distinction phase 7 drew: a knob defaulted off is a knob
+  nobody will re-measure. §5.1 carries the full grid and the eight-query test, and
+  `ref` — the scan that fed it — stays, because it is now the standing measurement of
+  whether a wider index would help.
 - **§5.9's `WEAK` and `DEGRADED` are unshipped, and the reason is not effort.**
   `WEAK`'s trigger is a `normScore` or NQC floor, and §5.10's calibration came back
   flat — precision 35.7% at every candidate floor from 0.10 to 0.50 — so there is

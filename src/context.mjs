@@ -84,9 +84,13 @@ export const CONTEXT_DEFAULTS = {
   edge: 2,
   // §5.1's def rule: how hard a task term pulls on the files that declare a name
   // containing it. 0 turns symbol retrieval off, same reason as `edge`. Measured
-  // flat from 6 to 20 with the cliff at 25; 12 is the middle of that. See the note
-  // on the rejected undivided variant in `declaredBy`.
+  // rising to a plateau: 6 reads 0.8181 macro against 12's 0.8805, and 12, 16 and
+  // 20 are identical to four decimals, so 12 is the foot of the plateau rather than
+  // its middle. See the note on the rejected undivided variant in `declaredBy`.
   define: 12,
+  // §5.1's PageRank over the symbol graph was built and measured in phase 8 and
+  // removed: see §9. It is not a default of 0, it is absent, because a knob nobody
+  // re-measures is the failure mode phase 7 named.
   // §5.5: how much of a task-named declaration's body a surface carries, in
   // characters, and how much of the cap is held back from the listing so that body
   // survives. A task that names three symbols in one file is a task about the file,
@@ -712,6 +716,18 @@ export function declarationIndex(root, files, cache) {
 // relation reaches that the ranker already reaches by another route.
 export function references(root, files, declared, floor, cache) {
   const refs = new Map();
+  // Identifiers repeat heavily across a repository and `tokenize` is the expensive
+  // part of this pass - the regex scan is a few ms and the splits were 25 of the
+  // measured 29. One memo for the call, keyed on the identifier and the floor.
+  const split = new Map();
+  const tokensOf = (name) => {
+    let got = split.get(name);
+    if (got === undefined) {
+      got = new Set(tokenize(name, floor));
+      split.set(name, got);
+    }
+    return got;
+  };
   for (const file of files) {
     if (!SOURCE_FILE.test(file)) continue;
     const text = sourceText(root, file, cache);
@@ -721,11 +737,11 @@ export function references(root, files, declared, floor, cache) {
     for (const m of text.matchAll(IDENTIFIER)) mentions.set(m[0], (mentions.get(m[0]) || 0) + 1);
     const counts = new Map();
     for (const [ident, n] of mentions) {
-      for (const key of new Set(tokenize(ident, floor))) counts.set(key, (counts.get(key) || 0) + n);
+      for (const key of tokensOf(ident)) counts.set(key, (counts.get(key) || 0) + n);
     }
     const self = new Map();
     for (const name of declared.get(file) || []) {
-      for (const key of new Set(tokenize(name, floor))) self.set(key, (self.get(key) || 0) + 1);
+      for (const key of tokensOf(name)) self.set(key, (self.get(key) || 0) + 1);
     }
     for (const [key, n] of counts) {
       const own = n - (self.get(key) || 0);
@@ -1035,6 +1051,7 @@ export function relevantFiles(project, task, options = {}) {
     scored.sort(byPath);
   }
 
+
   // One hop out from the files the lexical pass picked, which is where the seven
   // named misses in §2.4 live: they score nothing lexically - `src/service.mjs`
   // shares no token with the task - while every one of them is named by a file
@@ -1059,6 +1076,11 @@ export function relevantFiles(project, task, options = {}) {
     scored.sort(byPath);
   }
 
+  // §5.1's PageRank over the symbol graph stood here in phase 8 and was removed:
+  // see §9. The reference scan above stays, because `ref` is what made the
+  // rejection legible rather than a matter of taste.
+  const tGraph = trace ? performance.now() : 0;
+
   const selected = scored.slice(0, limit).map((f) => f.path);
   // Second pass, so a test file is picked up for the source it covers even when
   // the task never named it.
@@ -1074,12 +1096,18 @@ export function relevantFiles(project, task, options = {}) {
   // §5.1's reference relation, recorded rather than scored. `reached` is every file
   // that mentions a query token; `only` is the part of it the ranker did not reach
   // by any other route - not the lexical window, not a declaration, not the import
-  // frontier, not a test sibling. That difference is what the symbol graph would be
-  // buying, and it is cheap to count before deciding to build it.
+  // frontier, not a test sibling. That difference is what the symbol graph would
+  // have been buying, and counting it before building it is what made the rejection
+  // in §9 a measurement rather than an opinion. It stays now that the graph is gone:
+  // the number it produces is the standing answer to "would a wider index help".
+  // The reference index, built only for the record below. It is the expensive pass
+  // - tens of ms against a single-digit total for everything else - which is the
+  // third reason the graph was not worth keeping: the scan that was meant to feed it
+  // is now the largest cost in a call whose output it cannot change.
   const tRef = trace ? performance.now() : 0;
+  const refs = idx ? references(root, rankable, idx.names, cfg.floor, cache) : null;
   let ref = null;
-  if (idx) {
-    const refs = references(root, rankable, idx.names, cfg.floor, cache);
+  if (refs) {
     const reached = new Set();
     let hit = 0;
     for (const t of [...tokens].sort()) {
@@ -1110,7 +1138,7 @@ export function relevantFiles(project, task, options = {}) {
   const tHash = trace ? performance.now() : 0;
   const contentHash = trace ? contentDigest(root, files, cache) : null;
   const tEnd = trace ? performance.now() : 0;
-  const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state: rankState.state, contentHash, ref, marks: { t0, tDf, tScore, tDefine, tEdge, tRef, tHash, tEnd } }) : null;
+  const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state: rankState.state, contentHash, ref, marks: { t0, tDf, tScore, tDefine, tEdge, tGraph, tRef, tHash, tEnd } }) : null;
   return { paths: selected, contents, scores: scored, debug, ...rankState };
 }
 
@@ -1168,10 +1196,11 @@ function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected,
       ? { ...Object.fromEntries(Object.entries(f.parts || {}).map(([k, v]) => [k, round(v)])), ...(f.define ? { define: round(f.define) } : {}), ...(f.graph ? { graph: round(f.graph) } : {}) }
       : null,
     accepted: accepted.has(f.path),
-    // The three ways a candidate fails to be accepted are the three things a
-    // reader of this record asks about first: it lost on score, or it was only
-    // ever in the list because of the fan-out, or a source file's test came with
-    // it. `sibling` is the one acceptance that is not the ranking's own decision.
+    // The ways a candidate fails to be accepted are the things a reader of this
+    // record asks about first: it lost on score, or it was only ever in the list
+    // because of one of the two graph passes. `test-sibling` is the one acceptance
+    // that is not the ranking's own decision, and it is last because a file that
+    // scored its way in is a stronger statement than one that was appended.
     reason: !accepted.has(f.path)
       ? !f.parts && f.define ? 'define-only, below cut' : !f.parts && f.graph ? 'graph-only, below cut' : 'below cut'
       : accepted.get(f.path) < limit ? 'scored' : 'test-sibling',
@@ -1197,7 +1226,7 @@ function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected,
     // because gold is a fact about the harness rather than about the ranker; the
     // harness intersects `only` with the case's own answer set and reports both.
     ref,
-    timings: marks ? { df: round(marks.tDf - marks.t0), score: round(marks.tScore - marks.tDf), define: round(marks.tEdge - marks.tDefine), edge: round(marks.tRef - marks.tEdge), ref: round(marks.tHash - marks.tRef), hash: round(marks.tEnd - marks.tHash) } : null,
+    timings: marks ? { df: round(marks.tDf - marks.t0), score: round(marks.tScore - marks.tDf), define: round(marks.tEdge - marks.tDefine), edge: round(marks.tGraph - marks.tEdge), ref: round(marks.tHash - marks.tRef), hash: round(marks.tEnd - marks.tHash) } : null,
     candidates,
     truncated: scored.length > DEBUG_CANDIDATES,
   };
