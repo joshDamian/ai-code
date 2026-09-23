@@ -1888,6 +1888,16 @@ ones worth having. The Monte Carlo incremental bound (`O(n ln m / ε²)` work wi
 random edge arrival) is attractive but holds only under random edge arrival;
 adversarial orders blow it up.
 
+**Phase 8's note: this section is still not live, and now for a second reason.** The
+premise is that §5.1's PageRank is running, and it was built and removed (§5.1). Even
+had it shipped, nothing here is cached: `importGraph`, `declarationIndex` and
+`references` are all rebuilt per call, sharing one per-call source cache and no
+state across calls, so there is no stored ranking for an incremental variant to
+update — the approximation available is the iteration count, not a tolerance
+threshold, and that was swept instead. **The section becomes live only with the
+persistent index of §6.1**, whose threshold nothing in this repository approaches.
+Its own numbers are the sources' and remain untested here; §9 carries that.
+
 ---
 
 ## 7. Failure → recovery
@@ -1895,9 +1905,10 @@ adversarial orders blow it up.
 | Failure | Detection | Behaviour | Recovery |
 |---|---|---|---|
 | Unreadable directory | `EACCES` per directory | Skip, note, continue | Agent's own tools still work |
-| No discriminating signal | `NQC ≈ 0`, or top `normScore` below floor | `WEAK`: results returned, labelled, relax count stated | Agent can re-query with the label in hand |
-| No term matched (`coverage = 0`) | coverage check, then one relaxation | `NO_RESULTS`: heuristic floor | Agent has the tree and can search |
-| Uninformative query | `Σ idf` below `QUERY_IDF_FLOOR` | static default set, labelled low confidence | Agent reads the label and searches |
+| No discriminating signal | `NQC ≈ 0`, or top `normScore` below floor | `WEAK`: results returned, labelled, relax count stated — **not shipped** (§5.10) | Agent can re-query with the label in hand |
+| No term matched (`coverage = 0`) | coverage check, then one relaxation | **The relaxation is not built**: the matcher is already an OR with partial credit and the wider index already runs first, so the condition cannot arise (§5.7). `NO_RESULTS` ships and names the terms that matched nothing | Agent has the tree and can search |
+| No searchable term at all (`tokens = ∅`) | `tokenize` produced no term of the floor length | `DEGRADED`: `heuristicFloor()` — configuration, then entry points, then recent, paths only | Agent is handed a listing and told it is one |
+| Uninformative query | `Σ idf` below `QUERY_IDF_FLOOR` | static default set, labelled low confidence — **not shipped**; the floor is 1.214 against observed `ceil` values of 3.3–35.1, so it never fires (§9) | Agent reads the label and searches |
 | Over budget | after the ladder | content → sections → clamp | never over-budget, never empty |
 | Window too small | `needTokens > 0.85 × window` | shrink, then reroute to a wider-window candidate | currently throws |
 | Ranker throws | call site | `FAILED`: tree-only, run proceeds | error on the run row |
@@ -1977,9 +1988,12 @@ adversarial orders blow it up.
    **The divisor is the one place this phase did not ship its best number.** The
    undivided pull beats the shipped `1/sqrt(n)` on every aggregate and zeroes three
    runs doing it, so the phase ships the variant with the lower mean and the higher
-   floor. §2.4 and §5.2 both carry the table; §9 carries the argument for and
-   against, unresolved. A later phase that measures what a consumer does with a
-   wrong window — §6.3's index, or the reranking tier — should revisit it.
+   floor. §2.4 and §5.2 both carry the table. **Phase 8 re-measured this and the
+   table does not reproduce**: at the current constants the undivided pull is worse
+   on the ordinary metrics (0.8805 → 0.8630) and `zeroRuns` stays 0, so this
+   section's justification for the divisor is not the one the numbers now show. The
+   empty-window effect it describes is real and belongs to the *import* edge, at the
+   shipped weight (§5.2). §5.1 carries the correction inline.
 
    Reversible by construction: `define: 0` is the phase-3 ranking exactly, to six
    decimals on all four metrics, and a test asserts it still is.
@@ -2041,6 +2055,16 @@ adversarial orders blow it up.
    path that has never been written. §9 carries both, rather than shipping two
    labels that no code path can produce.
 
+   **Phase 8 shipped `DEGRADED`, and its trigger is not §5.9's.** The section's
+   condition — nothing matched the query — is structurally unreachable, because the
+   priors are *added to* every score. The reachable trigger is a task text with no
+   searchable term at all, which is also a live defect: `tokenize('a', 2)` is `[]`,
+   so the empty query fell through to `NO_RESULTS` whose note read "Terms that
+   matched nothing: ." The fallback is a real branch now — `heuristicFloor()`,
+   configuration then entry points then recent, paths only — and its order
+   deliberately differs from the priors', which a test asserts by comparing the
+   window to the scores the same call returned.
+
    **The phase's eval number is not comparable to phase 5's, and that is the
    finding.** The run reports 0.8805 macro / 0.7818 micro / 12 unoffered against
    phase 5's 0.8435 / 0.7636 / 13 — with a scoring path that did not change. The
@@ -2075,6 +2099,56 @@ adversarial orders blow it up.
    for and never used — so the item ends here rather than continuing into a
    structure with no consumer. §9 carries what this leaves untested.
 
+8. **The four pieces §5 still specified and had not built** — §5.1's reference half,
+   §5.7/§5.9's gates, §5.14's widening, and the constants §9 leaves open. Batched
+   rather than phased separately, because each is small and three of the four are
+   decisions the doc has already made and cannot test.
+
+   **The ordering is the finding, and the phase pays for it twice.** Phase 5 learned
+   that changing one signal's scale voids every constant calibrated against the old
+   one — it moved `edge` 3 → 2 for exactly that reason — and phase 8 repeats the
+   lesson on a larger scale. Its second commit changes the score, so **every
+   constant calibrated before it is void after it**, and the only defense is to build
+   the instrument first, put the one score change second, and re-fit everything last.
+   The phase did that and the re-fit still moved nothing: `edge: 2`, `define: 12` and
+   both divisors won their own grids unchanged. The cost is not the constants that
+   move; it is that a phase containing any score change cannot quote another phase's
+   number, and this one contains one.
+
+   **Built and measured — phase 8.**
+
+   - **§5.1's reference half was built, recorded, and its graph rejected.** The scan
+     ships (`references()`, the standing answer to "would a wider index help here");
+     the PageRank over it was built and removed. `'use'`, the direction the section
+     states, loses on every metric at every weight. `'def'` clears the pre-declared
+     ship rule and is still a **constant of the tree** — one distinct top-two pair
+     across eight task texts including an empty string and a query with no
+     in-vocabulary term. A relation whose output does not depend on the query is a
+     prior, and §5.2 had already rejected that shape for the import graph. Removed
+     rather than left at `symbol: 0`. §5.1 carries the grid.
+   - **§5.7/§5.9's gates: `DEGRADED` ships on a trigger the doc does not name;
+     `WEAK` is withheld and the reason is now measured twice.** The retry the
+     section specifies cannot help here — the matcher is already an OR with partial
+     credit, so there is no boolean to relax, and the wider index it would reload is
+     already the first pass, because the declaration scan keys names *inside* files
+     and reaches a term no path carries. §5.7 carries the three measurements.
+   - **§5.14's widening ships as a `tail` field** — paths only, and the window is
+     byte-identical: 65 of the 88 answers the window misses, for 3507 tokens over 14
+     runs. All five capped runs come from one task, and the doc says so rather than
+     claiming the evidence.
+   - **The constants did not move, and one of them produced a finding about the
+     benchmark.** Recency's `1 − coverage` correction from §5.3 is right and costs
+     9.2 points of macro: the bonus carries no information and still carries the
+     score, because gold is what an agent read and reading correlates with recent
+     change. Recall@15 here cannot separate a ranking from a recency list.
+   - **The instrument itself is the phase's most reusable piece.** `--arms` runs
+     every arm in one process against one tree, `contentHash` makes "same tree"
+     checkable instead of a discipline, and every sweep above was one call.
+
+   Reversible by construction: `ref` is recorded not scored, `widen: 1` empties the
+   `tail` on every run, and the constants all sit at their pre-phase-8 values with
+   the sweep keys removed rather than defaulted.
+
 Phase 2 precedes 3 and 4 deliberately: without the baseline number, you cannot
 tell whether graph expansion or definition fan-out earned the improvement. Phases 3
 and 4 come before the content tier because together they reach 4 of the 7 misses at
@@ -2103,7 +2177,21 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   function in `src/context.mjs` — moved macro recall 3.7 points through the
   `define` index, because the function's name contained a token one gold case's
   task mentions. Phase 6's own eval number is therefore recorded as unmeasurable
-  against phase 5's, not as a change.
+  against phase 5's, not as a change. **Phase 8 made the second argument of that
+  pair machine-checkable**: `contentHash` hashes `[path, sha1(text)]`, so a record
+  now carries the tree it was measured on and every figure above can be qualified
+  retroactively — with the caveat that the qualification only holds if a reader
+  compares it, since nothing re-measures a recorded number on its own.
+- **§5.14's widening is measured on one task's five capped runs.** The tail names 65
+  of the 88 answers the window missed, and the five runs where the window binds at
+  all — the only runs where a tail has anything to name — all come from the Mission
+  Control task (§2.6). A different repository could read differently, and 65 of 88
+  is one question asked five times. What makes it shippable regardless is that the
+  guard is exact and the five metrics are untouched: a wrong tail reorders a listing
+  rather than changing what the ranker found. `widenOn: 'state'`, the trigger §5.14
+  actually names, fires on **0 of 14** runs — no run is `NO_RESULTS` or `DEGRADED` —
+  so the shipped value is `always`, and the state key is kept only so the claim that
+  it does nothing here stays re-runnable.
 - **§5.1's symbol graph was built, measured, and removed.** Its PageRank over the
   reference relation is the phase's largest piece, and it lost on the argument rather
   than on the numbers. `'use'`, the direction §5.1 states, is worse than the shipped
@@ -2117,14 +2205,14 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   nobody will re-measure. §5.1 carries the full grid and the eight-query test, and
   `ref` — the scan that fed it — stays, because it is now the standing measurement of
   whether a wider index would help.
-- **§5.9's `WEAK` and `DEGRADED` are unshipped, and the reason is not effort.**
-  `WEAK`'s trigger is a `normScore` or NQC floor, and §5.10's calibration came back
-  flat — precision 35.7% at every candidate floor from 0.10 to 0.50 — so there is
-  no constant to ship that a measurement supports. `DEGRADED`'s trigger is a
-  heuristic-fallback branch, and the ranker has none: entry points, configs and
-  recency are *added to* every score rather than substituted when nothing matches,
-  so "entry points only" is not a state the code can be in. Both are withheld
-  rather than emitted by arms no input reaches.
+- **§5.9's `WEAK` is unshipped, and the reason is not effort.** Its trigger is a
+  `normScore` or NQC floor, and §5.10's calibration came back flat — precision 35.7%
+  at every candidate floor from 0.10 to 0.50 — so there is no constant to ship that
+  a measurement supports. It is withheld rather than emitted by an arm no input
+  reaches. **`DEGRADED` shipped instead, on a trigger the section does not name** —
+  a task text with no searchable term at all — because the section's condition
+  ("nothing matched") is structurally unreachable while the priors are added to
+  every score. §5.9 carries the branch and §8 records the reordering.
 - **The flat precision curve was truncation, and the stronger requirement that
   replaces it holds but is still not enough.** A quantity that can gate must not be
   monotone in `score`, because a monotone one's floor admits a top-`j` slice and for
@@ -2288,14 +2376,33 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   denominator on one scale, which is a change to the scorer, not to the threshold.
 - **The priors are unnormalised and it shows on small trees.** With a df=1 basename
   hit at 5 and the top recency bucket at 5, a committed `package.json` outranks a
-  file the task named in a fixture whose sources are uncommitted. Both corrections
-  were measured and both cost more than they fixed (§5.3). On this repository
-  recency coverage is 100% — all 69 paths are in the last 200 commits — so the term
-  is ordering with no coverage signal under it, which is the failure §5.3 opens by
-  naming. Unresolved; §5.3's `1 − coverage` rule for recency is not implemented.
+  file the task named in a fixture whose sources are uncommitted. **Phase 8's third
+  rejection closes the scale question and leaves the ordering one open.** The joint
+  scale sweep required +3 macro, no micro loss and no `zeroRuns` rise; nothing
+  reaches it, since macro and micro plateau across 0.75–1.5 and every setting above
+  1.5 moves only MRR and nDCG up. So the absolute values stay, and the fixture above
+  is a known and accepted cost of that.
+- **§5.3's `1 − coverage` recency rule was implemented in phase 8 and is not
+  shipped, and the reason is a limit on the measurement rather than on the rule.**
+  Coverage is exactly **1.0000** — all 68 rankable files in the last 200 commits —
+  so the rule zeroes the bonus everywhere. Doing it costs macro 0.8805 → 0.7889,
+  micro 0.7818 → 0.5818, unoffered 12 → 23, `zeroRuns` 0 → 3; dropping every prior
+  instead reads 0.7815. §5.3 is right that the bonus carries no information, and it
+  still carries nine points of this benchmark, because **gold is the set of files an
+  agent read and reading is correlated with recent change**. So recall@15 here
+  cannot separate "found the right file" from "listed the file git just touched".
+  That is a validity limit on every recall figure in §2 and §5 and not only on
+  recency: on a corpus whose agents read what changed, some part of macro recall is
+  measuring the recency prior rather than the retrieval. The rule is unshipped
+  rather than rejected — trading a measured 9 points for a mechanism no measurement
+  here can see would be the wrong direction — and a corpus with older files could
+  reverse it.
 - `edge` moved from 3 to 2 in phase 5, in a change about token weights. The
   re-sweep was required because the two compete on one score, but it means §5.2's
-  recorded 3 was calibrated against a path scale that no longer exists.
+  recorded 3 was calibrated against a path scale that no longer exists. Phase 8
+  re-swept every constant on the final scorer and **moved none** — `edge: 2`,
+  `define: 12` and both divisors won their own grids — which is the evidence that
+  the phase's one score change did not void the phase-5 calibration after all.
 - The §6.1 `~200 MB` threshold is extrapolated from ripgrep's measured throughput,
   not measured against a repository that size.
 - The §6.3 build-time estimate (0.3–1.5 s for ~6 M tokens in Node) is arithmetic,
@@ -2320,21 +2427,35 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   a count. The floor was the right number to carry into phase 4 anyway: the token
   it named is the one the phase recovers, and it is recovered for the reason the
   table gave.
-- **Phase 4 ships the second-best divisor, and the argument for it is a
-  judgment call.** Undivided beats `1/sqrt(n)` on macro (0.873 against 0.855),
-  micro, nDCG (0.605 against 0.585), unoffered (13 against 15) and the
-  leave-one-out floor (+8.3 against +6.2). It is rejected solely because it zeroes
-  three of fourteen runs where the shipped variant leaves them at ~0.05. That is
-  the right call if an empty-relevant window is categorically worse than a weak
-  one, which is the position taken here and is not measured — nothing in this
-  corpus says how a consumer behaves when it is handed fifteen wrong files instead
-  of one right one. A preference for the mean, or a downstream stage that reranks
-  hard enough to survive a drowned window, would flip the choice.
-- **IDF is the principled divisor and loses on one metric.** It wins nDCG (0.591)
-  and loses macro recall (0.848) at every weight tried. Recall is the headline here
-  because §2.1 asks how much of what the planner needed was offered at all, but a
-  consumer that cares which correct file comes *first* rather than how many arrive
-  would pick IDF. Nothing measured settles which is right.
+- **The declaration divisor's shipped justification does not reproduce, and phase 8
+  found where the argument actually lives.** §5.1 argued for `1/sqrt(n)` over an
+  undivided pull on a table giving undivided 0.873 macro and three Mission Control
+  runs at 0.000. Re-swept at the current constants, undivided reads **0.8630** with
+  `zeroRuns` **0** — worse on the ordinary metrics, and no window emptied — so that
+  table is a property of phase 4's constant set and not of the divisor. The effect
+  is real and belongs to the **import** edge: there, at the shipped `edge: 2`,
+  removing `1 + n` takes macro 0.8805 → 0.6954, unoffered 12 → 32 and `zeroRuns`
+  0 → 3. On the declaration edge it needs `define: 60`, where the undivided variant
+  is better on every metric — the divisor damping a harm the weight causes rather
+  than preventing one. So neither divisor is a judgment call any more; `1 + sqrt(n)`
+  keeps its place on the shipped weight's ordinary metrics, which is a weaker
+  argument than the one it was given. The categorical position is unchanged and
+  still unmeasured: nothing here says how a consumer behaves when handed fifteen
+  wrong files instead of one right one, and a ranker that can return an
+  empty-relevant window has failed in a way `recall@15` cannot express. `zeroRuns`
+  is the proxy for it, and it is what made the import divisor's case.
+- **IDF as the path token's weight was swept in phase 8 and loses, which is a
+  different claim from the one this bullet used to make.** Blended onto the path at
+  0.25 and 0.5 it ties macro, micro and unoffered exactly on windows the guard
+  reports as *not* equal, and at 0.75 and 1 it falls to 0.8435/0.7636 with unoffered
+  13. Its only win anywhere is MRR, +0.0119 at 0.25, against nDCG −0.0026 — the
+  distrust shape. The old bullet ("wins nDCG 0.591, loses macro recall 0.848") was
+  measured on the **symbol fan-out**, where the job is breaking ties among files
+  with no lexical evidence and nDCG is the right question. That distinction was the
+  resolution this phase hoped for — recall weight on the path, IDF on the
+  tie-breaking edge — and it is unavailable, because the symbol graph was rejected
+  in the same phase. Scoped, not closed: on a future relation whose job is
+  ordering rather than recall, IDF is still the untested candidate.
 - **The column-0 scope filter is a proxy, not an analysis.** It counts a
   declaration form at the start of a line inside a comment or a template literal,
   and misses a genuine declaration that is indented for any reason — inside a class
