@@ -29,6 +29,7 @@ Task
   task diff <id> [--to <branch>]
   task port <id> [--to <branch>] [--dry-run] [--clean]
   task cancel <id>
+  task close <id>
 Providers
   provider list
   provider add-claude
@@ -73,7 +74,7 @@ const DEEPSEEK_MODELS = [
 
 // Commands the task namespace accepts. `execute` and the planning verbs are async;
 // the state-machine verbs are not.
-const TASK_OPS = ['plan', 'approve', 'execute', 'implement', 'test', 'review', 'repair', 'reject', 'replan', 'refine', 'diff', 'port', 'cancel'];
+const TASK_OPS = ['plan', 'approve', 'execute', 'implement', 'test', 'review', 'repair', 'reject', 'replan', 'refine', 'diff', 'port', 'cancel', 'close'];
 // The steps the server will run as a background job. `port` is not one: a job
 // carries no options, so a target branch would need a column on `jobs` and a step
 // in the runner, and a merge is a decision rather than a long agent run.
@@ -165,6 +166,7 @@ async function taskCommand(sub, rest) {
     : sub === 'diff' ? s.diff(id, { to })
     : sub === 'port' ? await s.port(id, { to, dryRun, clean })
     : sub === 'cancel' ? s.cancelTask(id)
+    : sub === 'close' ? s.closeTask(id)
     // Named rather than left to the last arm. This chain used to end in cancelTask,
     // so any verb added to TASK_OPS without a line here cancelled the task.
     : (() => { throw new Error(`Unhandled task operation: ${sub}`); })();

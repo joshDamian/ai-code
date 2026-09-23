@@ -12,6 +12,7 @@ const FILTERS = [
   { key: '3', id: 'awaiting', label: 'Awaiting', states: 'AWAITING_APPROVAL' },
   { key: '4', id: 'complete', label: 'Complete', states: 'COMPLETE' },
   { key: '5', id: 'failed', label: 'Failed', states: 'FAILED' },
+  { key: '6', id: 'cancelled', label: 'Cancelled', states: 'CANCELLED' },
 ];
 
 export function TasksScreen({ api, isActive, onOpenTask, setTyping, onError, onMessage, setFooter }) {

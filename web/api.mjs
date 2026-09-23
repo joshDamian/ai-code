@@ -67,6 +67,7 @@ export const api = {
   taskReplan: (id) => request(`/api/tasks/${id}/replan`, { method: 'POST' }),
   taskRefine: (id, feedback) => request(`/api/tasks/${id}/refine`, { method: 'POST', body: { feedback } }),
   taskCancel: (id) => request(`/api/tasks/${id}/cancel`, { method: 'POST' }),
+  taskClose: (id) => request(`/api/tasks/${id}/close`, { method: 'POST' }),
   // `to` is a query parameter because this is a read: which branch the port would
   // land on, answered without materializing anything.
   taskDiff: (id, to) => request(`/api/tasks/${id}/diff${to ? `?to=${encodeURIComponent(to)}` : ''}`),
