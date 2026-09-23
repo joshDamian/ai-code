@@ -473,6 +473,9 @@ export class Service {
   async plan(id) {
     const t = this.task(id);
     if (t.state !== 'PLANNING') throw new Error('Task must be in PLANNING');
+    // The state above stays PLANNING for the whole run - it moves only at the end,
+    // once the plan has been written - so nothing else here refuses a second planner.
+    this.#assertIdle(id, 'planning');
     const p = this.project(t.project_id);
     // The planner must not touch the repo, so its effect on the working tree is
     // measured around the run and any change is treated as a violation. What it
@@ -607,6 +610,11 @@ export class Service {
   async refine(id, feedback) {
     const t = this.task(id);
     if (t.state !== 'AWAITING_APPROVAL') throw new Error('Can only refine when AWAITING_APPROVAL');
+    // A refine never leaves AWAITING_APPROVAL, not even while its planner is running,
+    // so its own state check admits a second refine into the same task. That is what
+    // put two planner runs on one task two minutes apart: the second routed elsewhere,
+    // died, and reported its own routing failure as the reason the refine failed.
+    this.#assertIdle(id, 'refining');
     const p = this.project(t.project_id);
     // Recorded before the run for the same reason plan() records its own before
     // its run: this is what the tree looked like to the planner.
@@ -630,6 +638,10 @@ export class Service {
   updatePlan(id, plan) {
     const t = this.task(id);
     if (t.state !== 'AWAITING_APPROVAL') throw new Error('Can only edit plan when AWAITING_APPROVAL');
+    // An edit is a second writer on the plan, not a reader of it. A save landing
+    // while a refine is mid-run would be overwritten when that run writes its result,
+    // and the revision the refine records as "previous" would be one no user ever saw.
+    this.#assertIdle(id, 'editing the plan');
     this.store.updateTask(id, { plan });
     return this.task(id);
   }
@@ -721,6 +733,7 @@ export class Service {
   async runTests(id) {
     const t = this.task(id);
     if (t.state !== 'TESTING') throw new Error('Task must be in TESTING');
+    this.#assertIdle(id, 'testing', { job: false });
     try {
       await this.test(t, t.worktree);
     } catch (e) {
@@ -745,6 +758,10 @@ export class Service {
   async review(id) {
     const t = this.task(id);
     if (t.state !== 'REVIEWING') throw new Error('Task must be in REVIEWING');
+    // REVIEWING lasts for the whole review, so the state guard above admits a second
+    // one. Two reviewers over one worktree race to write `review` and to move the
+    // task, and the loser's transition comes out of a state the winner chose.
+    this.#assertIdle(id, 'reviewing', { job: false });
     const d = worktreeDiff(t.worktree, t);
     const before = status(t.worktree);
     try {
@@ -780,6 +797,10 @@ export class Service {
   async repair(id) {
     const t = this.task(id);
     if (t.state !== 'REPAIRING') throw new Error('Task must be in REPAIRING');
+    // Two repairers in one worktree is the worst of these: unlike the planner's, their
+    // edits are not measured for violations, so the second would write on top of the
+    // first with neither aware of the other.
+    this.#assertIdle(id, 'repairing', { job: false });
     try {
       await this.runRole(t, 'repair', `Repair the review findings in the worktree. Re-run relevant tests after fixing. Review findings:\n${t.review || 'Review failed.'}`, t.worktree);
     } catch (e) {
@@ -989,9 +1010,7 @@ export class Service {
     // `active` map cannot see a run the dashboard server owns. Committing a worktree
     // out from under a live implementer would publish half a tree and move the
     // branch beneath the agent still writing it.
-    if (this.store.taskHasLiveRun(id) || this.store.activeJobs().some((j) => j.task_id === id)) {
-      throw new Error('This task has a run or job in flight; wait for it to finish before porting');
-    }
+    this.#assertIdle(id, 'porting');
     const branch = t.branch || `ai-code/${t.id}`;
     const target = this.portTarget(t, opts);
 
@@ -1237,6 +1256,34 @@ export class Service {
   }
 
   // -- run helpers ----------------------------------------------------------
+
+  // One run at a time per task.
+  //
+  // Liveness is read from the leases rather than from runs.status, for the reason
+  // port() has always read it that way: a run another process owns still counts, and
+  // one whose process died stops counting once its lease goes stale. A status column
+  // does neither - it lingers as 'running' after a crash, which is why a task could
+  // be planned twice by two processes that each believed they were alone.
+  //
+  // A state guard cannot do this job for the callers below, because it only
+  // serializes a run that changes the state *before* it awaits. implement() moves the
+  // task to IMPLEMENTING and only then starts its agent, so its own guard covers it.
+  // plan(), refine(), runTests(), review() and repair() all await their run first and
+  // move the task afterwards, or never - so between the guard and the transition
+  // there is nothing stopping a second caller, which is how one task came to have two
+  // planner runs in flight at once.
+  //
+  // `job` separates the two kinds of caller. A verb a user invokes directly has to
+  // refuse while a queued job holds the task, because jobs_one_active only covers the
+  // queued path and a foreground review starts no job at all. A step *inside* a
+  // longer sequence must not look at jobs: execute() runs under a job row for its
+  // whole length, so a runTests() that counted jobs would refuse the very job that
+  // called it.
+  #assertIdle(id, verb, { job = true } = {}) {
+    if (this.store.taskHasLiveRun(id) || (job && this.store.activeJobs().some((j) => j.task_id === id))) {
+      throw new Error(`This task has a run or job in flight; wait for it to finish before ${verb}`);
+    }
+  }
 
   // Claim or refresh this run's lease. Shared state, and it may be called from an
   // interval callback, so it must never throw: a missed heartbeat only makes the

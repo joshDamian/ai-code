@@ -1603,6 +1603,74 @@ test('a port is refused while the task has a job queued',async()=>{
   await assert.rejects(()=>s.port(t.id,{to:'staging'}),/in flight/);
 });
 
+test('a plan is refused while a planner run is in flight',async()=>{
+  // A task sits in PLANNING for the whole planning run - it moves only once the plan
+  // has been written - so the state check above admits a second planner. Liveness has
+  // to come from the lease, which is also the only thing that sees a run belonging to
+  // the dashboard process rather than to this one.
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const t=s.createTask(s.initProject('p',root).id,'x');
+  s.prepare(t.id);
+  s.store.addRun({id:'live',taskId:t.id,role:'planner',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
+  s.store.heartbeat('live',t.id);
+  await assert.rejects(()=>s.plan(t.id),/in flight/);
+});
+
+test('a refine is refused while a planner run is in flight',async()=>{
+  // The incident this came from. A refine never leaves AWAITING_APPROVAL, not even
+  // while its planner is running, so a second refine submitted mid-run was accepted:
+  // it routed somewhere else, died for its own reasons, and reported those reasons as
+  // the failure of the user's feedback.
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const t=s.createTask(s.initProject('p',root).id,'x');
+  s.prepare(t.id);await s.plan(t.id);
+  assert.equal(s.task(t.id).state,'AWAITING_APPROVAL');
+  s.store.addRun({id:'live',taskId:t.id,role:'planner',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
+  s.store.heartbeat('live',t.id);
+  await assert.rejects(()=>s.refine(t.id,'make it smaller'),/in flight/);
+});
+
+test('a second review is refused while a review is running',async()=>{
+  // The queue does not cover this one: jobs_one_active guards only the queued path,
+  // and a dashboard Review button starts no job at all. Two reviewers over one
+  // worktree would race to write the verdict and to move the task out of REVIEWING.
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  await s.runTests(t.id);
+  assert.equal(s.task(t.id).state,'REVIEWING');
+  s.store.addRun({id:'live',taskId:t.id,role:'reviewer',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
+  s.store.heartbeat('live',t.id);
+  await assert.rejects(()=>s.review(t.id),/in flight/);
+});
+
+test('a plan is refused while the task has a job queued',async()=>{
+  // The half no lease can see: a job that has not started has no run yet.
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const t=s.createTask(s.initProject('p',root).id,'x');
+  s.prepare(t.id);
+  s.store.addJob({id:'job-1',taskId:t.id,kind:'execute',state:'queued',createdAt:new Date().toISOString()});
+  await assert.rejects(()=>s.plan(t.id),/in flight/);
+});
+
+test('a lease that has gone stale does not refuse a plan',async()=>{
+  // The guard is lease-based and not a latch. A lease is evidence of life only while
+  // it is fresh; read as "a run row exists", the run left behind by a process that
+  // died mid-plan would refuse every retry and strand the task in PLANNING.
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const t=s.createTask(s.initProject('p',root).id,'x');
+  s.prepare(t.id);
+  s.store.addRun({id:'dead',taskId:t.id,role:'planner',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
+  s.store.heartbeat('dead',t.id);
+  s.store.db.prepare('UPDATE run_leases SET heartbeat_at=? WHERE run_id=?')
+    .run(new Date(Date.now()-LEASE_STALE_MS-1000).toISOString(),'dead');
+  await s.plan(t.id);
+  assert.equal(s.task(t.id).state,'AWAITING_APPROVAL');
+});
+
 test('the plan records the branch it was written against',async()=>{
   const root=repoWith('app.mjs');
   const s=new Service(root,{allowMock:true,silent:true});
