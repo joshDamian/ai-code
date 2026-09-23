@@ -148,25 +148,102 @@ function isDirectory(p) {
 // Re-ranks every case with the current scorer and reports what it scored. The
 // tree is the one on disk now, not the one the run saw: this measures the
 // ranker in front of you, which is what a change has to be judged against.
+//
+// `limit` is separated from `k` because they are two different decisions and the
+// harness could not express the difference. `k` is the metric's window - how many
+// ranked names count as offered - and `limit` is what `relevantFiles` was asked to
+// return. At `limit === k` (the default) a widening inside the ranker is invisible
+// to the metric, which is what makes the `paths` across two arms comparable at all;
+// at `limit > k` the extra names are reported as the `tail` and scored as a tail.
+//
+// Every arm runs in this process against one tree, because §5.12 item 5 is that a
+// figure is a property of the pair (ranker, tree) and two CLI invocations are two
+// trees until `contentHash` says otherwise.
 export function evaluate(project, cases, options = {}) {
   const k = options.k ?? EVAL_DEFAULTS.k;
+  const limit = options.limit ?? k;
   const root = options.cwd || project.path;
+  if (Array.isArray(options.arms) && options.arms.length) {
+    const arms = options.arms.map((arm) => {
+      const run = runArm(project, cases, { ...options, ...arm, name: arm.name || null, k: arm.k ?? k, limit: arm.limit ?? limit, root });
+      // The guard is a claim the arm makes about another arm, so it survives onto
+      // the result rather than being consumed - the record has to say what was
+      // claimed as well as whether it held.
+      run.guard = arm.guard || null;
+      return run;
+    });
+    for (const arm of arms) if (arm.guard) arm.guard = checkGuard(arm, arms);
+    return { k, limit, contentHash: arms.map((a) => a.contentHash).find(Boolean) ?? null, arms };
+  }
+  const one = runArm(project, cases, { ...options, k, limit, root, name: null });
+  return { k: one.k, limit: one.limit, contentHash: one.contentHash, rows: one.rows, summary: one.summary };
+}
+
+function runArm(project, cases, o) {
+  // `debug` is a config key rather than an option, because `relevantFiles` reads it
+  // from the resolved config and the record's `configHash` has to cover it: two
+  // records where one carried a candidate list and one did not are not the same
+  // measurement.
+  const config = o.debug ? { ...(o.config || {}), debug: true } : o.config;
   const rows = [];
+  let contentHash = null;
   for (const c of cases) {
     const picked = relevantFiles(
       project,
       { title: c.title, description: c.description, plan: null },
-      { cwd: root, limit: k, config: options.config }
+      { cwd: o.root, limit: o.limit, config }
     );
+    if (picked.debug?.contentHash) contentHash = picked.debug.contentHash;
     // The ranker is allowed to return the file list the planner's prompt would
     // carry, which is never smaller than the window; the metric is the ranking.
-    rows.push({ case: c, ranked: picked.paths, ...scoreCase(picked.paths, c.gold, k) });
+    rows.push({
+      case: c,
+      ranked: picked.paths,
+      // Names the ranker offered beyond the metric's window, or beyond the window
+      // the caller asked for. A separate field rather than a longer `paths`,
+      // because `testSiblings` already appends to `paths` and a position-based tail
+      // would make that quiet behaviour load-bearing.
+      tail: picked.tail || [],
+      state: picked.state ?? null,
+      ...(o.debug ? { debug: picked.debug } : {}),
+      ...scoreCase(picked.paths, c.gold, o.k),
+    });
   }
-  return { k, rows, summary: summarise(rows, k) };
+  return { name: o.name, k: o.k, limit: o.limit, config: o.config ?? null, contentHash, rows, summary: summarise(rows, o.k) };
+}
+
+// Arms that claim they cannot differ must not differ. The claim is worth checking
+// in the instrument rather than in each caller, because it is the same claim every
+// sweep makes: this change moved nothing about the window it did not aim at. A
+// mismatch is reported rather than thrown - an arm is allowed to be a deliberate
+// negative control and the run should still finish.
+function checkGuard(arm, arms) {
+  const other = arms.find((a) => a.name === arm.guard);
+  if (!other) return { against: arm.guard, equal: null, mismatches: [], note: `no arm named ${arm.guard}` };
+  const mismatches = [];
+  for (let i = 0; i < Math.max(arm.rows.length, other.rows.length); i++) {
+    const a = arm.rows[i]?.ranked || [];
+    const b = other.rows[i]?.ranked || [];
+    if (a.length !== b.length || a.some((p, j) => p !== b[j])) {
+      mismatches.push({ run: arm.rows[i]?.case?.runId ?? null, arm: a.slice(0, 20), guard: b.slice(0, 20) });
+    }
+  }
+  return { against: other.name, equal: mismatches.length === 0, mismatches };
 }
 
 function mean(xs) {
   return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+}
+
+// Gold named by the tail and not by the window. Subtracting the window is what
+// makes this a fact about the tail rather than about `k`: every name the window
+// already offered is a hit the recall numbers already count, and counting it again
+// in the tail would let a wider `limit` inflate the statistic by repeating itself.
+function tailGold(r) {
+  if (!r.tail?.length) return 0;
+  const offered = new Set(r.ranked.slice(0, r.k));
+  const answers = new Set(r.case?.gold || []);
+  return r.tail.filter((p) => answers.has(p) && !offered.has(p)).length;
 }
 
 export function summarise(rows, k = EVAL_DEFAULTS.k) {
@@ -177,6 +254,21 @@ export function summarise(rows, k = EVAL_DEFAULTS.k) {
   for (const r of scored) distribution[r.gold] = (distribution[r.gold] || 0) + 1;
   const hits = (rs) => rs.reduce((a, r) => a + r.hits, 0);
   const golds = (rs) => rs.reduce((a, r) => a + r.gold, 0);
+  // The tail is what the ranker offered past the metric's window. `tailHits` counts
+  // only gold the window did *not* already offer, so `tailShare` answers §5.14's
+  // question - of the answers the window missed, how many did the extra names name
+  // at all - rather than recall at a wider `k`, which is capped differently and
+  // reads as a win whatever happened.
+  const tailHits = scored.reduce((a, r) => a + tailGold(r), 0);
+  const unoffered = uncapped.reduce((a, r) => a + (r.gold - r.hits), 0);
+  // The tail's denominator is the misses over *every* scored run, not over the
+  // uncapped subset the recall metrics use. A capped run is precisely the case a
+  // tail exists for - its shortfall is the window's rather than the ranker's, so
+  // holding it out would leave the statistic measuring the runs that least need it.
+  const misses = scored.reduce((a, r) => a + (r.gold - r.hits), 0);
+  // ~4 characters per token, the estimate the rest of the ranker uses, applied to
+  // the rendered path lines. A tail is paths only, so this is its whole cost.
+  const tailTokens = scored.reduce((a, r) => a + (r.tail || []).reduce((b, p) => b + Math.ceil(p.length / 4), 0), 0);
   return {
     k,
     runs: scored.length,
@@ -196,6 +288,23 @@ export function summarise(rows, k = EVAL_DEFAULTS.k) {
     recallMacro: mean(uncapped.map((r) => r.recall)),
     recallMicro: golds(uncapped) ? hits(uncapped) / golds(uncapped) : null,
     recallRuns: uncapped.length,
+    // §5.14's widening, as four quantities. `tailRuns` says how often there was a
+    // tail at all, which is the honest denominator for the rest: on this corpus the
+    // window is capped on 5 of 14 runs, and all five come from one task.
+    tailRuns: scored.filter((r) => (r.tail || []).length).length,
+    tailHits,
+    tailNames: scored.reduce((a, r) => a + (r.tail || []).length, 0),
+    tailTokens,
+    // Of the answers the window missed, the share the tail names at all. The
+    // denominator is the misses and not the whole gold set, so a wider `limit`
+    // cannot raise it by repeating what the window already offered; a run with no
+    // misses contributes nothing to either side and yields null rather than 1.
+    tailShare: misses ? tailHits / misses : null,
+    // Runs whose window holds no gold at all. The closest available proxy for §9's
+    // "what a consumer does with a wrong window": the harness scores retrieval, so
+    // it cannot see the consumer, and this counts the windows that gave it nothing
+    // rather than claiming to measure what it did next.
+    zeroRuns: scored.filter((r) => r.hits === 0).length,
     // The part of recall the ranker is responsible for: answers the planner read
     // that the ranking never offered. A gold file that was offered *and* read is
     // partly a fact about the prompt - a planner reads what it is handed - so

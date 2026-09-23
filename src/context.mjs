@@ -410,6 +410,26 @@ function digest(value) {
   return createHash('sha1').update(JSON.stringify(value)).digest('hex').slice(0, 12);
 }
 
+// A hash of the tree's *contents* rather than its paths. `treeHash` says the file
+// list is unchanged; §5.12 item 5 is the measurement that says that is not the same
+// claim - renaming one function moved macro recall 3.7 points through the `define`
+// index with every path in the tree identical. So "same tree" was a discipline the
+// harness asked for and could not check, and it is checked here instead.
+//
+// Every figure the harness produces is a property of (ranker, tree), and until this
+// existed the second argument was unverifiable from a record. Cost is one pass over
+// the source files, paid only under `debug`.
+function contentDigest(root, files) {
+  const pairs = [];
+  for (const f of files) {
+    if (!SOURCE_FILE.test(f)) continue;
+    const text = readText(path.join(root, f));
+    if (!text || text.includes('\u0000')) continue;
+    pairs.push([f, createHash('sha1').update(text).digest('hex')]);
+  }
+  return digest(pairs);
+}
+
 // Returns the score and, when `parts` is asked for, the per-signal breakdown the
 // debug record (§5.10) persists. The breakdown is built unconditionally - it is
 // four numbers - and only the assembling of it is skipped, so a normal run pays a
@@ -960,7 +980,10 @@ export function relevantFiles(project, task, options = {}) {
     if (text !== null) contents.push({ path: file, text, tokens: estimateTokens(text) });
   }
   const rankState = rankingState(scored, tokens, df, rankable.length);
-  const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state: rankState.state, marks: { t0, tDf, tScore, tDefine, tEdge } }) : null;
+  const tHash = trace ? performance.now() : 0;
+  const contentHash = trace ? contentDigest(root, files) : null;
+  const tEnd = trace ? performance.now() : 0;
+  const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state: rankState.state, contentHash, marks: { t0, tDf, tScore, tDefine, tEdge, tHash, tEnd } }) : null;
   return { paths: selected, contents, scores: scored, debug, ...rankState };
 }
 
@@ -1004,7 +1027,7 @@ function rankingState(scored, tokens, df, n) {
 // floor from 0.10 to 0.50. It is recorded because §5.7 asks for it and because the
 // measurement that says it does not work is the useful part; §5.10 and §9 carry it.
 const DEBUG_CANDIDATES = 200;
-function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state, marks }) {
+function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state, marks, contentHash }) {
   const n = rankable.length;
   const { ceil, coverage } = ceilQuery(tokens, df, n);
   const accepted = new Map(selected.map((p, i) => [p, i]));
@@ -1039,7 +1062,11 @@ function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected,
     config: cfg,
     configHash: digest(cfg),
     treeHash: digest([...files].sort()),
-    timings: marks ? { df: round(marks.tDf - marks.t0), score: round(marks.tScore - marks.tDf), define: round(marks.tEdge - marks.tDefine), edge: round(performance.now() - marks.tEdge) } : null,
+    // Kept alongside `treeHash` rather than replacing it: the two answer different
+    // questions and a record that only carried the new one could not be compared
+    // against anything recorded before this phase.
+    contentHash,
+    timings: marks ? { df: round(marks.tDf - marks.t0), score: round(marks.tScore - marks.tDf), define: round(marks.tEdge - marks.tDefine), edge: round(marks.tHash - marks.tEdge), hash: round(marks.tEnd - marks.tHash) } : null,
     candidates,
     truncated: scored.length > DEBUG_CANDIDATES,
   };

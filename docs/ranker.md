@@ -1099,6 +1099,44 @@ eight of the twenty-two planner runs have no recoverable gold at all — a run t
 died before opening anything is a case the benchmark silently drops, so it is
 counted as `empty` rather than passed over.
 
+**The instrument — phase 8.** Everything above scores a ranking; none of it could
+*record* one. `evaluate` kept `{case, ranked, ...scoreCase}` and dropped
+`picked.debug`, whose only other writer is `buildTaskContext` — so §5.10's floor was
+never calibrated because the input to a calibration was unreachable, not because it
+came back flat. Five additions, all in `src/ranker-eval.mjs`, `src/context.mjs` and
+`ai-code eval`:
+
+- **`contentHash`.** `treeHash` hashes the path list, and item 5 above is the
+  measurement that says that is a different claim: renaming one function moved macro
+  recall 3.7 points with every path identical. The record now carries a hash over
+  `[path, sha1(text)]` alongside it, so "same tree" is machine-checkable rather than
+  a discipline two readers keep. Measured at 5.4 ms for this repository's 69 files,
+  paid only under `debug`.
+- **`limit` separated from `k`.** `k` is the metric's window, `limit` is what the
+  ranker was asked to return. At the default `limit === k` nothing changes; above it
+  the extra names come back as `tail`.
+- **`tail`, and five tail statistics** — `tailRuns`, `tailHits`, `tailNames`,
+  `tailTokens` (paths are ~4 characters per token, the estimate the ranker uses
+  elsewhere) and `tailShare`. `tailHits` counts only gold the window did *not*
+  already offer, so `tailShare` answers §5.14's question instead of restating
+  recall at a wider `k`, which is capped at a different `k/|gold|` and rises
+  whatever the tail contains.
+- **`zeroRuns`** — runs whose window holds no gold at all. Named as a proxy rather
+  than a measurement: the harness scores retrieval, so it cannot see what a consumer
+  did with a wrong window, and this counts the windows that handed it nothing.
+- **`--arms`**, so a sweep runs every configuration in one process against one tree.
+  Two CLI invocations are two trees until `contentHash` says otherwise.
+
+An arm may declare `guard: <other arm>` — a claim that its `paths` are identical to
+that arm's, checked by the instrument rather than by each caller, because it is the
+same claim every sweep makes. **Its first run falsified its own premise, which is
+the useful part.** `{"limit": 15}` and `{"limit": 45}` differ on all 22 runs, for two
+independent reasons: `frontier` seeds from `scored.slice(0, limit)`, so the window is
+a parameter of the *scorer* rather than of the slice, and `testSiblings` appends up
+to five names once `limit` rises. Both are §5.14's to fix and neither was visible
+before the guard existed — which is the argument for building it before the piece it
+constrains rather than alongside it.
+
 **The published ceiling for this exact task is not high.** BugLocator (ICSE 2012)
 is the closest analogue — rank source files against a natural-language bug report.
 On Eclipse 3.1 (12,863 files) the file that needed changing landed in the top 10

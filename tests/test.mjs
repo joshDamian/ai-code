@@ -1469,6 +1469,75 @@ test('the harness mines a gold set from a run and scores the ranker against it',
   assert.equal(summary.recallMicro,1);
 });
 
+test('the content hash sees a rename the tree hash cannot',()=>{
+  const root=depsRepo();
+  const pick=()=>relevantFiles({id:'p',path:root},{title:'fix the router',description:'',plan:null},{cwd:root,config:{debug:true}}).debug;
+  const before=pick();
+  fs.writeFileSync(path.join(root,'src','router.mjs'),'export function routeRenamed(){}\n');
+  const after=pick();
+  // §5.12 item 5: renaming one function moved macro recall 3.7 points through the
+  // `define` index with every path in the tree identical. A path-only hash says
+  // these two trees are the same tree, which is why "same tree" was a discipline
+  // the harness could ask for and not one it could check.
+  assert.equal(after.treeHash,before.treeHash,'the file list is unchanged');
+  assert.notEqual(after.contentHash,before.contentHash,'and the source is not');
+  assert.equal(after.configHash,before.configHash,'only the tree moved, not the config');
+  // Same tree, second read: the hash is a property of the tree and not of the run.
+  assert.equal(pick().contentHash,after.contentHash);
+});
+
+test('the tail is scored as a tail, not as recall at the wider window',()=>{
+  // `a` is in the window and in the tail, and `zz` is in the tail and not an
+  // answer. A definition that counted either would let a wider `limit` raise the
+  // statistic by repeating what the window already offered or by naming anything.
+  const row={ranked:['a','b'],tail:['a','c','zz'],k:2,hits:2,gold:4,capped:true,mrr:0,ndcg:0,case:{gold:['a','b','c','d']}};
+  // A second, uncapped run with nothing to widen for, so the summary has both.
+  const done={ranked:['x'],tail:[],k:2,hits:1,gold:1,capped:false,mrr:0,ndcg:0,case:{gold:['x']}};
+  const s=summarise([row,done]);
+  assert.equal(s.tailHits,1,'`c` is the one miss the tail names');
+  assert.equal(s.tailShare,1/2,'of the answers the window missed, the tail names one');
+  assert.equal(s.tailNames,3,'counted as offered, which is a fact about cost rather than about retrieval');
+  assert.equal(s.tailRuns,1);
+  // The two denominators are different questions and the tail uses the wider one:
+  // `unoffered` holds capped runs out because their shortfall is the window's, and
+  // a capped run is exactly the case a tail exists for.
+  assert.equal(s.unoffered,0);
+  assert.equal(s.capped,1);
+  // A run with nothing missed contributes to neither side: the share is undefined
+  // rather than one, because there is no shortfall for the tail to have covered.
+  assert.equal(summarise([{ranked:['a'],tail:['b'],k:1,hits:1,gold:1,capped:false,mrr:0,ndcg:0,case:{gold:['a']}}]).tailShare,null);
+  // Rows without a tail - every row the harness produced before this - are read as
+  // an empty tail rather than crashing the summary.
+  assert.equal(summarise([{ranked:['a'],k:1,hits:0,gold:1,capped:false,mrr:0,ndcg:0,case:{gold:['a']}}]).tailHits,0);
+});
+
+test('every arm runs in one process against one tree, and a guard that cannot hold says so',()=>{
+  const root=depsRepo();
+  const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  s.createTask(p.id,'fix the router');
+  const cases=[{runId:'r',taskId:'t',title:'fix the router',description:'',gold:['src/router.mjs']}];
+  const r=evaluate(p,cases,{k:1,limit:1,debug:true,arms:[
+    {name:'A'},
+    // The same configuration under a different name: the guard is checked against
+    // a real second run, not against the first run's own output.
+    {name:'B',guard:'A'},
+    // And one that must fail, so the check is not vacuous.
+    {name:'C',guard:'A',limit:5},
+  ]});
+  assert.equal(r.arms.length,3);
+  assert.equal(r.arms[0].guard,null,'an arm that claims nothing is reported as claiming nothing');
+  assert.deepEqual(r.arms[1].guard,{against:'A',equal:true,mismatches:[]});
+  assert.equal(r.arms[2].guard.equal,false,'a wider limit is a different window and the guard says so');
+  assert.ok(r.arms[2].guard.mismatches.length>0);
+  // One tree: the same content hash from three runs, which is the precondition for
+  // comparing them at all (and the reason the hash is in the record).
+  const hashes=new Set(r.arms.map((a)=>a.contentHash));
+  assert.equal(hashes.size,1);
+  assert.equal([...hashes][0],r.contentHash);
+  assert.notEqual([...hashes][0],null,'debug has to be on for a record to exist');
+});
+
 test('the implementer is given its own worktree, not the main checkout',async()=>{
   const root=depsRepo();
   const s=new Service(root,{allowMock:true,silent:true});

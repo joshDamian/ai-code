@@ -49,7 +49,8 @@ Runs
   runs
   usage [24h|7d|30d|all]
 Ranker
-  eval [project-id]
+  eval [project-id] [--k <n>] [--limit <n>] [--config <json>]
+                     [--arms <json>] [--debug] [--json]
 Automation
   automation list
   automation add <name> <trigger> <action>
@@ -244,12 +245,64 @@ async function main() {
   if (cmd === 'eval') {
     const { plannerCases, evaluate } = await import('./ranker-eval.mjs');
     const projects = s.store.listProjects();
-    const project = sub ? projects.find((p) => p.id === sub || p.name === sub) : projects[0];
+    const pid = sub && !sub.startsWith('--') ? sub : undefined;
+    // The project id is optional, so a leading flag lands in `sub` and the rest of
+    // the scan would start one argument late. Putting it back keeps every flag a
+    // positional scan of one array, which is how the rest of this file reads them.
+    const argv = pid === undefined && sub !== undefined ? [sub, ...rest] : rest;
+    const project = pid ? projects.find((p) => p.id === pid || p.name === pid) : projects[0];
     if (!project) throw Error(`Unknown project: ${sub}`);
+    const value = (name) => {
+      const i = argv.indexOf(name);
+      if (i < 0) return undefined;
+      const v = argv[i + 1];
+      // Named rather than silent, so a flag that cannot act says so instead of
+      // being accepted and ignored.
+      if (v === undefined || v.startsWith('--')) throw new Error(`${name} needs a value`);
+      return v;
+    };
+    const num = (name) => {
+      const v = value(name);
+      if (v === undefined) return undefined;
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1) throw new Error(`${name} needs a positive integer`);
+      return n;
+    };
+    const parseJson = (name) => {
+      const v = value(name);
+      if (v === undefined) return undefined;
+      try {
+        return JSON.parse(v);
+      } catch (e) {
+        throw new Error(`${name} is not valid JSON: ${e.message}`);
+      }
+    };
     const cases = plannerCases(s.store, project);
+    const arms = parseJson('--arms');
+    const config = parseJson('--config');
+    const k = num('--k');
+    const limit = num('--limit');
+    if (arms !== undefined && !Array.isArray(arms)) throw new Error('--arms needs a JSON array');
+    const result = evaluate(project, cases, {
+      ...(k ? { k } : {}),
+      ...(limit ? { limit } : {}),
+      ...(argv.includes('--debug') ? { debug: true } : {}),
+      ...(config ? { config } : {}),
+      ...(arms ? { arms } : {}),
+    });
     // The summary carries how many runs fed it, because a metric over four runs
-    // and a metric over four hundred read the same and mean different things.
-    return out({ cases: cases.length, ...evaluate(project, cases).summary });
+    // and a metric over four hundred read the same and mean different things. The
+    // arms and the rows are the instrument: without them a sweep is two CLI runs
+    // against two trees, and §5.12 item 5 says those are two measurements.
+    if (arms) {
+      return out({
+        cases: cases.length,
+        contentHash: result.contentHash,
+        arms: result.arms.map(({ rows, ...arm }) => ({ ...arm, runs: rows.length, ...(argv.includes('--debug') ? { rows } : {}) })),
+      });
+    }
+    if (!argv.includes('--json') && !argv.includes('--debug')) return out({ cases: cases.length, ...result.summary });
+    return out({ cases: cases.length, k: result.k, limit: result.limit, contentHash: result.contentHash, ...result.summary, rows: result.rows });
   }
   if (cmd === 'runs') return out(s.store.listRuns());
   if (cmd === 'usage') return out(s.usage(rest[0] || '7d'));
