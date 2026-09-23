@@ -1051,8 +1051,9 @@ test('the heuristic floor is configuration and entry points and recent, and it i
   const narrow=relevantFiles(p,{id:'t',title:'a',description:'',plan:null},{cwd:root,recent:['docs/notes.mjs','src/widget.mjs'],config:{files:2}});
   assert.deepEqual(narrow.paths,['package.json','index.mjs']);
   const wide=relevantFiles(p,{id:'t',title:'a',description:'',plan:null},{cwd:root,recent:['docs/notes.mjs','src/widget.mjs'],config:{files:2,widen:2}});
-  assert.deepEqual(wide.paths.slice(0,narrow.paths.length),narrow.paths,'a wider cap extends the floor rather than reordering it');
-  assert.equal(wide.paths.length,4);
+  assert.deepEqual(wide.paths,narrow.paths,'a wider cap extends the floor rather than reordering it');
+  assert.deepEqual(wide.tail,['docs/notes.mjs','src/widget.mjs'],'and the names past the window are the tail, as in the ranked branch');
+  assert.equal(wide.paths.length+wide.tail.length,4);
   // The classes are disjoint by pattern, so the only overlap the dedup can meet is
   // a file that is both an entry point and recent - which is the common case, not a
   // contrived one: an entry point is a file git touched.
@@ -1172,6 +1173,84 @@ test('the render is deterministic',()=>{
   const a=renderOf({'widget.mjs':body},'widget bravo',null,root);
   const b=renderOf({'widget.mjs':body},'widget bravo',null,root);
   assert.equal(a,b);
+});
+
+test('widening adds names and never reorders the window',()=>{
+  // §5.14's guard, in its strong form. `tail` is a field of its own rather than
+  // everything in `paths` past `limit`, which is what makes exact equality
+  // assertable: `testSiblings` already appends to `paths` past `limit`, and a
+  // position-based tail would make that quiet behaviour load-bearing.
+  //
+  // The query matches no path (`zzz` is nowhere), so this is the NO_RESULTS state
+  // and the trigger for a state-keyed widening. The eight files score on recency
+  // alone, so there is a tail to have.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  const recent=[];
+  for(const i of [0,1,2,3,4,5,6,7]){const p=`src/mod${i}.mjs`;fs.writeFileSync(path.join(root,p),'export const x=1;\n');recent.push(p);}
+  const p={id:'p',name:'p',path:root};
+  const task={id:'t',title:'zzz',description:'',plan:null};
+  const ask=(widen,widenOn)=>relevantFiles(p,task,{cwd:root,recent,limit:3,config:{widen,widenOn}});
+  const narrow=ask(1,'state');
+  const wide=ask(4,'state');
+  assert.equal(narrow.state,'NO_RESULTS','the query is in no path, which is the state that widens');
+  assert.deepEqual(narrow.tail,[],'the reversal key: at widen 1 there is no tail at all');
+  assert.deepEqual(wide.paths,narrow.paths,'the window is byte-identical across the widening, not a prefix of it');
+  assert.equal(wide.tail.length,5,'the eight candidates less the three the window offered, capped at 3 x 4');
+  // The tail is the next names in the ranking, and never a name the window has.
+  const rest=wide.scores.map((f)=>f.path).slice(3);
+  assert.deepEqual(wide.tail,rest.filter((f)=>!wide.paths.includes(f)));
+  // Paths only: §5.14's whole argument is that a name costs ~a rounding error and a
+  // body does not, so no widened name brings a body with it.
+  const withBody=new Set(wide.contents.map((f)=>f.path));
+  assert.equal(wide.tail.filter((f)=>withBody.has(f)).length,0);
+});
+
+test('the tail is the state\'s, not the run\'s',()=>{
+  // §5.14 says "for a task with little lexical signal", and the two arms are what
+  // tests whether that trigger is doing any work. On a FULL run the window is ranked
+  // on evidence, so `state` offers nothing and `always` offers the same names it
+  // would offer anywhere - which is the whole difference between the two keys.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  const recent=[];
+  for(const i of [0,1,2,3,4,5,6,7]){const f=`src/mod${i}.mjs`;fs.writeFileSync(path.join(root,f),'export const x=1;\n');recent.push(f);}
+  fs.writeFileSync(path.join(root,'src','widget.mjs'),'export const w=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const task={id:'t',title:'widget',description:'',plan:null};
+  const ask=(widenOn,widen)=>relevantFiles(p,task,{cwd:root,recent,limit:3,config:{widen,widenOn}});
+  assert.equal(ask('state',4).state,'FULL','the task names a file, so the window is ranked on evidence');
+  assert.deepEqual(ask('state',4).tail,[],'and a state-keyed widening leaves it alone');
+  assert.ok(ask('always',4).tail.length,'while always spends the tail on every run');
+  assert.deepEqual(ask('always',4).paths,ask('state',4).paths,'and still moves nothing in the window');
+});
+
+test('a widened context still fits the smallest budget the ladder allows',()=>{
+  // §5.6's totality with the tail inside `tree`. The tail is at the front of the
+  // listing behind the window, so the geometric clamp - which slices from the end -
+  // takes it last, and the wheel that empties `files` never held it. What the test
+  // asserts is the property, not the mechanism: every budget the ladder is asked for
+  // is met, with the widened names in there.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  const body='export const thing = 1;\n'.repeat(60);
+  const recent=[];
+  for(let i=0;i<120;i++){const f=`src/mod${String(i).padStart(3,'0')}.mjs`;fs.writeFileSync(path.join(root,f),body);recent.push(f);}
+  const p={id:'p',name:'ai-code',path:root,language:'js',framework:'none',commands:{}};
+  const task={id:'t',title:'zzz',description:'',plan:null};
+  const cfg=contextConfig({widen:4});
+  const ctx=buildTaskContext(p,task,{role:'implementer',window:400000,fixed:0,config:cfg,recent});
+  assert.equal(ctx.manifest.state,'NO_RESULTS');
+  assert.ok(ctx.manifest.widened>0,'the tail is named on the manifest');
+  for(const w of [400000,32000,9000,4000,900,400,64]){
+    const c=buildTaskContext(p,task,{role:'implementer',window:w,fixed:0,config:cfg,recent});
+    assert.ok(c.manifest.tokens<=c.manifest.budget,`${c.manifest.tokens} fitted ${c.manifest.budget} at window ${w}`);
+  }
+  // And the reversal key reaches the manifest: at `widen: 1` the field is absent
+  // rather than zero, so the manifest is byte-identical to what it was before §5.14.
+  const off=buildTaskContext(p,task,{role:'implementer',window:400000,fixed:0,config:contextConfig({widen:1}),recent});
+  assert.equal(off.manifest.widened,undefined,'at the reversal key the field is absent, not zero');
+  assert.ok(!('widened' in off.manifest));
 });
 
 test('an acronym run splits off the word that follows it',()=>{
@@ -1710,6 +1789,41 @@ test('every arm runs in one process against one tree, and a guard that cannot ho
   assert.equal(hashes.size,1);
   assert.equal([...hashes][0],r.contentHash);
   assert.notEqual([...hashes][0],null,'debug has to be on for a record to exist');
+});
+
+test('the five metrics are identical across the widening arms, and the tail is the only thing that moves',()=>{
+  // §5.14's guard, at the level the decision is made. The point of `tail` being a
+  // field rather than a longer `paths` is exactly this: the arm that widens and the
+  // arm that does not must be the same measurement of the window, or `tailShare`
+  // would be comparing two different rankings and reading as a win.
+  //
+  // The query names nothing in the tree, so the state is NO_RESULTS with a tail to
+  // have; a task naming a real file would be FULL and the state-keyed key would
+  // correctly do nothing.
+  const root=depsRepo();
+  const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  const cases=[{runId:'r',taskId:'t',title:'zzz qqq wwww',description:'',gold:['src/router.mjs']}];
+  const r=evaluate(p,cases,{k:1,limit:1,debug:true,arms:[
+    {name:'narrow',config:{widen:1}},
+    {name:'wide',config:{widen:4},guard:'narrow'},
+    {name:'always',config:{widen:4,widenOn:'always'},guard:'narrow'},
+  ]});
+  const [narrow,wide,always]=r.arms;
+  assert.equal(narrow.rows[0].state,'NO_RESULTS');
+  assert.deepEqual(narrow.rows[0].tail,[]);
+  assert.ok(wide.rows[0].tail.length,'the state-keyed widening offers names on a query with no path term');
+  assert.ok(always.rows[0].tail.length,'and the unconditional arm does too');
+  assert.deepEqual(wide.guard,{against:'narrow',equal:true,mismatches:[]},'the guard: the window is byte-identical');
+  assert.deepEqual(always.guard.equal,true);
+  for(const m of ['recallMacro','recallMicro','mrr','ndcg','unoffered','zeroRuns']){
+    assert.equal(wide.summary[m],narrow.summary[m],`${m} does not move with the widening`);
+    assert.equal(always.summary[m],narrow.summary[m],`${m} does not move with the widening either`);
+  }
+  // What does move is the cost and the tail's own account of the misses.
+  assert.equal(narrow.summary.tailNames,0);
+  assert.ok(wide.summary.tailNames>0);
+  assert.ok(wide.summary.tailTokens>narrow.summary.tailTokens);
 });
 
 test('the implementer is given its own worktree, not the main checkout',async()=>{

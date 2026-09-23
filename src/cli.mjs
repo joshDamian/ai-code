@@ -282,12 +282,17 @@ async function main() {
     const config = parseJson('--config');
     const k = num('--k');
     const limit = num('--limit');
+    // §5.14's key, as its own flag because sweeping it is the whole point of the
+    // piece and `--config '{"widen":4}'` is long enough to be typed wrong. It merges
+    // into `--config` rather than replacing it, so an arm that needs both still
+    // needs one flag.
+    const widen = num('--widen');
     if (arms !== undefined && !Array.isArray(arms)) throw new Error('--arms needs a JSON array');
     const result = evaluate(project, cases, {
       ...(k ? { k } : {}),
       ...(limit ? { limit } : {}),
       ...(argv.includes('--debug') ? { debug: true } : {}),
-      ...(config ? { config } : {}),
+      ...(config || widen ? { config: { ...(config || {}), ...(widen ? { widen } : {}) } } : {}),
       ...(arms ? { arms } : {}),
     });
     // The summary carries how many runs fed it, because a metric over four runs

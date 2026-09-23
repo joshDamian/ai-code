@@ -963,6 +963,22 @@ guard and no "keep the selected paths", because a guard is what left the ladder 
 rung short. On a 121-file repository at a 200-token budget the rungs run in order:
 the listing shrinks, the file body becomes a path, then the path goes.
 
+**The widened names spend `cfg.tree`, not the budget.** §5.14's tail is prepended to
+the tree rather than given its own allowance:
+`tree = [...new Set([...picked.paths, ...picked.tail, ...full])].slice(0, cfg.tree)`.
+That is what keeps this section's totality proof true without a line of it changing.
+Rung 4 already rewrites `tree` from `picked.paths ∪ files` for exactly this reason —
+the walk is the droppable part — so it takes the tail with the window and drops
+`full`. Rung 7 converts `files` to paths and never touches `tree`, so the two
+mechanisms cannot interact, and the tail is paths on arrival. Rung 8's clamp is
+geometric from the end, so a tail at the front of the list outlives the walk behind
+it. Rung 9 pops `files`, which never held the tail. The consequence to state plainly:
+a widened context is the same size as an unwidened one, and what it buys is
+*position* — on a repository larger than `cfg.tree`, the names the ranking considered
+and rejected are listed ahead of the ones it never considered at all, at the cost of
+the walk-order names they displace. On this 68-file repository nothing is displaced
+and the tail's whole cost is the 250 tokens a run measured in §5.14.
+
 ### 5.7 Two decisions, not one threshold: no-results and weak-results
 
 Two independent measurements say a ranker that always returns top-k is worse than
@@ -1587,6 +1603,68 @@ Three consequences, none of which is "build a better ranker":
 - **Accept it.** BugLocator's 62.6% top-10 is measured on single-file fixes, and
   §5.4 already records that Agentless's ~93.6% file-level top-5 collapses to ~38%
   end-to-end. Multi-file localisation is harder than this document solves.
+
+**Built and measured — phase 8.** The widened names are a **field of their own**:
+`relevantFiles` returns `{ paths, tail, contents, scores, debug, …state }`, where
+`paths` is the window exactly as it was and `tail` is `scored.slice(limit, limit ×
+cfg.widen)`. A named field rather than "everything in `paths` past `limit`" because
+`testSiblings` already appends past `limit` invisibly to the metric's slice, and
+because it makes the only strong statement available assertable: **the guard is
+exact equality of `paths` across the two arms, not a prefix.**
+
+| `widen` | tailRuns | names | gold hits | tokens | `tailShare` |
+|---|---|---|---|---|---|
+| 1 (reversal key) | 0 | 0 | 0 | 0 | — |
+| 2 | 14 | 199 | 28 | 1097 | 0.3182 |
+| 3 | 14 | 409 | 49 | 2248 | 0.5568 |
+| **4 (shipped)** | **14** | **619** | **65** | **3507** | **0.7386** |
+| 5 | 14 | 731 | 72 | 4099 | 0.8182 |
+| 8 | 14 | 731 | 72 | 4099 | 0.8182 |
+
+`tailShare` is the share of the answers the window missed that the tail names at
+all — the misses and not the whole gold set as the denominator, so a wider limit
+cannot raise it by repeating what the window already offered. At `widen: 4` that is
+**65 of 88 misses**. The last two rows are identical because `scored` holds 68
+files against a window of 15: the tail hit the corpus's size, not a plateau in the
+curve, and a larger repository would keep going past 5. 4 ships because it stays
+inside this section's own 3–5 while the last increment is already the worst in the
+table — 7 more hits at 5 for 592 tokens, 85 tokens a hit against 54 at 4.
+
+**The trigger the section names does not fire, and that is the finding.** "For a
+task with little lexical signal" is `NO_RESULTS` or `DEGRADED` expressed where the
+ranker can read it, and **no harness run is in either state** — all 22 rows are
+`FULL`, so the state-keyed arm returns no tail on any run and the whole effect comes
+from `widenOn: 'always'`. `always` is therefore what ships. The key is kept rather
+than deleted because it is the design's own condition and the claim that it does
+nothing here is worth being able to re-run on a corpus with queries the paths
+cannot answer; it is not a knob shipped at a default of zero, it is a knob whose
+every setting has a measurement.
+
+**Cost.** 3507 tokens over 14 runs, 250 a run, 0.5% of the 50000-token cap. §5.14's
+"72 bare paths is a rounding error in a prompt" is measured and correct. What the
+tail buys is *position*: `manifest.tree` becomes
+`[paths, tail, …walk].slice(0, cfg.tree)`, so on a repository larger than
+`cfg.tree` the names the ranking considered and rejected are listed ahead of the
+ones it never considered at all — at the cost of the 45 walk-order names they
+displace. On this 68-file repository nothing is dropped and the tail costs nothing,
+which is why `tailShare` is the metric here and not anything about the prompt.
+
+**§5.6 carries over unchanged**, which was the point of putting the tail in `tree`
+rather than in `files`: the tail is paths, rung 4 keeps it with the window while
+dropping the walk, and the geometric clamp below slices from the end so the tail at
+the front goes last. `contents` is built from `paths` only, so `manifest.files` and
+`contextEnrich` are byte-identical and the tail is structurally invisible to all
+five metrics — verified, not asserted: the guard holds and macro, micro, MRR, nDCG,
+`unoffered` and `zeroRuns` are identical to six decimals across the arms.
+`manifest.widened` carries the count, and only when it is non-zero, so `widen: 1`
+reverses the manifest as well as the list.
+
+**The evidence base is thin and this is the sentence that says so.** All five
+capped runs — the only runs where the tail has anything to name — come from **one
+task** (§2.6). 65 of 88 is one task's five attempts at the same question, and a
+different repository could read differently. What makes it shippable anyway is that
+the guard is exact and the five metrics are untouched: a wrong tail reorders a
+listing, it does not change what the ranker found.
 
 ---
 

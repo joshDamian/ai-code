@@ -96,10 +96,22 @@ export const CONTEXT_DEFAULTS = {
   // survives. A task that names three symbols in one file is a task about the file,
   // so this is deliberately most of a small one.
   matchedChars: 2000,
-  // §5.14: how many names the ranker may offer beyond the window when the state
-  // says a wider list is worth more than a better one. 1 makes the widened list
-  // byte-identical to the window, which is the reversal key.
-  widen: 1,
+  // §5.14: how many names the ranker may offer beyond the window. Swept as
+  // {1,2,3,4,5,8} in one process against one tree: `tailShare` - the share of the
+  // answers the window missed that the tail names at all - reads 0.32, 0.56, 0.74,
+  // 0.82, and the last two are identical to the digit. 4 is the value that keeps
+  // the last increment inside §5.14's own range while still naming 65 of 88 misses;
+  // 5 buys 7 more for the worst marginal rate in the table (85 tokens a hit against
+  // 54 at 4). 1 is the reversal key and makes `tail` empty on every run.
+  widen: 4,
+  // §5.14 asks for the wider list "for a task with little lexical signal", and
+  // `state` is that condition expressed where the ranker can read it - `NO_RESULTS`
+  // and `DEGRADED`. It is measured at **zero**: no harness run is in either state,
+  // so the state-keyed arm produces no tail on any of the 14, and the whole effect
+  // comes from `always`. It ships at `always` for that reason, and the key is kept
+  // rather than deleted because it is the trigger the design names and the claim
+  // that it does nothing here is worth being able to re-run on a larger corpus.
+  widenOn: 'always',
   // §5.10's record. Off by default: it is a few KB per run and nothing in the
   // prompt path reads it.
   debug: false,
@@ -1069,7 +1081,11 @@ export function relevantFiles(project, task, options = {}) {
     // floor's cost. A timing that credits the declaration pass with work it never
     // did is worse than a missing one.
     const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected: floor, limit, state: rankState.state, contentHash, ref: null, marks: { t0, tDf, tScore, tDefine: tScore, tEdge: tScore, tGraph: tScore, tRef: tFloor, tHash: tFloor, tEnd: tHash } }) : null;
-    return { paths: floor, tail: [], contents: [], scores: scored, debug, ...rankState };
+    // The floor's overflow is the tail, not part of `paths`: `paths` is the window
+    // and the widening is the extra names, in this branch as in the other one. It is
+    // the same split, so `manifest.tree` and the harness's `tail` field need no
+    // special case for a degraded run.
+    return { paths: floor.slice(0, limit), tail: floor.slice(limit), contents: [], scores: scored, debug, ...rankState };
   }
 
   // The task names a symbol; the file that declares it is the file the task is
@@ -1185,7 +1201,11 @@ export function relevantFiles(project, task, options = {}) {
   const contentHash = trace ? contentDigest(root, files, cache) : null;
   const tEnd = trace ? performance.now() : 0;
   const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state: rankState.state, contentHash, ref, marks: { t0, tDf, tScore, tDefine, tEdge, tGraph, tRef, tHash, tEnd } }) : null;
-  return { paths: selected, contents, scores: scored, debug, ...rankState };
+  // §5.14. `selected` is the window plus test siblings, and the tail is built from
+  // `scored` past `limit` - so at `widen: 1` it is `[]` and this call is what it was
+  // before the key existed, byte for byte.
+  const tail = tailFor(scored, selected, limit, cfg, rankState.state);
+  return { paths: selected, tail, contents, scores: scored, debug, ...rankState };
 }
 
 // §5.9's `DEGRADED` list. Not a second ranking - there is no query to rank against
@@ -1217,6 +1237,34 @@ function heuristicFloor(files, recent, cfg) {
   const seen = new Set([...sys, ...entry]);
   const rest = recent.filter((f) => present.has(f) && !seen.has(f));
   return [...sys, ...entry, ...rest].slice(0, Math.max(1, cfg.files * cfg.widen));
+}
+
+// §5.14's widening: the names below the window, as a field of their own rather
+// than a longer `paths`.
+//
+// A separate field because `paths` is what the five metrics score and what the
+// ladder's rungs reason about, and `testSiblings` already appends to it past
+// `limit` without the harness seeing it. A tail expressed as "everything in `paths`
+// past `limit`" would make that quiet behaviour load-bearing and would make the
+// only strong statement available - that widening changes *nothing* about the
+// window - unassertable. With the tail named, the guard is exact equality.
+//
+// The states that widen are the two where the ranking has nothing to say: no
+// lexical evidence at all (`NO_RESULTS`) and no query at all (`DEGRADED`). `FULL`
+// means the window is ranked on evidence, and §5.14's own argument is about the
+// tasks where there is none. `widenOn: 'always'` overrides that, which is what
+// makes the trigger itself measurable rather than assumed.
+//
+// `scored.slice(limit, ...)` starts where the window's own slice ends, so a name
+// the window already offers can never appear twice; the `have` filter catches a
+// test sibling, which is appended to `paths` from outside `scored`'s order.
+const WIDEN_STATES = new Set(['NO_RESULTS', 'DEGRADED']);
+function tailFor(scored, selected, limit, cfg, state) {
+  const cap = Math.round(limit * cfg.widen);
+  if (cap <= limit) return [];
+  if (cfg.widenOn !== 'always' && !WIDEN_STATES.has(state)) return [];
+  const have = new Set(selected);
+  return scored.slice(limit, cap).map((f) => f.path).filter((p) => !have.has(p));
 }
 
 // §5.9's states, as far as the ranker alone can decide them. `PARTIAL` is not here
@@ -1425,10 +1473,18 @@ export function buildTaskContext(project, task, options = {}) {
   let conv = conventions;
   // The tree is capped up front, and the selected files are always in it: a path
   // the ranking picked is exactly the one the agent must be told about.
+  //
+  // §5.14's widened names sit directly behind them, and ahead of the rest of the
+  // walk. This is the whole of the widening's effect on the prompt: the tail names
+  // no file the tree would not have listed anyway, so what `cfg.widen` buys is their
+  // *position* when the cap bites - the names the ranking considered and rejected
+  // are listed before the ones it never considered at all. On a repository smaller
+  // than `cfg.tree` nothing is dropped, so the tail costs nothing and buys nothing
+  // there, which is the honest reading of a 68-file tree.
   const scanned = inspect(root);
   const full = scanned.files;
   const unreadable = scanned.unreadable || [];
-  let tree = [...new Set([...picked.paths, ...full])].slice(0, cfg.tree);
+  let tree = [...new Set([...picked.paths, ...picked.tail, ...full])].slice(0, cfg.tree);
   const size = () => estimateTokens(JSON.stringify({ tree, architecture: arch, conventions: conv, files, review, previous }));
   let total = size();
 
@@ -1453,7 +1509,12 @@ export function buildTaskContext(project, task, options = {}) {
     total = size();
   }
   if (total > cfg.budget && tree.length > picked.paths.length) {
-    tree = [...new Set([...picked.paths, ...files.map((f) => f.path)])];
+    // The tail survives this rung with the window, per §5.6: it is paths only, so it
+    // is the cheapest thing in the context, and rung 4's job is to drop the walk
+    // rather than the ranking's own output. The rungs below it then take the tail
+    // last, because the geometric clamp slices from the end and the tail is at the
+    // front - so the widened names are the last thing to go before the skeleton.
+    tree = [...new Set([...picked.paths, ...picked.tail, ...files.map((f) => f.path)])];
     trimmed.push(`tree → ${tree.length} files`);
     total = size();
   }
@@ -1519,6 +1580,10 @@ export function buildTaskContext(project, task, options = {}) {
     tokens: total,
     budget: cfg.budget,
     trimmed,
+    // §5.14's count, present only when it is non-zero for the reason `unreadable`
+    // is: at `widen: 1` the manifest has to stay byte-identical to what it was, and
+    // a `widened: 0` on every run is the kind of field a reader learns to skip.
+    ...(picked.tail?.length ? { widened: picked.tail.length } : {}),
     cwd: root,
     // §5.9. The ranker's own verdict, raised to `PARTIAL` when the walk could not
     // see the whole tree - a partial walk is a fact about the input, so it
