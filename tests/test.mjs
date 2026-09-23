@@ -709,6 +709,126 @@ test('the assembled context respects the budget and reports what it cost',()=>{
   assert.ok(built.manifest.files.length<10,'the file cap is respected');
 });
 
+test('an acronym run splits off the word that follows it',()=>{
+  const root=repo();
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','http.mjs'),'export const h=1;\n');
+  fs.writeFileSync(path.join(root,'src','server.mjs'),'export const s=1;\n');
+  fs.writeFileSync(path.join(root,'src','unrelated.mjs'),'export const u=1;\n');
+  const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  const picked=relevantFiles(p,{title:'fix HTTPServer',description:'',plan:null},{cwd:root});
+  // Without the acronym rule the identifier is one token, `httpserver`, which
+  // matches neither file: the task names the thing and the ranking cannot see it.
+  assert.ok(picked.paths.includes('src/http.mjs'),'`http` was recovered from the acronym run');
+  assert.ok(picked.paths.includes('src/server.mjs'),'and `server` from the word after it');
+  // `server.mjs` ranks first, by three points, because `ENTRY_POINT` matches it.
+  // Both files did recover their term; that is what the split is being tested for.
+  const score=Object.fromEntries(picked.scores.map(f=>[f.path,f.score]));
+  assert.equal(score['src/http.mjs'],10,'the acronym run scored as a basename hit');
+  assert.equal(score['src/server.mjs'],13,'and the word after it scored, plus the entry-point bonus');
+});
+
+test('ties break on code point, not on the ICU locale',()=>{
+  const root=repo();
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','Zebra.mjs'),'export const z=1;\n');
+  fs.writeFileSync(path.join(root,'src','apple.mjs'),'export const a=1;\n');
+  const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  const picked=relevantFiles(p,{title:'zebra apple',description:'',plan:null},{cwd:root});
+  // Both files match their own word and nothing distinguishes them, which is the
+  // normal case here: on the measured repo 59 files tied on one score. A locale
+  // sort puts `apple` first; a code-point sort puts `Zebra` first, because `Z` is
+  // 0x5A and `a` is 0x61. The whole tie group is checked, so the assertion holds
+  // however many files the fixture grows to.
+  const top=picked.scores[0].score;
+  const tied=picked.scores.filter(f=>f.score===top).map(f=>f.path);
+  assert.ok(tied.length>1,`the fixture actually produces a tie (${tied.length} files at ${top})`);
+  assert.deepEqual(tied,[...tied].sort(),'the tie group is in code-point order, uppercase first');
+  assert.equal(picked.paths[0],'src/Zebra.mjs');
+});
+
+test('a lockfile and a minified bundle stay in the tree but never take a slot',()=>{
+  const root=repo();
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'package-lock.json'),JSON.stringify({name:'x',lockfileVersion:3,packages:{}}));
+  fs.writeFileSync(path.join(root,'src','package-export.mjs'),'export const x=1;\n');
+  fs.writeFileSync(path.join(root,'bundle.min.js'),'!function(){var a=1}();\n');
+  execFileSync('git',['add','.'],{cwd:root});
+  execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','noise'],{cwd:root});
+  const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  // Every one of these names is a term in the task, so all four score on the
+  // stem: without the gate the lockfile and the bundle rank alongside the real
+  // source and one of them takes a slot.
+  const task={id:'t',title:'package bundle export',description:'',plan:null};
+  const picked=relevantFiles(p,task,{cwd:root});
+  assert.ok(!picked.paths.includes('package-lock.json'),'the lockfile never takes a slot');
+  assert.ok(!picked.paths.includes('bundle.min.js'),'nor a minified bundle');
+  assert.ok(picked.paths.includes('src/package-export.mjs'),'while the real source still does');
+  const built=buildTaskContext(p,task,{role:'planner'});
+  assert.ok(built.tree.includes('package-lock.json'),'but the tree still lists it, so the agent can find it');
+});
+
+test('vendored and editor directories are dropped at the walk',()=>{
+  const root=repo();
+  fs.mkdirSync(path.join(root,'vendor','lib'),{recursive:true});
+  fs.writeFileSync(path.join(root,'vendor','lib','thing.mjs'),'export const v=1;\n');
+  fs.mkdirSync(path.join(root,'.idea'));
+  fs.writeFileSync(path.join(root,'.idea','project.xml'),'<x/>\n');
+  const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  const built=buildTaskContext(p,{id:'t',title:'the thing',plan:null},{role:'planner'});
+  assert.ok(!built.tree.some(f=>f.startsWith('vendor/')),'a vendored tree is somebody else\'s code and out-scores real source');
+  assert.ok(!built.tree.some(f=>f.startsWith('.idea/')),'and editor state is not part of the repository');
+});
+
+test('an oversized single file is reduced to its path rather than sent over budget',()=>{
+  const root=repo();
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','gigantic.mjs'),'export const a=1;\n'.repeat(20000));
+  fs.writeFileSync(path.join(root,'src','other.mjs'),'export const o=1;\n');
+  const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  const built=buildTaskContext(p,{id:'t',title:'fix gigantic',plan:null},{role:'planner'});
+  // The file cap bounds one file at 3000 tokens, so a budget below that used to be
+  // unreachable: the ladder stops popping at the last file and sends the overflow
+  // anyway. It is now reduced to a path, which is what `readForPrompt` already
+  // does for a binary or an unreadable file.
+  const budget=Math.max(60,Math.floor(built.manifest.tokens/4));
+  const tight=buildTaskContext(p,{id:'t',title:'fix gigantic',plan:null},{role:'planner',config:contextConfig({budget})});
+  assert.ok(tight.manifest.tokens<=budget,`${tight.manifest.tokens} tokens fits the ${budget} budget`);
+  const big=tight.files.find(f=>f.path==='src/gigantic.mjs');
+  assert.ok(big,'the file the task named is still named');
+  assert.equal(big.text,null,'with no body, rather than a body that blows the budget');
+  assert.ok(tight.manifest.trimmed.some(t=>/path only/.test(t)),'and the manifest says it was reduced');
+});
+
+test('an unreadable directory degrades the ranking instead of failing the run',(t)=>{
+  if(process.getuid?.()===0)return t.skip('root ignores directory permissions');
+  // The key is additive, so an ordinary repository still assembles a manifest with
+  // no trace of it. Checked on its own repo, before anything is locked.
+  const open=repo();
+  const so=new Service(open,{allowMock:true});
+  const po=so.initProject('p',open);
+  assert.equal(buildTaskContext(po,{id:'t',title:'x',plan:null},{role:'planner'}).manifest.unreadable,undefined,'a clean walk records nothing at all');
+  const root=repo();
+  const locked=path.join(root,'locked');
+  fs.mkdirSync(locked);
+  fs.writeFileSync(path.join(locked,'secret.mjs'),'export const s=1;\n');
+  fs.chmodSync(locked,0o000);
+  try{
+    const s=new Service(root,{allowMock:true});
+    const p=s.initProject('p',root);
+    const built=buildTaskContext(p,{id:'t',title:'touch secret',plan:null},{role:'planner'});
+    // The distinction that matters: a ranking that saw less than the repository
+    // must not look like a small repository.
+    assert.deepEqual(built.manifest.unreadable,['locked'],'the walk records what it could not read');
+    assert.ok(!built.tree.some(f=>f.startsWith('locked/')),'and lists nothing under it');
+  } finally { fs.chmodSync(locked,0o755); }
+});
+
 test('the implementer is given its own worktree, not the main checkout',async()=>{
   const root=depsRepo();
   const s=new Service(root,{allowMock:true,silent:true});

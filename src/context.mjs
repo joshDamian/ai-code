@@ -4,7 +4,28 @@ import { git } from './git.mjs';
 
 // Directories that are never worth spending prompt tokens on. `.ai-code` holds the
 // database and the generated context itself, and the rest are all rebuildable.
-const ignored = new Set(['.git', 'node_modules', '.ai-code', '.next', 'dist', 'build', 'coverage', '.turbo', '.cache', 'target', '.venv', 'venv', '__pycache__', '.pytest_cache']);
+// They are dropped at the walk, so they cost neither a prompt slot nor a line in
+// the file tree.
+const ignored = new Set([
+  '.git', 'node_modules', '.ai-code', '.next', 'dist', 'build', 'coverage',
+  '.turbo', '.cache', 'target', '.venv', 'venv', '__pycache__', '.pytest_cache',
+  // Vendor and build output under the names other ecosystems use. A vendored
+  // tree is the one thing that reliably out-scores real source on term
+  // frequency, because it is a copy of somebody else's code.
+  'vendor', 'third_party', 'bower_components', '.gradle', 'obj', 'out',
+  '.svelte-kit', '.nuxt', '.output', '.parcel-cache', '.tox', 'site-packages',
+  // Editor state. Measured cost of leaving it in: an IDE's project file took the
+  // third slot on a task that had nothing to do with it.
+  '.idea', '.vscode',
+]);
+
+// Files that are real, and stay in the tree, but never earn a prompt slot: a
+// lockfile, a minified bundle, a sourcemap. Excluded from *scoring* rather than
+// from the walk, because the tree is how the agent finds things and a lockfile's
+// path is a true fact about the repository. What it must not do is take a slot
+// from a file the task is about - which is what `package-lock.json` did, at 3009
+// tokens, on a task about a form component.
+const NOISE_FILE = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|Pipfile\.lock|composer\.lock|Gemfile\.lock|go\.sum|packages\.lock\.json)$|\.min\.(js|mjs|cjs|css)$|\.map$/;
 
 // The prompt budget and the caps that keep it bounded. Every value is overridable
 // from the `context` block in routing.json.
@@ -33,12 +54,24 @@ export function estimateTokens(text) {
   return Math.ceil(String(text || '').length / 4);
 }
 
-function walk(root, rel = '', out = []) {
+// `unreadable` collects the directories this process could not open. A directory
+// it cannot read is a fact about permissions, not about the repository, and
+// dropping the whole run over one would trade a working context for a clean
+// error. The walk degrades to what it could see and records what it missed, so
+// the caller can say so rather than silently ranking a smaller repo.
+function walk(root, rel = '', out = [], unreadable = []) {
   const dir = path.join(root, rel);
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    unreadable.push(rel || '.');
+    return out;
+  }
+  for (const e of entries) {
     if (ignored.has(e.name)) continue;
     const r = path.join(rel, e.name);
-    if (e.isDirectory()) walk(root, r, out);
+    if (e.isDirectory()) walk(root, r, out, unreadable);
     else out.push(r);
   }
   // Sorted, because readdir order is filesystem-dependent: the same repo must
@@ -68,7 +101,12 @@ export function inspect(root) {
   if (fs.existsSync(path.join(root, 'pyproject.toml'))) language = 'python';
   if (fs.existsSync(path.join(root, 'go.mod'))) language = 'go';
   if (fs.existsSync(path.join(root, 'Cargo.toml'))) language = 'rust';
-  return { language, framework, commands, files: walk(root) };
+  const unreadable = [];
+  const files = walk(root, '', [], unreadable);
+  // `unreadable` is additive: every existing caller reads `files` and ignores it,
+  // and the manifest surfaces it so a shrunken ranking is distinguishable from a
+  // small repository.
+  return { language, framework, commands, files, unreadable };
 }
 
 // -- dependencies -----------------------------------------------------------
@@ -195,11 +233,24 @@ const ENTRY_POINT = /^(index|main|app|server|cli|mod|__init__)\.[a-z]+$/;
 const TEST_FILE = /(^|\/)(tests?|spec|__tests__)\/|[._-](test|spec)\.[a-z]+$/;
 const CONFIG_FILE = /^(package\.json|pyproject\.toml|go\.mod|Cargo\.toml|tsconfig\.json|Makefile|Dockerfile|\.env\.example)$|^\.?[a-z-]*rc(\.[a-z]+)?$/;
 
-// Split on punctuation and camelCase so `buildTaskContext` yields `build`, `task`,
-// `context`. Tokens under three characters are dropped as noise.
+// Split on punctuation, camelCase, acronym runs and digit boundaries, so
+// `buildTaskContext` yields `build`, `task`, `context` and `HTTPServer` yields
+// `http` and `server` rather than the single unsplittable `httpserver`.
+//
+// The third alternative is the acronym rule, and the order of the alternatives is
+// load-bearing: it only fires where the camelCase rule did not, so `getUserID`
+// splits at the first capital after a lowercase (`get` | `UserID`) and then, since
+// `ID` has no lowercase after it, stays whole. `parseHTMLResponse` splits first at
+// `H` and then at `R`, giving `parse`, `html`, `response`.
+//
+// The floor stays at three. Lowering it to two recovers `ui`, `db`, `io`, `js`
+// and `id` - and equally admits `to`, `of`, `in`, `is`, `do` and `an`, which then
+// earn the full basename weight of a real term. The floor and the inverse
+// document-frequency weighting are one change because of this, and this half is
+// the half that cannot ship alone; see the design note on tokenizer defects.
 function tokenize(text) {
   return String(text || '')
-    .split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/)
+    .split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/)
     .flatMap((t) => t.split(/(?<=[a-z])(?=[0-9])/))
     .map((t) => t.toLowerCase())
     .filter((t) => t.length >= 3);
@@ -264,8 +315,18 @@ export function relevantFiles(project, task, options = {}) {
   const recent = options.recent ?? recentFiles(root);
   const recentRank = new Map(recent.map((p, i) => [p, i]));
 
-  const scored = files.map((file) => ({ path: file, score: scoreFile(file, tokens, recentRank) })).filter((f) => f.score > 0);
-  scored.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+  // Lockfiles and bundles stay in the tree but never earn a slot. Filtered here
+  // rather than at the walk so the tree still lists them.
+  const rankable = files.filter((f) => !NOISE_FILE.test(f));
+
+  const scored = rankable.map((file) => ({ path: file, score: scoreFile(file, tokens, recentRank) })).filter((f) => f.score > 0);
+  // Ties break on the raw code-point order of the path, not `localeCompare`. The
+  // locale-aware comparison is ICU-dependent: it orders `_`, `-` and case
+  // differently under different locales, so the same repo produced different
+  // contexts on two machines - which breaks the cache and the reproducibility the
+  // ranking is supposed to have. Nearly every score here is a tie, so this is not
+  // a cosmetic difference.
+  scored.sort((a, b) => b.score - a.score || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
   const selected = scored.slice(0, limit).map((f) => f.path);
   // Second pass, so a test file is picked up for the source it covers even when
@@ -320,15 +381,17 @@ export function buildTaskContext(project, task, options = {}) {
   // matter, the approved plan, then whatever the last attempt in this role left.
   const architecture = readDoc(project.path, 'architecture.md', cfg.architecture);
   const conventions = readDoc(project.path, 'conventions.md', cfg.conventions);
-  const review = role === 'repair' || role === 'reviewer' ? task.review || null : null;
-  const previous = role === 'planner' ? null : previousSummary(options.store, task, role);
+  let review = role === 'repair' || role === 'reviewer' ? task.review || null : null;
+  let previous = role === 'planner' ? null : previousSummary(options.store, task, role);
 
   const files = [...picked.contents];
   let arch = architecture;
   let conv = conventions;
   // The tree is capped up front, and the selected files are always in it: a path
   // the ranking picked is exactly the one the agent must be told about.
-  const full = inspect(root).files;
+  const scanned = inspect(root);
+  const full = scanned.files;
+  const unreadable = scanned.unreadable || [];
   let tree = [...new Set([...picked.paths, ...full])].slice(0, cfg.tree);
   const size = () => estimateTokens(JSON.stringify({ tree, architecture: arch, conventions: conv, files, review, previous }));
   let total = size();
@@ -358,6 +421,48 @@ export function buildTaskContext(project, task, options = {}) {
     trimmed.push(`tree → ${tree.length} files`);
     total = size();
   }
+  // Past this point every rung is unconditional, because the ladder above has two
+  // floors it cannot pass: it never pops the last file, and the tree always keeps
+  // the paths the ranking picked. So a context with one enormous file - or one
+  // enormous review - left the assembler over budget and sent it anyway, which is
+  // the single outcome a budget exists to prevent. A budget that can be exceeded
+  // is not a budget.
+  //
+  // The prior attempt goes first: it is a retry signal, not the work. The review
+  // is what a repair run is acting on, so it outranks the file bodies it would
+  // otherwise compete with.
+  while (total > cfg.budget && previous) {
+    previous = null;
+    trimmed.push('previous-run');
+    total = size();
+  }
+  while (total > cfg.budget && review) {
+    review = null;
+    trimmed.push('review');
+    total = size();
+  }
+  // Content to path only. The agent still learns the file exists and is still told
+  // its name, which is the minimum useful form of a context; it is also what
+  // `readForPrompt` already does for a binary or an unreadable file.
+  if (total > cfg.budget) {
+    for (const f of files) {
+      if (f.text === null) continue;
+      f.text = null;
+      trimmed.push(`${f.path} → path only`);
+    }
+    total = size();
+  }
+  // The absolute floor. Geometric rather than one path at a time: each pass
+  // multiplies the listing by `budget / total` < 1, so it reaches empty in
+  // O(log n) re-measurements instead of O(n) full re-serialisations.
+  if (total > cfg.budget && tree.length) {
+    while (total > cfg.budget && tree.length > 0) {
+      const next = Math.min(tree.length - 1, Math.floor(tree.length * (cfg.budget / total)));
+      tree = tree.slice(0, Math.max(0, next));
+      total = size();
+    }
+    trimmed.push(`tree → ${tree.length} files`);
+  }
 
   const manifest = {
     files: files.map((f) => ({ path: f.path, tokens: f.tokens })),
@@ -368,6 +473,11 @@ export function buildTaskContext(project, task, options = {}) {
     budget: cfg.budget,
     trimmed,
     cwd: root,
+    // Present only when the walk was blocked somewhere, so the common case stays
+    // byte-identical to what it was: a ranking that saw less than the whole
+    // repository has to be distinguishable from a small repository, or the
+    // degradation is invisible to every consumer downstream.
+    ...(unreadable.length ? { unreadable } : {}),
   };
 
   return {
