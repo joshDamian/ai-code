@@ -334,7 +334,7 @@ const BUDGET_CODES = new Set(['TOOL_CALL_LIMIT', 'COST_LIMIT']);
 // rather than left inline for the reason PLANNER_PROMPT is: the clause is worth
 // having a test pin, and a prompt buried in a call site is not inspectable.
 export const reviewerPrompt = (diff) =>
-  `Review this implementation independently. Return a clear verdict: PASS or FAIL. If FAIL, list concrete findings mapped to the approved plan and test evidence. Do not modify files. No tool that writes a file exists in this session, so the verdict is the text of your reply.\n\nDIFF:\n${diff}`;
+  `Review this implementation independently. Return a clear verdict: PASS or FAIL. If FAIL, list concrete findings mapped to the approved plan and test evidence. Do not modify files. No tool that writes a file exists in this session, and the verdict is not read from your reply: it is the \`verdict\` field of your structured output, with the review itself in \`review\`.\n\nDIFF:\n${diff}`;
 
 export const PLANNER_PROMPT =
   'Produce ONLY a concrete implementation plan. Do not modify source files, create files, run mutating commands, commit, or execute implementation. No tool that writes a file exists in this session - not to the repository, not to a scratch directory, not to a plans folder - and searching for one wastes a turn. The plan is the text of your reply. Identify exact files, intended changes, tests, and verification commands. The harness will reject source changes. If the task is already fully implemented in the current codebase, say so instead of planning work: name the files that already satisfy each requirement and say why no further changes are needed. Do not invent work that does not exist.';
@@ -511,10 +511,11 @@ export class Service {
     return this.transition(id, 'AWAITING_APPROVAL');
   }
 
-  // What a run finished by saying - the plan, or the reviewer's verdict. Claude
+  // What a run finished by saying - the plan, or the reviewer's prose. Claude
   // Code's final `result` frame carries exactly that, and the same text also
   // arrives as the last assistant message, so reading the frame alone is what
-  // keeps the answer from being written down twice.
+  // keeps the answer from being written down twice. The reviewer's *verdict* is
+  // not read from here: it is a validated field, see structuredOutput below.
   //
   // Joining every text block, which is what this used to do, is not the same
   // thing. A planner that spawns Explore subagents has their reports echoed into
@@ -525,14 +526,32 @@ export class Service {
     const ended = events.filter((e) => e.type === 'result').pop();
     const closing = ended ? this.extractText(ended.data).trim() : '';
     if (closing) return closing;
-    // No result frame: the mock provider emits none, and neither does a run that
-    // died mid-stream. The last thing it said is still nearer its answer than
-    // everything it said on the way there.
+    // Nothing readable in the result frame: a run that died mid-stream has none,
+    // and the mock's reviewer frame carries a verdict and no `result` text. The
+    // last thing it said is still nearer its answer than everything it said on the
+    // way there.
     for (let i = events.length - 1; i >= 0; i--) {
       const text = this.extractText(events[i].data).trim();
       if (text) return text;
     }
     return '';
+  }
+
+  // The reviewer's verdict, as the harness validated it, or null when the run
+  // produced none. `--json-schema` puts it on the result frame, so nothing here
+  // inspects the reply for a word.
+  //
+  // The verdict is normalised and checked against the two values the schema
+  // allows. The schema is what keeps it honest, but a provider that ignores the
+  // flag would otherwise be able to answer with anything at all, and the caller
+  // is deciding a task's outcome from this one field.
+  structuredOutput(runId) {
+    const ended = this.store.listEvents(runId).filter((e) => e.type === 'result').pop();
+    const out = ended?.data?.structured_output;
+    if (!out || typeof out !== 'object') return null;
+    const verdict = String(out.verdict || '').toUpperCase();
+    if (verdict !== 'PASS' && verdict !== 'FAIL') return null;
+    return { verdict, review: typeof out.review === 'string' ? out.review.trim() : '' };
   }
 
   // The plan a finished planner run left behind. plan() and the startup recovery
@@ -751,25 +770,31 @@ export class Service {
       const r = await this.runRole(t, 'reviewer', reviewerPrompt(d), t.worktree);
       const after = status(t.worktree);
       if (before !== after) this.store.updateTask(id, { review: 'REVIEW_VIOLATION: reviewer changed worktree state' });
-      // The verdict is the reviewer's closing message, not its whole transcript:
-      // matching the word FAIL against the exploration that led to the verdict is
-      // how a reviewer that reasoned about a failure it then ruled out gets read
-      // as having failed the task.
-      const text = this.finalText(r.runId);
-      // A verdict counts as FAIL when the word appears anywhere but is never the
-      // start of a line - so "PASS" as a standalone verdict is not read as FAIL.
-      // The verdict need not be the bare word: "the implementation fails to meet
-      // item 3" is as much a FAIL as "FAIL", and a reviewer writing prose is the
-      // ordinary case rather than the exception.
-      const fail = /\bfail(?:s|ed|ing|ures?)?\b/i.test(text) && !/^\s*PASS\b/im.test(text);
-      if (fail) {
-        this.store.updateTask(id, { review: text });
+      // The verdict is the field the harness validated, not a word in the reply.
+      // Word-matching is what put a passing task into repair twice: "no test
+      // failures" was read as a finding, and a verdict written as "## Verdict:
+      // PASS" missed the escape hatch that required the word to start a line.
+      const out = this.structuredOutput(r.runId);
+      if (!out) {
+        // No verdict is a failure of the exchange, not a finding about the code.
+        // REPAIRING would send a repair agent to fix a fault that nothing has
+        // described, so the task stays in REVIEWING, where it is still reviewable
+        // and one more Review click is the whole recovery.
+        this.store.updateTask(id, { review: this.finalText(r.runId) || 'The reviewer returned no verdict.' });
+        throw Object.assign(new Error('Reviewer returned no structured verdict'), { code: 'NO_VERDICT' });
+      }
+      // The body is the `review` field and nothing else. Falling back to the reply
+      // would put the JSON envelope in the review column, which is worse than
+      // saying the reviewer sent no text.
+      const text = out.review;
+      if (out.verdict === 'FAIL') {
+        this.store.updateTask(id, { review: text || 'FAIL, with no findings text returned.' });
         return this.transition(id, 'REPAIRING');
       }
       this.store.updateTask(id, { review: text || 'PASS' });
       return this.transition(id, 'COMPLETE');
     } catch (e) {
-      if (e.code === 'CANCELLED') throw e;
+      if (e.code === 'CANCELLED' || e.code === 'NO_VERDICT') throw e;
       // A reviewer that crashed is itself a finding: hand the task to repair with
       // the error as the review body rather than failing the whole task.
       this.store.updateTask(id, { review: String(e) });
