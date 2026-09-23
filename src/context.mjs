@@ -96,6 +96,10 @@ export const CONTEXT_DEFAULTS = {
   // survives. A task that names three symbols in one file is a task about the file,
   // so this is deliberately most of a small one.
   matchedChars: 2000,
+  // §5.14: how many names the ranker may offer beyond the window when the state
+  // says a wider list is worth more than a better one. 1 makes the widened list
+  // byte-identical to the window, which is the reversal key.
+  widen: 1,
   // §5.10's record. Off by default: it is a few KB per run and nothing in the
   // prompt path reads it.
   debug: false,
@@ -1037,6 +1041,37 @@ export function relevantFiles(project, task, options = {}) {
   const byPath = (a, b) => b.score - a.score || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   scored.sort(byPath);
 
+  // §5.9's `DEGRADED`. Not a state on top of the ranking - a replacement for it.
+  //
+  // With no query there is nothing to rank, and the scorer cannot express that:
+  // entry point, config and recency are *added to* every score rather than being a
+  // category a file can be in, so `scored` is non-empty in any tree that has one
+  // of the three, and the "fallback" above was an order rather than a branch. That
+  // is why the state had never been reachable and why the defect below it survived:
+  // `tokenize('a', 2)` is `[]`, so the empty query fell through to `NO_RESULTS`,
+  // whose note then read "Terms that matched nothing: ." - an empty list inside a
+  // sentence.
+  //
+  // Paths only, `contents: []`. Nothing is read, which is what makes a list this
+  // long cheap, and `manifest.files === []` is the shape that already means "no
+  // file body claims to have been ranked" - so the fallback composes with the
+  // contract in `buildTaskContext` rather than inventing a second one.
+  if (!tokens.size) {
+    const floor = heuristicFloor(rankable, recent, cfg);
+    const rankState = floor.length
+      ? { state: 'DEGRADED', note: 'The task text produced no searchable terms, so this is a listing rather than a ranking: configuration, then entry points, then recently changed files. Search for what you need.' }
+      : { state: 'EMPTY', note: 'Nothing in this repository scored against the task; the file tree below is all of it. Search for what you need.' };
+    const tFloor = trace ? performance.now() : 0;
+    const contentHash = trace ? contentDigest(root, files, cache) : null;
+    const tHash = trace ? performance.now() : 0;
+    // The three passes that did not run are marked at the point they would have
+    // started, so their buckets come back as 0 rather than as a share of the
+    // floor's cost. A timing that credits the declaration pass with work it never
+    // did is worse than a missing one.
+    const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected: floor, limit, state: rankState.state, contentHash, ref: null, marks: { t0, tDf, tScore, tDefine: tScore, tEdge: tScore, tGraph: tScore, tRef: tFloor, tHash: tFloor, tEnd: tHash } }) : null;
+    return { paths: floor, tail: [], contents: [], scores: scored, debug, ...rankState };
+  }
+
   // The task names a symbol; the file that declares it is the file the task is
   // about. Runs before the graph pass for the reason §5.1 gives: a file the graph
   // could reach but had no seed for is reachable now, because this pass supplies
@@ -1153,27 +1188,66 @@ export function relevantFiles(project, task, options = {}) {
   return { paths: selected, contents, scores: scored, debug, ...rankState };
 }
 
+// §5.9's `DEGRADED` list. Not a second ranking - there is no query to rank against
+// - but the three things the scorer treats as priors, in an order chosen for a
+// reader rather than inherited from the weights: configuration first, because a
+// task with no text is usually a request to be told how the repository works and
+// how to run it; then entry points, which is where a change gets wired in; then the
+// rest of the recent set in recency order.
+//
+// That order is deliberately *not* the priors' order. The scorer weights an entry
+// point 3 and a config 1, so the ranking it produced for an empty query put entry
+// points first. A config file that names the commands is more use to an agent with
+// nothing to go on than a second entry point, and this list has no score to be
+// consistent with.
+//
+// Alphabetical inside a class rather than by rank: with no tokens every score in a
+// class is identical, and the code-point comparison is the same tie-break the
+// ranking's own sort uses. Capped at `cfg.files * cfg.widen`, which is §5.14's cap
+// rather than a second one - a 3-5x list is only affordable because this returns
+// paths.
+function heuristicFloor(files, recent, cfg) {
+  const present = new Set(files);
+  const sys = files.filter((f) => CONFIG_FILE.test(path.basename(f))).sort();
+  const entry = files.filter((f) => ENTRY_POINT.test(path.basename(f))).sort();
+  // The two patterns are disjoint - a name that ends in `rc` cannot also be an
+  // entry point, whose extension is the thing being matched - so the set only has
+  // to hold `recent` off the first two classes. That is the common overlap, not a
+  // contrived one: an entry point is a file git touched.
+  const seen = new Set([...sys, ...entry]);
+  const rest = recent.filter((f) => present.has(f) && !seen.has(f));
+  return [...sys, ...entry, ...rest].slice(0, Math.max(1, cfg.files * cfg.widen));
+}
+
 // §5.9's states, as far as the ranker alone can decide them. `PARTIAL` is not here
 // because it is a fact about the walk rather than the ranking, and the walk is
-// `buildTaskContext`'s to report; `WEAK` and `DEGRADED` are not here because
-// neither exists yet - the first needs §5.7's floor, which §5.10 measured as having
-// nothing to calibrate against, and the second needs a heuristic-fallback path that
-// has never been written. §9 carries both.
+// `buildTaskContext`'s to report; `DEGRADED` is not decided here but in
+// `relevantFiles`, because it replaces the list rather than labelling it. `WEAK`
+// still does not exist: §5.10 measured the floor as having nothing to calibrate
+// against, and §9 carries why.
 //
 // The order is the order of the claims: nothing scored at all is the strongest
-// statement, then nothing matched the query, then the ordinary case.
+// statement, then nothing matched the query, then the ordinary case. This is only
+// reached with a non-empty token set - the empty one returns `DEGRADED` above -
+// which is what makes the `NO_RESULTS` note below safe to write as a list of terms.
 function rankingState(scored, tokens, df, n) {
   if (!scored.length) return { state: 'EMPTY', note: 'Nothing in this repository scored against the task; the file tree below is all of it. Search for what you need.' };
   const { coverage } = ceilQuery(tokens, df, n);
   if (coverage === 0) {
+    // Only the terms with no path anywhere. Today that is every token, because
+    // `coverage === 0` has no other cause; the condition is written against `df`
+    // rather than against the token set because §5.5's retry can reach this branch
+    // with part of its vocabulary present but unscored, and a note naming those
+    // terms would tell the reader a word is absent from a tree that contains it.
+    //
     // Capped, because this note is inside the context JSON and so counts against
     // the budget the ladder is trying to fit: a task text long enough to have
     // hundreds of unmatched tokens would otherwise push the file list out to make
     // room for a list of the words that found nothing, which is the trade the note
     // exists to avoid.
-    const all = [...tokens].sort();
-    const shown = all.slice(0, 12).map((t) => `\`${t}\``).join(', ');
-    const rest = all.length > 12 ? `, and ${all.length - 12} more` : '';
+    const missing = [...tokens].filter((t) => !(df.get(t) > 0)).sort();
+    const shown = missing.slice(0, 12).map((t) => `\`${t}\``).join(', ');
+    const rest = missing.length > 12 ? `, and ${missing.length - 12} more` : '';
     return { state: 'NO_RESULTS', note: `No task term appears in any path in this repository. The tree below is a starting point. Terms that matched nothing: ${shown}${rest}.` };
   }
   return { state: 'FULL', note: null };

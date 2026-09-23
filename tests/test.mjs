@@ -993,6 +993,73 @@ test('an empty repository is labelled EMPTY rather than looking like a bad ranki
   assert.equal(no.manifest.state,'EMPTY','nothing scored is EMPTY whether or not the terms exist');
 });
 
+test('an empty task text is a listing rather than an empty window',()=>{
+  // §5.9's DEGRADED, whose trigger is the one query that cannot be ranked. Before
+  // this branch the state was unreachable and the defect it hides was live:
+  // `tokenize('a', 2)` is `[]`, so an empty query fell through to NO_RESULTS and its
+  // note named an empty list of terms.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'package.json'),'{}\n');
+  fs.writeFileSync(path.join(root,'index.mjs'),'export const i=1;\n');
+  fs.writeFileSync(path.join(root,'src','widget.mjs'),'export const w=1;\n');
+  const p={id:'p',name:'p',path:root};
+  for(const title of ['a','','!!']){
+    const ctx=buildTaskContext(p,{id:'t',title,description:'',plan:null},{role:'planner'});
+    assert.equal(ctx.manifest.state,'DEGRADED',`${JSON.stringify(title)} has no searchable term`);
+    assert.match(ctx.manifest.note,/listing rather than a ranking/);
+    assert.doesNotMatch(ctx.manifest.note,/Terms that matched nothing: \./,'the note is never an empty list inside a sentence');
+    assert.equal(ctx.manifest.files.length,0,'a floor names paths, so no file body claims to have been ranked');
+    assert.ok(ctx.manifest.tree>0,'and the tree still tells the agent where things live');
+  }
+  // A tree with nothing to list is still EMPTY: the fallback is a listing, and a
+  // listing of nothing is not a degradation.
+  const bare=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  const none=buildTaskContext({id:'p',name:'p',path:bare},{id:'t',title:'a',description:'',plan:null},{role:'planner'});
+  assert.equal(none.manifest.state,'EMPTY');
+});
+
+test('the heuristic floor is configuration and entry points and recent, and it is paths only',()=>{
+  // §5.9's fallback builder. Three classes in a fixed order, deduped, alphabetical
+  // inside a class, and capped - and the order is deliberately not the priors':
+  // the scorer weights an entry point 3 against a config's 1, so the ranking it
+  // would have produced for the same empty query is a different list. That
+  // difference is the point of the branch, so it is asserted rather than assumed.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.mkdirSync(path.join(root,'docs'),{recursive:true});
+  fs.writeFileSync(path.join(root,'package.json'),'{}\n');
+  fs.writeFileSync(path.join(root,'index.mjs'),'export const i=1;\n');
+  fs.writeFileSync(path.join(root,'src','widget.mjs'),'export const w=1;\n');
+  fs.writeFileSync(path.join(root,'docs','notes.mjs'),'export const n=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const r=relevantFiles(p,{id:'t',title:'a',description:'',plan:null},{cwd:root,recent:['docs/notes.mjs','src/widget.mjs']});
+  assert.equal(r.state,'DEGRADED');
+  assert.deepEqual(r.paths,['package.json','index.mjs','docs/notes.mjs','src/widget.mjs']);
+  assert.deepEqual(r.contents,[],'the floor is a path list, which is what makes a long one affordable');
+  // The zeroed passes are zero, not a share of the floor's cost.
+  assert.deepEqual(r.debug,null,'the record is off unless it is asked for');
+  // A recent path that is not in the tree is dropped rather than named: the list is
+  // a claim about files the agent can open.
+  const gone=relevantFiles(p,{id:'t',title:'a',description:'',plan:null},{cwd:root,recent:['src/deleted.mjs','docs/notes.mjs']});
+  assert.ok(!gone.paths.includes('src/deleted.mjs'));
+  // Substitution, not addition: the priors scored these same files and ordered them
+  // entry point first, on recency. Same tree, same empty query, different list.
+  assert.deepEqual(r.scores.map((f)=>f.path),['docs/notes.mjs','src/widget.mjs','index.mjs','package.json'],'the priors, for comparison: both recent files tie at 5, above the entry point at 3');
+  assert.notDeepEqual(r.paths,r.scores.map((f)=>f.path));
+  // And the cap is `files * widen`, so the widening key has something to move.
+  const narrow=relevantFiles(p,{id:'t',title:'a',description:'',plan:null},{cwd:root,recent:['docs/notes.mjs','src/widget.mjs'],config:{files:2}});
+  assert.deepEqual(narrow.paths,['package.json','index.mjs']);
+  const wide=relevantFiles(p,{id:'t',title:'a',description:'',plan:null},{cwd:root,recent:['docs/notes.mjs','src/widget.mjs'],config:{files:2,widen:2}});
+  assert.deepEqual(wide.paths.slice(0,narrow.paths.length),narrow.paths,'a wider cap extends the floor rather than reordering it');
+  assert.equal(wide.paths.length,4);
+  // The classes are disjoint by pattern, so the only overlap the dedup can meet is
+  // a file that is both an entry point and recent - which is the common case, not a
+  // contrived one: an entry point is a file git touched.
+  const twice=relevantFiles(p,{id:'t',title:'a',description:'',plan:null},{cwd:root,recent:['index.mjs','src/widget.mjs']});
+  assert.deepEqual(twice.paths,['package.json','index.mjs','src/widget.mjs'],'a file in two classes is named once, in the earlier class');
+});
+
 // §5.5's render fixtures. `WORDS` is a list of declarations no two of which share
 // a token, so a task can name exactly one of them; the bodies are longer than
 // `OUTLINE_ABOVE` so the outline has something to elide.

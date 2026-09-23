@@ -989,6 +989,15 @@ if coverage_max == 0:              # no query term present in any file
     if still empty → NO_RESULTS; fall back to entry points + config + recency
 ```
 
+**Phase 8 built the fallback and not the retry, and the trigger moved.** The
+fallback is a real branch now (§5.9). It fires on the query with *no searchable
+term at all* — `tokenize('a', 2)` is `[]` — rather than on a coverage-zero result,
+because that is the input for which no ranking exists to be declined. The `relax
+once` line is still unbuilt. Its expected ceiling is already visible from §5.10:
+coverage is never zero on this corpus — the weakest run is 1 in-vocabulary term of
+19 — so whatever the retry does, it cannot move a harness number, and §9 will have
+to say so rather than dress it up.
+
 **Strength — weak results.** The signal is not the top score but the *dispersion*
 of the top-k scores. Normalized Query Commitment (Shtok, Kurland, Carmel et al.,
 TOIS 2012) is the standard predictor: spread-out top scores mean the query found
@@ -1041,9 +1050,9 @@ The EACCES crash in §4 is the counter-example, and it is live.
 |---|---|---|
 | `FULL` | Scored with discriminating signal | — |
 | `PARTIAL` | Walk or index incomplete | the incomplete note |
-| `DEGRADED` | Heuristic floor only (entry points + configs + recent), low confidence | an explicit "this is a listing, search for more" |
+| `DEGRADED` | The task text produced no searchable term at all | the heuristic floor — configs, then entry points, then recent — as paths, plus an explicit "this is a listing, search for more" |
 | `WEAK` | Scored, but `NQC ≈ 0` or top `normScore` below the floor (§5.7) | the results, labelled low confidence, with the relax count |
-| `NO_RESULTS` | Coverage zero after one relaxation | tree only, plus the terms that matched nothing |
+| `NO_RESULTS` | Non-empty query, no term in any path | tree only, plus the terms that matched nothing |
 | `EMPTY` | Nothing scored at all | tree only |
 | `FAILED` | Ranker threw | tree only, error recorded on the run |
 
@@ -1068,16 +1077,50 @@ the state grades the *ranking* and `manifest.trimmed` grades the fit. Ten rungs
 say more than a label would, and the two facts are independently true. There is no
 `SHRUNK`.
 
-**`WEAK` and `DEGRADED` are withheld rather than faked.** `WEAK`'s condition is
-"`NQC ≈ 0` or top `normScore` below the floor", and §5.7's floor is unshipped
-because §5.10 measured it as having nothing to calibrate against — precision flat
-at 35.7% across every candidate floor, and phase 8's three replacements for it
-(`cov`, `terms`, `rarest`) buy their precision with two thirds of the offered
-answers. Both grains are needed and neither clears the rule, so neither ships. `DEGRADED`'s condition is "heuristic floor
-only (entry points + configs + recent)", and no such fallback path exists: the
-ranker's priors are *additive to* lexical evidence rather than a fallback from its
-absence, so there is no branch that reaches entry points alone. Shipping the two
-labels would mean shipping two `case` arms no input can reach. §9 records both.
+**`DEGRADED` ships in phase 8, and its trigger is not the one this section
+specifies.** The design's condition — "heuristic floor only (entry points + configs
++ recent)" — is unreachable for a structural reason rather than an omission: the
+priors are *additive to* lexical evidence, so a tree with one entry point, config or
+recent file scores something, and there is no branch that reaches entry points
+alone. What is reachable is the query that cannot be ranked at all, and that is
+where the state now lives:
+
+```
+if tokens == ∅:                    # the task text produced no searchable term
+    paths = heuristicFloor(rankable, recent, cfg)
+    contents = []; state = DEGRADED
+```
+
+`heuristicFloor()` is configuration, then entry points, then the rest of the recent
+set in recency order; deduped; code-point order inside a class; capped at
+`cfg.files * cfg.widen` — §5.14's cap rather than a second one, and affordable
+because the list is paths. The order is deliberately *not* the priors': the scorer
+weights an entry point 3 against a config's 1, and this list has no score to be
+consistent with. On the trigger fixture the substitution reorders, which the test
+asserts by comparing the floor against the `scores` the same call returned.
+
+`contents: []` is what makes the branch compose rather than invent: the manifest's
+`files` is derived from `contents`, so `manifest.files === []` — the shape that
+already means "no file body claims to have been ranked" — and `readForPrompt` is
+never called, which is the whole reason a 3–5× list is cheap. `contextEnrich`
+(`src/service.mjs`) renders `contents` and ignores `paths`, so it is byte-identical
+under the floor.
+
+**The empty-query defect it fixed.** `tokenize('a', 2)` is `[]`, so `{title: 'a'}`
+reached `NO_RESULTS` with `coverage === 0` and its note read "Terms that matched
+nothing: ." — an empty list inside a sentence. `NO_RESULTS` is now reached only with
+a non-empty token set, and its note lists the terms with no path anywhere, computed
+from `df` rather than from the token set so that §5.5's retry, which can arrive with
+part of the vocabulary present but unscored, does not name a word the tree contains.
+Today the two sets coincide and the condition is written for the shape it has to
+hold in.
+
+**`WEAK` is still withheld rather than faked.** Its condition is "`NQC ≈ 0` or top
+`normScore` below the floor", and §5.7's floor is unshipped because §5.10 measured it
+as having nothing to calibrate against — precision flat at 35.7% across every
+candidate floor, and phase 8's three replacements for it (`cov`, `terms`, `rarest`)
+buy their precision with two thirds of the offered answers. Both grains are needed
+and neither clears the rule, so neither ships. §9 records it.
 
 ### 5.10 Observability
 
