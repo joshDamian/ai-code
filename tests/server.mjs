@@ -85,7 +85,11 @@ test('the browser can load the shared formatters',async()=>{const root=fs.mkdtem
   // take the gutter with it - and nothing in the unit suite imports through here.
   // diffSides is the split view's other half; an export missing here is a blank pane
   // in the one view nothing on the server side would otherwise exercise.
-  assert.match(r.body,/export function diffLines/);assert.match(r.body,/export function diffSides/)}finally{s.stop()}});
+  assert.match(r.body,/export function diffLines/);assert.match(r.body,/export function diffSides/);
+  // unifiedDiff is the producer for what the two above consume, and it is only ever
+  // reached from a view: the revision panel is the sole caller, so nothing on the
+  // server side would notice the export going missing.
+  assert.match(r.body,/export function unifiedDiff/)}finally{s.stop()}});
 
 test('the dashboard pins the markdown renderer and the sanitiser beside it',async()=>{
   // The plan and review tabs hand untrusted model text to these two modules, so a
@@ -142,6 +146,79 @@ test('a background job stops when cancelled from another process and the stream 
     const runs=JSON.parse((await get(`${base}/api/runs?taskId=${taskId}`)).body);
     assert.equal(runs.filter(r=>r.role==='implementer')[0].status,'cancelled','the run in flight was stopped, not left running');
     assert.equal(JSON.parse((await get(`${base}/api/jobs?taskId=${taskId}`)).body)[0].state,'cancelled');
+  }finally{server.stop()}
+});
+
+test('show carries the revision of the plan, against the one it replaced',async()=>{
+  // The dashboard's whole revision panel reads from this one key: the diff, whether
+  // there is one to show, and the timestamp the "revised" marker compares per tick.
+  const {root,taskId}=seeded();
+  // The fixture's planner is a mock provider, so the server has to be told mocks are
+  // routable - production routing excludes them by construction.
+  const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  const base=server.base;
+  try{
+    assert.equal((await post(`${base}/api/tasks/${taskId}/plan`)).status,200);
+    const first=JSON.parse((await get(`${base}/api/tasks/${taskId}/show`)).body);
+    assert.equal(first.revision.changed,false,'a first plan replaced nothing');
+    assert.equal(first.revision.hasPrev,false);
+    assert.equal(first.revision.diff,'');
+
+    const patched=await fetch(`${base}/api/tasks/${taskId}/plan`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({plan:'a hand-written revision'})});
+    assert.equal(patched.status,200,await patched.text());
+    const second=JSON.parse((await get(`${base}/api/tasks/${taskId}/show`)).body);
+    assert.equal(second.task.plan,'a hand-written revision');
+    assert.equal(second.revision.changed,true);
+    assert.equal(second.revision.hasPrev,true);
+    assert.equal(second.revision.at,second.task.plan_at);
+    assert.match(second.revision.diff,/\+a hand-written revision/);
+  }finally{server.stop()}
+});
+
+test('live is the lease, not the status column, and the stream carries it',async()=>{
+  // Two surfaces used to answer "is this task busy" by asking the runs table whether
+  // anything was running - a column that stays 'running' for as long as it takes
+  // somebody to notice the process that owned it is gone. The first two assertions
+  // are the ones that stop this being simplified back into that scan.
+  const {root,taskId}=seeded();
+  const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  const base=server.base;
+  try{
+    // Opened after the server so its reaper has already run, and nothing reaps again
+    // for as long as either store stays open. The ghost below is what that buys: a
+    // running row with no lease, which is the exact shape being asserted on.
+    const s=new Service(root,{allowMock:true,silent:true});
+    // Parked, not planning: a task sitting in a WORKING_STATE is busy on its state
+    // alone, which would leave the lease with nothing to prove.
+    s.store.updateTask(taskId,{state:'AWAITING_APPROVAL'});
+    s.store.addRun({id:'ghost',taskId,role:'implementer',providerId:'worker',modelId:'worker-m',status:'running',startedAt:new Date().toISOString()});
+    let show=JSON.parse((await get(`${base}/api/tasks/${taskId}/show`)).body);
+    assert.equal(show.live,null,'a running status is not liveness');
+    assert.equal(show.runs.find(r=>r.id==='ghost').status,'running','and the two really do disagree');
+    assert.equal(show.revision.changed,false,'the revision rides on the same payload');
+
+    // The lease is what makes it live. The task is resting and stays resting, so the
+    // lease is the only thing in the system saying anything is happening.
+    s.store.heartbeat('ghost',taskId);
+    show=JSON.parse((await get(`${base}/api/tasks/${taskId}/show`)).body);
+    assert.deepEqual(Object.keys(show.live).sort(),['fallbackFrom','modelId','providerId','role','runId','startedAt'],'a narrow shape: /api/runs already carries the tokens and the cost');
+    assert.equal(show.live.runId,'ghost');
+    assert.equal(show.live.role,'implementer');
+    assert.equal(show.live.providerId,'worker');
+    assert.equal(show.live.fallbackFrom,null);
+    assert.ok(Date.parse(show.live.startedAt)>0);
+
+    // Ticks land at 500ms, so the read at 900ms is at least one in, and the lease
+    // drops with one more tick still to come.
+    const reading=stream(`${base}/api/tasks/${taskId}/stream`,25000);
+    await new Promise(r=>setTimeout(r,900));
+    s.store.releaseLease('ghost');
+    const {body}=await reading;
+    assert.match(body,/^retry: 1000/,'the reconnect gap is a second, not the browser default of three');
+    const states=frames(body).filter(f=>f.type==='state');
+    assert.equal(states[0].data.live.runId,'ghost','the frame says which run, not merely that one exists');
+    assert.equal(states[0].data.task.id,taskId,'and carries the task beside it, so the plan refreshes without a poll');
+    assert.ok(states.some(f=>f.data.live===null),'the field goes null when the lease does, which is also what ends the stream');
   }finally{server.stop()}
 });
 
@@ -245,6 +322,31 @@ test('the port routes take their options from the request',async()=>{
     assert.match(landed.taskCommit.subject,/port me/,'and it is named by its own message');
     assert.deepEqual(landed.next,[]);
   }finally{s.stop()}
+});
+
+test('the refine route refuses a task that already has a run in flight',async()=>{
+  // The refusal has to survive the HTTP boundary as a 400 carrying the message,
+  // because that body is the whole of what the dashboard renders. And it has to be
+  // decided from the lease rather than from this process's run registry: the run
+  // below belongs to the test process, and the server is a different one.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-refine-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'refine me');
+  s.prepare(t.id);await s.plan(t.id);
+  assert.equal(s.task(t.id).state,'AWAITING_APPROVAL');
+  s.store.addRun({id:'live',taskId:t.id,role:'planner',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
+  s.store.heartbeat('live',t.id);
+  const srv=await startServer(root);
+  try{
+    const r=await post(`${srv.base}/api/tasks/${t.id}/refine`,{feedback:'make it smaller'});
+    assert.equal(r.status,400);
+    assert.match(JSON.parse(r.body).error,/in flight/);
+  }finally{srv.stop()}
 });
 
 test('task list passes the project id through and filters by --state',async()=>{const rootA=gitRepo(),rootB=gitRepo();const s=new Service(rootA,{allowMock:true,silent:true});const pa=s.initProject('pa',rootA);const pb=s.initProject('pb',rootB);const t1=s.createTask(pa.id,'in project a, created');const t2=s.createTask(pa.id,'in project a, planning');s.store.updateTask(t2.id,{state:'PLANNING'});const t3=s.createTask(pb.id,'in project b, created');const run=(args)=>new Promise((res)=>{const p=spawn(process.execPath,[cliPath,'task','list',...args],{cwd:rootA,stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});{const {code,out}=await run([pa.id]);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id).sort(),[t1.id,t2.id].sort())}{const {code,out}=await run(['--state','PLANNING']);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id),[t2.id])}{const {code,out}=await run([pa.id,'--state','PLANNING']);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id),[t2.id])}{const {code,err}=await run(['--state','NOT_A_STATE']);assert.equal(code,1);assert.match(err,/Invalid state NOT_A_STATE/);assert.match(err,/CREATED/);assert.match(err,/COMPLETE/)}});

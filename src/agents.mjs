@@ -78,7 +78,11 @@ export async function* runMock(input) {
   // Usage is what the cost ceiling is computed from, so it is emittable too.
   if (input.mockUsage) yield { type: 'message', data: { usage: input.mockUsage } };
   if (input.role === 'planner') {
-    yield { type: 'message', data: 'Proposed plan: inspect the relevant module, make the smallest change, add/update tests, run verification.' };
+    // Overridable for the same reason the reviewer's verdict is: the plan a refine
+    // returns has to be able to differ from the plan it was given, or nothing can test
+    // what a revision is - the fixed string would make every refine a no-op, and a
+    // no-op refine is deliberately not recorded as a revision at all.
+    yield { type: 'message', data: input.mockPlanText || 'Proposed plan: inspect the relevant module, make the smallest change, add/update tests, run verification.' };
   } else if (input.role === 'reviewer') {
     const text = input.mockReviewText || 'Review complete: compare implementation against the approved plan and test results.';
     yield { type: 'message', data: text };
@@ -348,6 +352,7 @@ export async function* runAgent(provider, model, input) {
       mockUsage: provider.config.usage || null,
       mockReviewText: provider.config.reviewText || null,
       mockReviewVerdict: provider.config.reviewVerdict || null,
+      mockPlanText: provider.config.planText || null,
       mockFailure: provider.config.failRoles?.includes(input.role) ? 'SIMULATED_FAILURE' : null,
     });
     return;

@@ -12,6 +12,7 @@ import {
 import { runAgent, classify } from './agents.mjs';
 import { loadPolicies, savePolicies } from './policy.mjs';
 import { isTransient, healthThresholds, effectiveHealth } from './health.mjs';
+import { unifiedDiff } from './format.mjs';
 
 const exec = promisify(execFile);
 
@@ -353,6 +354,38 @@ function budgetOf(value) {
   return Number.isFinite(value) && value > 0 ? value : Infinity;
 }
 
+// One provider's reason for not being a candidate. Kept as data rather than as a
+// sentence at the point of rejection, because whether it is worth printing depends on
+// what else happened in the chain, and only the caller knows that.
+function rejection(p, reason, detail) {
+  return { providerId: p.id, name: p.name, reason, detail };
+}
+
+// "Why nothing was left to try", as clauses a user can act on. One clause per provider,
+// which is what select() hands over: the same provider being tried, excluded and then
+// found at capacity is one problem, not three.
+function describeRejections(rejections) {
+  return (rejections || []).map((r) => `${r.name} ${r.detail}`).join('; ');
+}
+
+// The failure of the last attempt, plus why the chain stopped there.
+//
+// Both halves are needed and only one of them used to survive. The failure alone is
+// what a user with a corrected API key was told, when the real dead end was that the
+// one other provider was already at its concurrency limit.
+//
+// `code` is carried over deliberately. plan() decides from BUDGET_CODES whether a
+// failure is a property of the task rather than of the weather, and every caller that
+// can be cancelled tests for CANCELLED, so a freshly built error without it would
+// turn a cancelled run into a FAILED task.
+function chainExhausted(last, selErr) {
+  const why = describeRejections(selErr.rejections) || selErr.message;
+  const err = new Error(`${last.message} — no fallback left: ${why}`);
+  err.code = last.code;
+  err.cause = last;
+  return err;
+}
+
 // A task title is the first line of its description, truncated at a sentence or a
 // word boundary so it stays readable in a list.
 function generateTitle(text) {
@@ -473,6 +506,9 @@ export class Service {
   async plan(id) {
     const t = this.task(id);
     if (t.state !== 'PLANNING') throw new Error('Task must be in PLANNING');
+    // The state above stays PLANNING for the whole run - it moves only at the end,
+    // once the plan has been written - so nothing else here refuses a second planner.
+    this.#assertIdle(id, 'planning');
     const p = this.project(t.project_id);
     // The planner must not touch the repo, so its effect on the working tree is
     // measured around the run and any change is treated as a violation. What it
@@ -504,10 +540,12 @@ export class Service {
     // is the dirty set as the planner found it; the read set comes from the run
     // that just finished and from the manifest prepare() persisted, so neither
     // costs a second look at the tree or a second run.
-    this.store.updateTask(id, {
-      plan: this.planFromRun(result.runId),
-      plan_base: recordPlanBase(this.store, p.path, t, result.runId, [...before]),
-    });
+    // No predecessor: a first plan replaced nothing. The plan and its baseline are two
+    // statements rather than one because #writePlan owns the three plan columns and
+    // recordPlanBase owns the fourth - and the baseline is computed from `t`, read
+    // before the plan was written, so the order between them does not matter.
+    this.#writePlan(id, this.planFromRun(result.runId), null);
+    this.store.updateTask(id, { plan_base: recordPlanBase(this.store, p.path, t, result.runId, [...before]) });
     return this.transition(id, 'AWAITING_APPROVAL');
   }
 
@@ -584,10 +622,13 @@ export class Service {
         // the only one available - the tree it was written against is gone.
         const task = this.task(task_id);
         const project = this.project(task.project_id);
-        this.store.updateTask(task_id, {
-          plan: this.planFromRun(run_id),
-          plan_base: recordPlanBase(this.store, project.path, task, run_id, dirtyPaths(project.path)),
-        });
+        // The predecessor is carried over: a process that died mid-refine leaves the
+        // task holding the plan the refine was revising, and that is exactly the plan
+        // the recovered revision should be diffed against. This is the case where the
+        // diff is most worth having, since the run that produced it left no record of
+        // what it was changing.
+        this.#writePlan(task_id, this.planFromRun(run_id), task.plan);
+        this.store.updateTask(task_id, { plan_base: recordPlanBase(this.store, project.path, task, run_id, dirtyPaths(project.path)) });
         this.transition(task_id, 'AWAITING_APPROVAL');
         recovered.push({ taskId: task_id, runId: run_id });
       } catch {
@@ -610,7 +651,10 @@ export class Service {
   reject(id) {
     const t = this.task(id);
     if (t.state !== 'AWAITING_APPROVAL') throw new Error('Can only reject when AWAITING_APPROVAL');
-    this.store.updateTask(id, { plan: null });
+    // The provenance goes with the plan it describes. Left behind, the next plan would
+    // be diffed against a plan the user refused - showing them changes against a
+    // revision that is no longer anywhere on the screen.
+    this.store.updateTask(id, { plan: null, plan_prev: null, plan_at: null });
     return this.transition(id, 'PLANNING');
   }
 
@@ -619,13 +663,18 @@ export class Service {
     if (t.state !== 'FAILED') throw new Error('Can only replan when FAILED');
     // plan_base goes with the plan it describes: between here and the next plan()
     // the task would otherwise carry a baseline for a plan that no longer exists.
-    this.store.updateTask(id, { plan: null, review: null, worktree: null, branch: null, base_commit: null, plan_base: null });
+    this.store.updateTask(id, { plan: null, plan_prev: null, plan_at: null, review: null, worktree: null, branch: null, base_commit: null, plan_base: null });
     return this.transition(id, 'PLANNING');
   }
 
   async refine(id, feedback) {
     const t = this.task(id);
     if (t.state !== 'AWAITING_APPROVAL') throw new Error('Can only refine when AWAITING_APPROVAL');
+    // A refine never leaves AWAITING_APPROVAL, not even while its planner is running,
+    // so its own state check admits a second refine into the same task. That is what
+    // put two planner runs on one task two minutes apart: the second routed elsewhere,
+    // died, and reported its own routing failure as the reason the refine failed.
+    this.#assertIdle(id, 'refining');
     const p = this.project(t.project_id);
     // Recorded before the run for the same reason plan() records its own before
     // its run: this is what the tree looked like to the planner.
@@ -639,17 +688,20 @@ export class Service {
     // A revised plan is a different plan, read against the tree as it is now, so
     // it gets its own baseline. Left at the previous one, the dashboard's Refine
     // button would quietly re-gate the new plan against the old plan's files.
-    this.store.updateTask(id, {
-      plan: this.finalText(result.runId) || t.plan,
-      plan_base: recordPlanBase(this.store, p.path, t, result.runId, before),
-    });
+    const plan = this.finalText(result.runId) || t.plan;
+    this.#writePlan(id, plan, t.plan);
+    this.store.updateTask(id, { plan_base: recordPlanBase(this.store, p.path, t, result.runId, before) });
     return this.task(id);
   }
 
   updatePlan(id, plan) {
     const t = this.task(id);
     if (t.state !== 'AWAITING_APPROVAL') throw new Error('Can only edit plan when AWAITING_APPROVAL');
-    this.store.updateTask(id, { plan });
+    // An edit is a second writer on the plan, not a reader of it. A save landing
+    // while a refine is mid-run would be overwritten when that run writes its result,
+    // and the revision the refine records as "previous" would be one no user ever saw.
+    this.#assertIdle(id, 'editing the plan');
+    this.#writePlan(id, plan, t.plan);
     return this.task(id);
   }
 
@@ -740,6 +792,7 @@ export class Service {
   async runTests(id) {
     const t = this.task(id);
     if (t.state !== 'TESTING') throw new Error('Task must be in TESTING');
+    this.#assertIdle(id, 'testing', { job: false });
     try {
       await this.test(t, t.worktree);
     } catch (e) {
@@ -764,6 +817,10 @@ export class Service {
   async review(id) {
     const t = this.task(id);
     if (t.state !== 'REVIEWING') throw new Error('Task must be in REVIEWING');
+    // REVIEWING lasts for the whole review, so the state guard above admits a second
+    // one. Two reviewers over one worktree race to write `review` and to move the
+    // task, and the loser's transition comes out of a state the winner chose.
+    this.#assertIdle(id, 'reviewing', { job: false });
     const d = worktreeDiff(t.worktree, t);
     const before = status(t.worktree);
     try {
@@ -805,6 +862,10 @@ export class Service {
   async repair(id) {
     const t = this.task(id);
     if (t.state !== 'REPAIRING') throw new Error('Task must be in REPAIRING');
+    // Two repairers in one worktree is the worst of these: unlike the planner's, their
+    // edits are not measured for violations, so the second would write on top of the
+    // first with neither aware of the other.
+    this.#assertIdle(id, 'repairing', { job: false });
     try {
       await this.runRole(t, 'repair', `Repair the review findings in the worktree. Re-run relevant tests after fixing. Review findings:\n${t.review || 'Review failed.'}`, t.worktree);
     } catch (e) {
@@ -876,6 +937,51 @@ export class Service {
   destinations(id) {
     const t = this.task(id);
     return branches(this.project(t.project_id).path).filter((b) => !b.startsWith('ai-code/'));
+  }
+
+  // The run this task has in flight, or null. The server's answer to "is this task
+  // busy", which the dashboard needs on every stream tick and cannot compute for
+  // itself: a local flag dies on reload and cannot see a second tab, and a status
+  // column lies for as long as it takes something to notice the process is gone.
+  //
+  // Deliberately not the whole run row. The dashboard already receives the runs list,
+  // with the cost, tokens and error on it; this is the one fact that has to be true to
+  // the millisecond, so it is a narrow shape that nothing else can quietly widen into
+  // a second copy of that list.
+  liveRun(taskId) {
+    const r = this.store.liveRun(taskId);
+    if (!r) return null;
+    return {
+      runId: r.id,
+      role: r.role,
+      providerId: r.provider_id,
+      modelId: r.model_id,
+      startedAt: r.started_at,
+      fallbackFrom: r.fallback_from || null,
+    };
+  }
+
+  // The current plan against the one it replaced.
+  //
+  // `changed` rather than `hasPrev` is the condition every surface keys off, because
+  // the two answers differ in the case that matters: a refine that ran and returned
+  // the plan it was given has a predecessor and no change, and telling the user their
+  // plan was revised would be a lie the diff itself immediately contradicts.
+  //
+  // The diff is built on read rather than stored. It is a pure function of two columns
+  // already on the row, and a stored third copy is a third thing that can be wrong
+  // about what changed.
+  revision(t) {
+    const plan = t.plan;
+    const prev = t.plan_prev;
+    const hasPrev = typeof prev === 'string' && prev.length > 0;
+    const changed = hasPrev && prev !== plan;
+    return {
+      at: t.plan_at || null,
+      hasPrev,
+      changed,
+      diff: changed ? unifiedDiff(prev, plan, { label: 'plan' }) : '',
+    };
   }
 
   // Everything a human needs to decide, and nothing that writes a ref or a file.
@@ -1014,9 +1120,7 @@ export class Service {
     // `active` map cannot see a run the dashboard server owns. Committing a worktree
     // out from under a live implementer would publish half a tree and move the
     // branch beneath the agent still writing it.
-    if (this.store.taskHasLiveRun(id) || this.store.activeJobs().some((j) => j.task_id === id)) {
-      throw new Error('This task has a run or job in flight; wait for it to finish before porting');
-    }
+    this.#assertIdle(id, 'porting');
     const branch = t.branch || `ai-code/${t.id}`;
     const target = this.portTarget(t, opts);
 
@@ -1194,7 +1298,22 @@ export class Service {
 
   // Every route this role could take, best first. A pure query: no fallback, no
   // last resort. `select` is what turns an empty list into a decision.
-  eligible(role, excluded = [], { ignoreHealth = false } = {}) {
+  eligible(role, excluded = [], opts = {}) {
+    return this.#candidates(role, excluded, opts).rows;
+  }
+
+  // `eligible` with the reasons attached.
+  //
+  // The reasons exist because an empty list is the one routing outcome a user ends up
+  // reading, and until now it said only "No available model capable of planner" - the
+  // same sentence whether the provider was skipped for failing this same chain, for
+  // being already busy, or for sitting out a cooldown. Those three call for entirely
+  // different actions from the person reading them.
+  //
+  // Each rejection is the first filter that ruled the provider out, which is the one
+  // worth naming. The second return value is not an error path: `select` needs it to
+  // explain a dead chain, and `eligible` ignores it.
+  #candidates(role, excluded = [], { ignoreHealth = false } = {}) {
     const cap = capability[role];
     const policy = this.policies[role] || {};
     // Preferred entries outrank fallbacks, and either may be written as a bare
@@ -1202,17 +1321,44 @@ export class Service {
     const pref = [...(policy.preferred || []), ...(policy.fallback || [])];
     const health = ignoreHealth ? new Map() : this.healthNow();
     const rows = [];
+    const rejections = [];
     for (const p of this.store.listProviders()) {
-      const routable = p.config?.routable !== false && p.kind !== 'mock';
-      if (!p.enabled || !routable || excluded.includes(p.id)) continue;
+      // A mock provider never reaches the rows below - it is reachable only through
+      // the explicit last resort in select() - so it is skipped here rather than
+      // rejected. Every install seeds one, and naming it as a reason nothing could be
+      // routed would put a line of pure noise in every dead end a user ever reads.
+      if (p.kind === 'mock') continue;
+      const routable = p.config?.routable !== false;
+      if (!p.enabled) {
+        rejections.push(rejection(p, 'disabled', 'is disabled'));
+        continue;
+      }
+      // Excluded before routable, because the two overlap for an unroutable provider
+      // that has already been tried, and "was already tried in this chain" is the fact
+      // that explains the dead end where "is not routable" describes the provider.
+      if (excluded.includes(p.id)) {
+        rejections.push(rejection(p, 'excluded', 'was already tried in this chain'));
+        continue;
+      }
+      if (!routable) {
+        rejections.push(rejection(p, 'not-routable', 'is not routable'));
+        continue;
+      }
       // An OPEN circuit is the one hard filter in routing. A DEGRADED provider is
       // still eligible; its penalty is applied to the score below.
       const h = health.get(p.id);
-      if (h && !h.eligible) continue;
+      if (h && !h.eligible) {
+        rejections.push(rejection(p, 'open-circuit', `is in an OPEN circuit for another ${Math.max(1, Math.ceil(h.cooldownRemainingMs / 60000))}m`));
+        continue;
+      }
       // A provider already at its concurrency limit is not a candidate, so the
       // next run routes elsewhere instead of queueing behind the one in flight.
       // `runner` is null outside the server, and the check then never fires.
-      if (this.runner?.atCapacity(p)) continue;
+      if (this.runner?.atCapacity(p)) {
+        rejections.push(rejection(p, 'at-capacity', `is at its concurrency limit (${this.runner.runningByProvider(p.id)} of ${this.runner.limitFor(p)} in flight)`));
+        continue;
+      }
+      const before = rows.length;
       for (const m of this.store.listModels(p.id)) {
         if (!m.enabled || !m.capabilities.includes(cap)) continue;
         // `excluded` accepts model ids as well as provider ids, so a model that is
@@ -1234,19 +1380,25 @@ export class Service {
         const score = base * (1 - (h?.penalty || 0));
         rows.push({ p, m, score, health: h?.state || 'HEALTHY' });
       }
+      // The provider cleared every filter and still contributed nothing, so the
+      // reason is about its line-up rather than about the provider. This is the
+      // commonest configuration mistake there is - a provider enabled with no model
+      // carrying the capability - and without this clause it would be the one form of
+      // dead end the explanation could not name.
+      if (rows.length === before) rejections.push(rejection(p, 'no-capable-model', `has no enabled model capable of ${role}`));
     }
     rows.sort((a, b) => b.score - a.score);
-    return rows;
+    return { rows, rejections };
   }
 
   select(role, excluded = []) {
-    const rows = this.eligible(role, excluded);
-    if (rows[0]) return rows[0];
+    const first = this.#candidates(role, excluded);
+    if (first.rows[0]) return first.rows[0];
     // Every provider is in an OPEN circuit. Retrying the best of them beats
     // failing with "no available model", which tells the user nothing: the run
     // records the real error, and the attempt is what re-opens a window on it.
-    const forced = this.eligible(role, excluded, { ignoreHealth: true })[0];
-    if (forced) return { ...forced, healthForced: true };
+    const forced = this.#candidates(role, excluded, { ignoreHealth: true });
+    if (forced.rows[0]) return { ...forced.rows[0], healthForced: true };
     // Mock providers are excluded from routing above (a real install must never
     // route to them by accident), so they are only reachable as a last resort,
     // and only when the caller opted in.
@@ -1258,10 +1410,77 @@ export class Service {
         }
       }
     }
-    throw new Error(`No available model capable of ${role}`);
+    // The reasons ride on the error rather than in its text, because whether they are
+    // worth showing depends on whether an earlier attempt failed, and only the caller
+    // knows that. The message keeps the shape it has always had, so a caller matching
+    // on it is unaffected.
+    //
+    // NO_MODEL is deliberately absent from FAILURE_POLICY. This throws before any run
+    // row exists, so nothing was attempted and there is no provider to blame - and a
+    // policy entry would let `classify` land it on AGENT_FAILURE somewhere downstream
+    // and charge a provider that was never tried.
+    // Both passes run over the same provider list, so a provider out either way is
+    // rejected twice. Keeping the first makes this one clause per provider, which is the
+    // form the message wants: the passes are ordered by how much they explain, and a
+    // provider the chain already tried is recorded as exactly that in both.
+    const seen = new Set();
+    const rejections = [...first.rejections, ...forced.rejections].filter((r) => !seen.has(r.providerId) && seen.add(r.providerId));
+    throw Object.assign(new Error(`No available model capable of ${role}`), {
+      code: 'NO_MODEL',
+      rejections,
+    });
+  }
+
+  // The only place a plan and its provenance are written together.
+  //
+  // Three columns have to move as one. `plan_prev` is what the plan replaced and
+  // `plan_at` is when this one landed, and a write that moved `plan` on its own would
+  // leave the diff comparing the new plan against a predecessor from two revisions
+  // ago - a change the user never made and cannot account for. Two writers revise (a
+  // planner run, and the editor), so the rule is one helper rather than a convention.
+  //
+  // `prev` is passed in rather than read from the row: every caller already holds the
+  // task it read at the top of its own method, and a re-read here could pick up a
+  // plan written by another process between that read and this write.
+  #writePlan(id, plan, prev) {
+    // A write that does not change the text is not a revision. A refine whose feedback
+    // the model declined to act on produces exactly that - the run succeeds and returns
+    // the plan it was given - and bumping plan_at for it would announce a new plan that
+    // is word for word the old one. So the timestamp means "a revision landed", not "a
+    // planner ran", and nothing else has to know the difference.
+    if (this.store.getTask(id).plan === plan) return;
+    this.store.updateTask(id, { plan, plan_prev: prev ?? null, plan_at: new Date().toISOString() });
   }
 
   // -- run helpers ----------------------------------------------------------
+
+  // One run at a time per task.
+  //
+  // Liveness is read from the leases rather than from runs.status, for the reason
+  // port() has always read it that way: a run another process owns still counts, and
+  // one whose process died stops counting once its lease goes stale. A status column
+  // does neither - it lingers as 'running' after a crash, which is why a task could
+  // be planned twice by two processes that each believed they were alone.
+  //
+  // A state guard cannot do this job for the callers below, because it only
+  // serializes a run that changes the state *before* it awaits. implement() moves the
+  // task to IMPLEMENTING and only then starts its agent, so its own guard covers it.
+  // plan(), refine(), runTests(), review() and repair() all await their run first and
+  // move the task afterwards, or never - so between the guard and the transition
+  // there is nothing stopping a second caller, which is how one task came to have two
+  // planner runs in flight at once.
+  //
+  // `job` separates the two kinds of caller. A verb a user invokes directly has to
+  // refuse while a queued job holds the task, because jobs_one_active only covers the
+  // queued path and a foreground review starts no job at all. A step *inside* a
+  // longer sequence must not look at jobs: execute() runs under a job row for its
+  // whole length, so a runTests() that counted jobs would refuse the very job that
+  // called it.
+  #assertIdle(id, verb, { job = true } = {}) {
+    if (this.store.taskHasLiveRun(id) || (job && this.store.activeJobs().some((j) => j.task_id === id))) {
+      throw new Error(`This task has a run or job in flight; wait for it to finish before ${verb}`);
+    }
+  }
 
   // Claim or refresh this run's lease. Shared state, and it may be called from an
   // interval callback, so it must never throw: a missed heartbeat only makes the
@@ -1378,9 +1597,11 @@ export class Service {
       try {
         ({ p, m, healthForced } = this.select(role, excluded));
       } catch (selErr) {
-        // Nothing left to route to. A real failure from an earlier attempt says
-        // far more than "no model available", so prefer it.
-        throw last || selErr;
+        // Nothing left to route to, and two facts are worth reporting: the failure
+        // that emptied the chain by one, and why nothing was left after it. Only the
+        // first used to survive, which is how a user with a corrected API key was told
+        // the key was missing when the real dead end was a busy sibling provider.
+        throw last ? chainExhausted(last, selErr) : selErr;
       }
       const policy = this.policies[role] || {};
       const timeoutMs = (policy.timeout || 600) * 1000;
@@ -1596,6 +1817,43 @@ export class Service {
 
   // -- provider connectivity and diagnostics --------------------------------
 
+  // A connection test that passes is the one piece of evidence the breaker cannot
+  // generate for itself, so it is the one thing that can lift an OPEN circuit.
+  //
+  // afterSuccess() will not do it, deliberately: a run that squeaked through a lapsed
+  // cooldown proves nothing about whether the fault is gone. A person clicking Test
+  // after correcting a key is a different claim of a different kind - a direct
+  // assertion that the cause was addressed, made against the very call that failed.
+  // Without this there is no way back: the circuit holds for its full hour, and every
+  // attempt in the meantime is refused by the health check before it reaches the
+  // provider, so nothing that happens can shorten it.
+  //
+  // Narrow enough to be safe. The failures that opened the circuit stay in the window,
+  // so a provider that is still broken re-opens it on the next real run; and only the
+  // decision fields move, leaving last_error and last_failure_at as the record of why
+  // it opened. The card can then read "Healthy · 1 recent failure" for the rest of the
+  // window, which is the honest reading of "the last real run failed and the last test
+  // passed".
+  #clearCircuit(providerId) {
+    const row = this.store.getProviderHealthRow(providerId);
+    if (!row) return null;
+    // Read the state through effectiveHealth rather than off the row, so a cooldown
+    // that has already lapsed reports DEGRADED - the state routing has been using -
+    // instead of the stale OPEN still sitting in the column.
+    const was = effectiveHealth(row, Date.now()).state;
+    if (was === 'HEALTHY') return null;
+    this.store.writeProviderHealth({
+      ...row,
+      state: 'HEALTHY',
+      reason: null,
+      consecutive_successes: 0,
+      cooldown_until: null,
+      opened_at: null,
+      last_success_at: new Date().toISOString(),
+    });
+    return was;
+  }
+
   async testProvider(id, modelId) {
     const p = this.store.getProvider(id);
     if (!p) throw new Error('Provider not found');
@@ -1625,8 +1883,13 @@ export class Service {
         if (tx) text += tx;
       }
       this.store.updateRun(run.id, { status: 'succeeded', ended_at: new Date().toISOString(), duration_ms: Date.now() - started });
-      return { ok: true, provider: p.name, model: m.name, response: text.slice(-1000), runId: run.id };
+      return { ok: true, provider: p.name, model: m.name, response: text.slice(-1000), runId: run.id, cleared: this.#clearCircuit(p.id) };
     } catch (e) {
+      // Deliberately no health write. countRecentFailures excludes role='provider-test'
+      // (src/store.mjs), so the button is the one way to inspect the breaker without
+      // moving it - and it has to stay that way: a test failing because the machine is
+      // offline, or because a model name was mistyped, would otherwise count toward the
+      // circuit that a real run's failures opened, and the two are not the same claim.
       this.store.updateRun(run.id, { status: 'failed', ended_at: new Date().toISOString(), error: `${e.code || ''} ${e.message}`, duration_ms: Date.now() - started });
       return { ok: false, provider: p.name, model: m.name, error: e.message, code: e.code || classify(e.message), runId: run.id };
     } finally {

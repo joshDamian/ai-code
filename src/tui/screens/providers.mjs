@@ -54,7 +54,10 @@ export function ProvidersScreen({ api, isActive, setTyping, onError, onMessage, 
     try {
       const result = await api.testProvider(current.id, modelId);
       setLastResult(result);
-      onMessage?.({ text: result.ok ? `${current.name}: OK` : `${current.name}: ${result.error}`, color: result.ok ? 'green' : 'red' });
+      // A passing test lifts an OPEN circuit, so say so: otherwise the health line
+      // changing on its own looks like it happened for no reason.
+      const ok = `${current.name}: OK${result.cleared ? ` (circuit cleared from ${result.cleared})` : ''}`;
+      onMessage?.({ text: result.ok ? ok : `${current.name}: ${result.error}`, color: result.ok ? 'green' : 'red' });
     } catch (err) {
       onError?.(err.message);
     } finally {

@@ -53,6 +53,14 @@ export class Store {
         // planner saw. Execution refuses when the last two still overlap, because
         // the implementer runs in a worktree built from HEAD.
         ['plan_base', 'TEXT'],
+        // The revision before the current one, and when the current one landed.
+        // Two columns on the task rather than a plan_revisions table, because the only
+        // question ever asked is "what changed since the revision I was just reading",
+        // which is exactly one predecessor - and a table would be a second place that
+        // can disagree with the `plan` column it is meant to describe. It becomes the
+        // right shape the day someone wants to browse a history.
+        ['plan_prev', 'TEXT'],
+        ['plan_at', 'TEXT'],
       ],
       models: [
         ['provider_model_id', 'TEXT'],
@@ -243,12 +251,18 @@ export class Store {
     return this.db.prepare(q).all(...params);
   }
 
+  // The SET list is positional and the argument list beside it is hand-ordered to match,
+  // with no type to catch a slip: `plan`, `plan_prev`, `context` and `review` are all
+  // TEXT, so inserting into the middle of either list writes a plan into `context` with
+  // no error and no symptom until a screen renders nonsense. Append to the end of both,
+  // adjacent, and never reorder - a new column goes on the end of the SET list and the
+  // end of the .run() arguments, in that order.
   updateTask(id, patch) {
     const task = this.getTask(id);
     const n = { ...task, ...patch, updated_at: new Date().toISOString() };
     this.db
-      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=? WHERE id=?')
-      .run(n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, id);
+      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=?,plan_prev=?,plan_at=? WHERE id=?')
+      .run(n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, n.plan_prev ?? null, n.plan_at ?? null, id);
     return this.getTask(id);
   }
 
@@ -454,15 +468,29 @@ export class Store {
       .all(cutoff);
   }
 
-  // Does this task have a run in flight anywhere, as told by the leases rather
-  // than by a status column? Used by the event stream to decide whether the task
-  // is still moving, and cheap enough to ask on every tick.
-  taskHasLiveRun(taskId) {
+  // The run this task has in flight, as told by the leases rather than by a status
+  // column. One definition, because three surfaces used to answer this question
+  // differently and disagree: the dashboard held a local boolean that died on reload
+  // and could not see a second tab, and both the dashboard and the TUI scanned
+  // runs.status - a column that lingers as 'running' after the process that owned it
+  // is gone, which is exactly the case where "still moving" is the wrong answer.
+  //
+  // Newest first, so a task whose second run has started while a dead first one is
+  // still marked running reports the one that is actually running.
+  liveRun(taskId) {
     const cutoff = new Date(Date.now() - LEASE_STALE_MS).toISOString();
-    const r = this.db
-      .prepare('SELECT count(*) c FROM runs r JOIN run_leases l ON l.run_id=r.id WHERE r.task_id=? AND l.heartbeat_at>=?')
-      .get(taskId, cutoff);
-    return r.c > 0;
+    return (
+      this.db
+        .prepare('SELECT r.* FROM runs r JOIN run_leases l ON l.run_id=r.id WHERE r.task_id=? AND l.heartbeat_at>=? ORDER BY r.started_at DESC')
+        .get(taskId, cutoff) || null
+    );
+  }
+
+  // Does this task have a run in flight anywhere? Cheap enough to ask on every tick
+  // of the event stream, which is what asks it - through the same query, so the
+  // frame the stream sends and the condition it stops on cannot disagree.
+  taskHasLiveRun(taskId) {
+    return !!this.liveRun(taskId);
   }
 
   // Tasks left in PLANNING with a plan that only ever reached the events table:

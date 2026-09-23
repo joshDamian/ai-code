@@ -72,8 +72,19 @@ function ProviderCard({ provider, models, health, onChange }) {
     setTestResult(null);
     try {
       const r = await api.testProvider(provider.id, models[0] && models[0].id);
-      setTestResult({ ok: true, detail: JSON.stringify(r) });
-      showToast('Connection test succeeded.', 'success');
+      // A failed test is a 200 carrying {ok:false}, not a rejection, so the result has
+      // to be read rather than caught - which is how this toasted success on failure.
+      setTestResult({ ok: r.ok, detail: r.ok ? JSON.stringify(r) : r.error });
+      if (!r.ok) {
+        showToast(`Connection test failed: ${r.error}`, 'error');
+        return;
+      }
+      // 'cleared' is the state the circuit was in, and the reason this toast is worth
+      // reading: a test that passes is what lifts the breaker.
+      showToast(r.cleared ? `Connection test succeeded — circuit cleared from ${r.cleared}.` : 'Connection test succeeded.', 'success');
+      // The health dot renders from the parent's data.health and nothing here reloads
+      // it, so a cleared circuit would leave the dot red until the next navigation.
+      if (r.cleared) onChange();
     } catch (e) {
       setTestResult({ ok: false, detail: e.message });
       showToast('Connection test failed.', 'error');

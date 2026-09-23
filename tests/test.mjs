@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig} from '../src/context.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig} from '../src/context.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -52,6 +52,56 @@ test('only the reviewer is asked for a structured verdict',()=>{
 test('worktree is isolated',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const a=s.createTask(p.id,'a');const b=s.createTask(p.id,'b');s.prepare(a.id);s.prepare(b.id);await s.plan(a.id);await s.plan(b.id);s.approve(a.id);s.approve(b.id);await s.execute(a.id);await s.execute(b.id);const ta=s.task(a.id),tb=s.task(b.id);assert.notEqual(ta.worktree,tb.worktree);assert.equal(fs.existsSync(ta.worktree),true);assert.equal(fs.existsSync(tb.worktree),true)});
 test('provider fallback',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);s.addProvider({id:'bad',name:'Bad',kind:'mock',enabled:true,config:{failRoles:['planner']}});s.addProvider({id:'good',name:'Good',kind:'mock',enabled:true,config:{}});for(const id of ['bad','good'])s.store.addModel({id:id+'-m',providerId:id,name:id,capabilities:['planning','coding','review','repair'],speed:10,cost:0,quality:id==='bad'?20:10,contextLength:100000});const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);const runs=s.store.listRuns(t.id);assert.equal(runs.filter(r=>r.status==='failed').length,1);assert.equal(runs.filter(r=>r.status==='succeeded').length,1)});
 
+
+test('a failed chain reports the failure and why nothing was left to try',async()=>{
+  // The production shape. One provider dies on an auth failure, the only other one is
+  // already at its concurrency limit, and the message that reached the user named the
+  // auth failure alone: a key that had just been corrected looked like a key that had
+  // never been set, and the provider that could have taken over was never mentioned.
+  //
+  // The provider is deepseek because its missing key throws before any process is
+  // spawned (agents.mjs), which is the same 37ms failure the user hit, deterministically.
+  const root=repo();
+  const s=new Service(root,{allowMock:false});
+  s.addProvider({id:'ds',name:'DeepSeek',kind:'deepseek',enabled:true,config:{routable:true,apiKeyEnv:'AICODE_TEST_KEY_THAT_IS_NEVER_SET'}});
+  s.addProvider({id:'cc',name:'Anthropic',kind:'claude-code',enabled:true,config:{routable:true}});
+  s.addModel({id:'ds-m',providerId:'ds',name:'deepseek',capabilities:['planning'],speed:10,quality:12,cost:0,contextLength:100000});
+  s.addModel({id:'cc-m',providerId:'cc',name:'claude',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  // The seam eligible() already calls through, so this is the real concurrency check
+  // and not a stand-in for one. DeepSeek scores higher, so it is the attempt that fails.
+  s.runner={atCapacity:(p)=>p.id==='cc',runningByProvider:()=>1,limitFor:()=>1};
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  await assert.rejects(()=>s.plan(t.id),(e)=>{
+    assert.equal(e.code,'AUTH_FAILURE','the failure that emptied the chain keeps its code: plan() reads it to decide whether the task itself is at fault');
+    assert.match(e.message,/Missing AICODE_TEST_KEY_THAT_IS_NEVER_SET/,'the real failure is still the headline');
+    assert.match(e.message,/DeepSeek was already tried in this chain/,'the provider that failed is named as the attempt it was');
+    assert.match(e.message,/Anthropic is at its concurrency limit/,'and the one that could not take over is named, with the reason');
+    // Every install seeds a mock provider, so a clause about it would trail every dead
+    // end a user ever reads while never naming anything they could act on.
+    assert.doesNotMatch(e.message,/mock/i,'the seeded mock provider is not a routing option, so it is not a reason');
+    return true;
+  });
+  assert.equal(s.task(t.id).state,'PLANNING','a routing dead end is not a property of the task');
+});
+
+test('a routing dead end names what was blocking each provider',()=>{
+  // An empty list is the one routing outcome a user reads, and the message carried no
+  // clue which of these two configurations they were in.
+  const root=repo();
+  const s=new Service(root,{allowMock:false});
+  s.addProvider({id:'a',name:'Alpha',kind:'claude-code',enabled:true,config:{routable:true}});
+  s.addModel({id:'a-m',providerId:'a',name:'a',capabilities:['coding'],speed:10,quality:10,cost:0,contextLength:100000});
+  s.addProvider({id:'b',name:'Beta',kind:'claude-code',enabled:false,config:{routable:true}});
+  let err;
+  try{s.select('planner')}catch(e){err=e}
+  assert.equal(err.code,'NO_MODEL');
+  assert.equal(err.message,'No available model capable of planner','the shape every caller matches on is unchanged');
+  const why=err.rejections.map(r=>`${r.name} ${r.detail}`).join('; ');
+  assert.match(why,/Alpha has no enabled model capable of planner/);
+  assert.match(why,/Beta is disabled/);
+  assert.equal(err.rejections.length,2,'the seeded mock provider contributes no clause: it is reachable only through the last resort, never by routing');
+});
 
 test('production routing excludes mock',()=>{const root=repo();const s=new Service(root,{allowMock:false});const p=s.initProject('p',root);s.addProvider({id:'mock2',name:'Mock2',kind:'mock',enabled:true,config:{routable:true}});s.addModel({id:'mock2m',providerId:'mock2',name:'Mock2',capabilities:['planning'],speed:10,quality:10,cost:0});assert.throws(()=>s.select('planner'),/No available model/)});
 test('preferred model is honoured',()=>{const root=repo();const s=new Service(root);const p=s.initProject('p',root);s.addProvider({id:'a',name:'A',kind:'claude-code',enabled:true,config:{routable:true}});s.addModel({id:'slow',providerId:'a',name:'slow',capabilities:['planning'],speed:1,quality:10,cost:1});s.addModel({id:'fast',providerId:'a',name:'fast',capabilities:['planning'],speed:10,quality:8,cost:1});s.saveRouting({...s.getRouting(),planner:{...s.getRouting().planner,preferred:['a:slow']}});assert.equal(s.select('planner').m.id,'slow')});
@@ -264,6 +314,24 @@ test('failed runs keep their session id and only transient failures are resumabl
 
 function seedRun(s,t,id){s.store.addRun({id,taskId:t.id,role:'implementer',providerId:'a',modelId:'m',status:'running',startedAt:new Date().toISOString()});return id}
 
+test('the run a task is live on comes from the lease, not from the status column',()=>{
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const t=s.createTask(s.initProject('p',root).id,'x');
+  seedRun(s,t,'live');
+  s.store.heartbeat('live',t.id);
+  const live=s.liveRun(t.id);
+  assert.equal(live.runId,'live');
+  assert.deepEqual(Object.keys(live).sort(),['fallbackFrom','modelId','providerId','role','runId','startedAt'],'a narrow shape: the runs list already carries the cost and the tokens');
+  // Backdated past the staleness window, which is what a process that died mid-run
+  // leaves behind: the row still says running and nothing holds the lease.
+  s.store.db.prepare('UPDATE run_leases SET heartbeat_at=? WHERE run_id=?')
+    .run(new Date(Date.now()-LEASE_STALE_MS-1000).toISOString(),'live');
+  assert.equal(s.store.listRuns(t.id)[0].status,'running','the status column still claims it');
+  assert.equal(s.liveRun(t.id),null,'and the lease is what decides');
+  assert.equal(s.store.taskHasLiveRun(t.id),false,'one definition, so the two cannot disagree');
+});
+
 test('a run held by a fresh lease survives another process opening the store',()=>{
   const root=repo();
   const s=new Service(root,{allowMock:true});
@@ -444,6 +512,67 @@ test('a provider test never counts toward the breaker',()=>{
   }
   assert.equal(s.store.countRecentFailures('bad',new Date(Date.now()-3600000).toISOString()),0);
   assert.equal(s.store.getProviderHealthRow('bad'),null);
+});
+
+test('a passing connection test clears the circuit it disproves',async()=>{
+  // The second half of the incident. The key had been corrected and DeepSeek's circuit
+  // still stood OPEN for its full hour, and nothing could shorten it: every run in the
+  // meantime was refused by the health check before it reached the provider, so the one
+  // piece of evidence that could have moved it was a passing test - and the Test button
+  // wrote nothing. A human saying "I fixed this" is a different claim from a run that
+  // happened to succeed, which is why afterSuccess() declines to lift an OPEN row.
+  const root=repo();
+  const s=new Service(root,{allowMock:true});
+  s.addProvider({id:'p',name:'Provider',kind:'mock',enabled:true,config:{routable:true}});
+  s.addModel({id:'p-m',providerId:'p',name:'p-m',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  failRun(s,'p','AUTH_FAILURE');
+  assert.equal(s.store.getProviderHealthRow('p').state,'OPEN');
+  // Asked of the health list rather than of eligible(), because a mock provider is
+  // never routable whatever its health - this is the gate, not the routing table.
+  assert.equal(s.providerHealthList().find(x=>x.providerId==='p').eligible,false,'an open circuit takes the provider out of routing');
+
+  // The provider is a mock, so the test really runs and really passes.
+  const r=await s.testProvider('p','p-m');
+  assert.equal(r.ok,true);
+  assert.equal(r.cleared,'OPEN','the result names what it lifted, so the card can say so');
+
+  const after=s.store.getProviderHealthRow('p');
+  assert.equal(after.state,'HEALTHY');
+  assert.equal(after.cooldown_until,null,'the cooldown is what routing reads, so it has to go');
+  assert.equal(after.opened_at,null);
+  assert.equal(after.last_error,'AUTH_FAILURE','what opened it stays on the record; it is just not what routing reads');
+  const h=s.providerHealthList().find(x=>x.providerId==='p');
+  assert.equal(h.eligible,true);
+  assert.equal(h.penalty,0);
+  // Still on the record, and deliberately: a provider that is genuinely still broken
+  // re-opens its circuit on the next real run rather than hiding behind a passing test.
+  // The code is named because the default window holds only the count-policy codes, and
+  // AUTH_FAILURE opens a circuit on its own without needing a count.
+  assert.equal(s.store.countRecentFailures('p',new Date(Date.now()-3600000).toISOString(),['AUTH_FAILURE']),1);
+  assert.equal(s.providerHealthList().find(x=>x.providerId==='p').eligible,true,'and the gate lets it through again');
+});
+
+test('a connection test that fails leaves the circuit exactly where it was',async()=>{
+  // The other half of the asymmetry. A failing test is not evidence about the provider:
+  // the key may be wrong, but so may the machine's network, and only a real run
+  // separates those. So the button moves the breaker in one direction only.
+  const root=repo();
+  const s=new Service(root,{allowMock:false});
+  s.addProvider({id:'ds',name:'DeepSeek',kind:'deepseek',enabled:true,config:{routable:true,apiKeyEnv:'AICODE_TEST_KEY_THAT_IS_NEVER_SET'}});
+  s.addModel({id:'ds-m',providerId:'ds',name:'ds-m',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  failRun(s,'ds','AUTH_FAILURE');
+  const opened=s.store.getProviderHealthRow('ds');
+  assert.equal(opened.state,'OPEN');
+
+  const r=await s.testProvider('ds','ds-m');
+  assert.equal(r.ok,false);
+  assert.equal(r.code,'AUTH_FAILURE','the test reports the real fault');
+  assert.equal(r.cleared,undefined,'and clears nothing, so the view has nothing to announce');
+  assert.deepEqual(s.store.getProviderHealthRow('ds'),opened,'the row is what it was, cooldown and all');
+  // The failing test run is not counted, even with the code named - which is the only
+  // shape of this assertion that means anything, since the default window excludes it
+  // by policy rather than by design.
+  assert.equal(s.store.countRecentFailures('ds',new Date(Date.now()-3600000).toISOString(),['AUTH_FAILURE']),1,'only the real run is in the window');
 });
 
 test('health thresholds from routing.json override the defaults',()=>{
@@ -1660,6 +1789,177 @@ test('a port is refused while the task has a job queued',async()=>{
   await assert.rejects(()=>s.port(t.id,{to:'staging'}),/in flight/);
 });
 
+test('a plan is refused while a planner run is in flight',async()=>{
+  // A task sits in PLANNING for the whole planning run - it moves only once the plan
+  // has been written - so the state check above admits a second planner. Liveness has
+  // to come from the lease, which is also the only thing that sees a run belonging to
+  // the dashboard process rather than to this one.
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const t=s.createTask(s.initProject('p',root).id,'x');
+  s.prepare(t.id);
+  s.store.addRun({id:'live',taskId:t.id,role:'planner',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
+  s.store.heartbeat('live',t.id);
+  await assert.rejects(()=>s.plan(t.id),/in flight/);
+});
+
+test('a refine is refused while a planner run is in flight',async()=>{
+  // The incident this came from. A refine never leaves AWAITING_APPROVAL, not even
+  // while its planner is running, so a second refine submitted mid-run was accepted:
+  // it routed somewhere else, died for its own reasons, and reported those reasons as
+  // the failure of the user's feedback.
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const t=s.createTask(s.initProject('p',root).id,'x');
+  s.prepare(t.id);await s.plan(t.id);
+  assert.equal(s.task(t.id).state,'AWAITING_APPROVAL');
+  s.store.addRun({id:'live',taskId:t.id,role:'planner',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
+  s.store.heartbeat('live',t.id);
+  await assert.rejects(()=>s.refine(t.id,'make it smaller'),/in flight/);
+});
+
+test('a second review is refused while a review is running',async()=>{
+  // The queue does not cover this one: jobs_one_active guards only the queued path,
+  // and a dashboard Review button starts no job at all. Two reviewers over one
+  // worktree would race to write the verdict and to move the task out of REVIEWING.
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  await s.runTests(t.id);
+  assert.equal(s.task(t.id).state,'REVIEWING');
+  s.store.addRun({id:'live',taskId:t.id,role:'reviewer',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
+  s.store.heartbeat('live',t.id);
+  await assert.rejects(()=>s.review(t.id),/in flight/);
+});
+
+test('a plan is refused while the task has a job queued',async()=>{
+  // The half no lease can see: a job that has not started has no run yet.
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const t=s.createTask(s.initProject('p',root).id,'x');
+  s.prepare(t.id);
+  s.store.addJob({id:'job-1',taskId:t.id,kind:'execute',state:'queued',createdAt:new Date().toISOString()});
+  await assert.rejects(()=>s.plan(t.id),/in flight/);
+});
+
+test('a lease that has gone stale does not refuse a plan',async()=>{
+  // The guard is lease-based and not a latch. A lease is evidence of life only while
+  // it is fresh; read as "a run row exists", the run left behind by a process that
+  // died mid-plan would refuse every retry and strand the task in PLANNING.
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const t=s.createTask(s.initProject('p',root).id,'x');
+  s.prepare(t.id);
+  s.store.addRun({id:'dead',taskId:t.id,role:'planner',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
+  s.store.heartbeat('dead',t.id);
+  s.store.db.prepare('UPDATE run_leases SET heartbeat_at=? WHERE run_id=?')
+    .run(new Date(Date.now()-LEASE_STALE_MS-1000).toISOString(),'dead');
+  await s.plan(t.id);
+  assert.equal(s.task(t.id).state,'AWAITING_APPROVAL');
+});
+
+test('editing a plan keeps the revision it replaced',async()=>{
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);
+  const v1=s.task(t.id).plan;
+  s.updatePlan(t.id,'v2 first line\nv2 second line');
+  const after=s.task(t.id);
+  assert.equal(after.plan_prev,v1,'the revision it replaced, not the one before that');
+  assert.ok(Date.parse(after.plan_at)>0,'and when this one landed');
+  const r=s.revision(after);
+  assert.equal(r.at,after.plan_at);
+  assert.equal(r.hasPrev,true);
+  assert.equal(r.changed,true,'which is the condition the views key off, not hasPrev');
+  assert.match(r.diff,/-Proposed plan/);
+  assert.match(r.diff,/\+v2 first line/);
+});
+
+test('the plan columns survive the positional write they go through',async()=>{
+  // updateTask builds a positional SET list from a hand-ordered argument list of the
+  // same length. There is no type to catch a slip: plan, plan_prev, context and review
+  // are all TEXT, so a mid-list insertion writes a plan into context with no error and
+  // no symptom until a screen renders nonsense. This is the assertion that would fail.
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);
+  const v1=s.task(t.id).plan;
+  s.store.updateTask(t.id,{context:'CONTEXT_MARKER',review:'REVIEW_MARKER'});
+  s.updatePlan(t.id,'PLAN_MARKER');
+  const after=s.task(t.id);
+  assert.equal(after.plan,'PLAN_MARKER');
+  assert.equal(after.plan_prev,v1);
+  assert.equal(after.context,'CONTEXT_MARKER','context still holds context');
+  assert.equal(after.review,'REVIEW_MARKER','and review still holds a review');
+});
+
+test('a refine records the plan it replaced, and the diff is against that one',async()=>{
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);
+  const v1=s.task(t.id).plan;
+  // Set after the first plan, so the two revisions really differ. The mock planner's
+  // text is fixed otherwise, and a refine that returns its own input is deliberately
+  // not recorded as a revision at all.
+  s.updateProvider('mock',{config:{routable:false,planText:'Revised: do the smaller thing.'}});
+  await s.refine(t.id,'make it smaller');
+  const after=s.task(t.id);
+  assert.equal(after.plan,'Revised: do the smaller thing.');
+  assert.equal(after.plan_prev,v1);
+  const r=s.revision(after);
+  assert.equal(r.changed,true);
+  assert.match(r.diff,/-Proposed plan/);
+  assert.match(r.diff,/\+Revised: do the smaller thing\./);
+});
+
+test('a refine that changes nothing is not recorded as a revision',async()=>{
+  // The plan_at column is what the dashboard's "revised" marker compares, so a run
+  // that returned its own input would announce a new plan that is the old one - and
+  // the diff it offers would then be empty, contradicting the announcement.
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);
+  const at=s.task(t.id).plan_at;
+  await s.refine(t.id,'say something encouraging');
+  const after=s.task(t.id);
+  assert.equal(after.plan_at,at,'the same revision, so the same timestamp');
+  assert.equal(s.revision(after).changed,false);
+});
+
+test('a rejected plan takes its provenance with it',async()=>{
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);
+  s.updatePlan(t.id,'a second version');
+  s.reject(t.id);
+  const rejected=s.task(t.id);
+  assert.equal(rejected.plan,null);
+  assert.equal(rejected.plan_prev,null,'or the next plan is diffed against one the user refused');
+  assert.equal(rejected.plan_at,null);
+  assert.equal(s.revision(rejected).changed,false);
+  await s.plan(t.id);
+  assert.equal(s.task(t.id).plan_prev,null,'and the plan after the rejection has no predecessor');
+});
+
+test('the revision columns are added to a database that predates them',()=>{
+  // ensureColumn is the migration path for every install that already had a database
+  // when these two columns were introduced, and nothing else here exercises it: every
+  // other test builds a store from scratch, where CREATE TABLE has made them already.
+  // A column that gets dropped from the map is invisible in the whole rest of the suite.
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  s.store.db.exec('ALTER TABLE tasks DROP COLUMN plan_prev');
+  s.store.db.exec('ALTER TABLE tasks DROP COLUMN plan_at');
+  const reopened=new Service(root,{allowMock:true,silent:true});
+  const cols=reopened.store.db.prepare('PRAGMA table_info(tasks)').all().map((c)=>c.name);
+  assert.ok(cols.includes('plan_prev'));
+  assert.ok(cols.includes('plan_at'));
+});
+
 test('the plan records the branch it was written against',async()=>{
   const root=repoWith('app.mjs');
   const s=new Service(root,{allowMock:true,silent:true});
@@ -1911,4 +2211,83 @@ test('diffSides pads the other side, and never pairs across a hunk',()=>{
   assert.equal(rows[9].left.no,'21');
   assert.equal(rows[9].right.no,'22');
   assert.equal(rows.length,10);
+});
+
+// -- unifiedDiff: the producer for the format the two tests above consume ---------
+//
+// Every assertion here round-trips through diffLines rather than counting characters,
+// because the contract that matters is not "this is the diff git would write" - it is
+// "the reader renders it correctly", and the reader is diffLines.
+
+test('a diff of two texts is read back with the right numbers on both sides',()=>{
+  const diff=unifiedDiff('one\ntwo\nthree','one\nTWO\nthree');
+  assert.equal(diff.split('\n')[0],'diff --git a/plan b/plan','a file section, which is what closes a hunk for the reader');
+  const rows=diffLines(diff);
+  const by=(cls)=>rows.filter(r=>r.cls===cls);
+  assert.equal(by('diff-add').length,1);
+  assert.equal(by('diff-del').length,1);
+  assert.equal(by('diff-add')[0].text,'+TWO');
+  // The replacement sits on line 2 of both sides, so the numbers have to agree with
+  // each other and with the surrounding context, not merely be present.
+  assert.equal(by('diff-del')[0].old,'2');
+  assert.equal(by('diff-add')[0].new,'2');
+  assert.equal(by('diff-ctx')[0].old,'1');
+  assert.equal(by('diff-ctx')[0].new,'1');
+  assert.equal(by('diff-ctx')[1].old,'3');
+  assert.equal(by('diff-ctx')[1].new,'3');
+});
+
+test('an insertion is numbered without counting itself as an old line',()=>{
+  const rows=diffLines(unifiedDiff('one\nthree\nfour','one\ntwo\nthree\nfour'));
+  assert.equal(rows.find(r=>r.cls==='diff-add').text,'+two');
+  assert.equal(rows.filter(r=>r.cls==='diff-del').length,0,'an insertion deletes nothing');
+  // The line after the insertion has moved down on the new side and not on the old:
+  // this is the assertion a counter that incremented both sides would fail.
+  const after=rows.filter(r=>r.cls==='diff-ctx').pop();
+  assert.equal(after.text,' three');
+  assert.equal(after.old,'2','unchanged by the insertion');
+  assert.equal(after.new,'3','and one line further down than the old side has it');
+});
+
+test('a deletion is numbered the same way round',()=>{
+  const rows=diffLines(unifiedDiff('one\ntwo\nthree','one\nthree'));
+  assert.equal(rows.find(r=>r.cls==='diff-del').text,'-two');
+  const after=rows.filter(r=>r.cls==='diff-ctx').pop();
+  assert.equal(after.old,'3');
+  assert.equal(after.new,'2');
+});
+
+test('a diff of identical text is empty, so a caller can ask whether there is one',()=>{
+  assert.equal(unifiedDiff('one\ntwo\nthree','one\ntwo\nthree'),'');
+  assert.equal(unifiedDiff('',''),'');
+  // A trailing newline is not a line. Both of these describe the same three lines,
+  // and the diff of a plan against itself must not be a blank-line change.
+  assert.equal(unifiedDiff('one\ntwo\n','one\ntwo'),'');
+});
+
+test('hunks are far apart only when the change is, and the gap between them is context',()=>{
+  const para=(n)=>Array.from({length:n},(_,i)=>`line ${i}`);
+  const before=[...para(12),'old'];
+  const after=[...para(12),'new'];
+  const one=diffLines(unifiedDiff(before.join('\n'),after.join('\n')));
+  assert.equal(one.filter(r=>r.cls==='diff-hunk').length,1,'a single change is a single hunk');
+  assert.equal(unifiedDiff('a\nb\nc\nd\ne\nf','A\nb\nc\nd\ne\nF').split('\n').filter(l=>l.startsWith('@@')).length,2,'two changes far apart are two hunks, so neither carries a screenful of the other');
+});
+
+test('every diff carries the file section and the body kind the renderer reads',()=>{
+  const diff=unifiedDiff('a\nb','a\nB');
+  assert.equal(bodyKind(diff),'diff','the port tab decides how to render from this');
+  assert.equal(diffLines(diff).filter(r=>r.cls==='diff-file').length,2,'the --- and +++ headers, which the reader must not number');
+});
+
+test('a plan may contain lines that look like diff metadata',()=>{
+  // The reason diffLines keeps a hunk flag at all: `--- ` and `+++ ` are content inside
+  // a hunk and headers outside one, and a plan is prose that can begin a line with
+  // anything - a markdown rule, a bullet, an underline.
+  const rows=diffLines(unifiedDiff('intro','intro\n--- \n+++ not a header'));
+  // The generator's own prefix is the leading +, so the second line's text really does
+  // begin with four of them: three are content and one is the diff marker.
+  assert.deepEqual(rows.slice(-2).map(r=>r.text),['+--- ','++++ not a header']);
+  assert.deepEqual(rows.slice(-2).map(r=>r.cls),['diff-add','diff-add'],'content, not file headers, because a hunk is open above them');
+  assert.equal(rows.filter(r=>r.cls==='diff-file').length,2,'the only file headers are the two the generator wrote');
 });
