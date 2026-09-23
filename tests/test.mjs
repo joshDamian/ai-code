@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs,agentCwd} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -2198,6 +2198,28 @@ test('an agent is handed a port of its own, so its smoke-test server cannot coll
   }
 });
 
+test('the tree an agent runs in is the worktree the caller named',()=>{
+  // The service names it `worktree` at every call site and the spawner reads `cwd`,
+  // so the spawn was handed undefined and every agent inherited the server's own
+  // directory - the main checkout. Asserted by field name because that mismatch is
+  // the whole defect: it was never a wrong path, it was a field nobody set.
+  assert.equal(agentCwd({worktree:'/w'}),'/w','the name the service actually uses');
+  assert.equal(agentCwd({cwd:'/w'}),'/w');
+  assert.equal(agentCwd({cwd:'/c',worktree:'/w'}),'/c','an explicit cwd wins');
+  assert.equal(agentCwd({}),undefined,'naming neither keeps the inherit behaviour');
+});
+test('a spawned agent process really does run in the directory it was given',async()=>{
+  // The other half of the same defect: the fallback above is worthless if the spawn
+  // ignores it. Run against a real child rather than a stub, in a worktree, so the
+  // assertion is about the process the agent would get and not about the arguments.
+  const root=repo();
+  const wt=createWorktree(root,'cwd-probe');
+  const seen=[];
+  for await (const e of runProcess(process.execPath,['-p','process.cwd()'],{cwd:wt.dir,env:process.env,role:'probe'})) {
+    if(e.type==='message'&&typeof e.data==='string') seen.push(e.data.trim());
+  }
+  assert.equal(seen.join(''),fs.realpathSync(wt.dir),'the child ran in the worktree, not in the server\'s own directory');
+});
 test('a kill that computes its targets is refused, and a kill that names one is not',()=>{
   // The guard exists because the implementer that killed the dashboard ran with
   // --dangerously-skip-permissions, which skips the permission prompt but not hooks.

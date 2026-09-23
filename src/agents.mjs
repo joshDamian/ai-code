@@ -77,7 +77,7 @@ export async function* runMock(input) {
   // writes: a planner or reviewer that did would be the planning violation that
   // check already exists to catch.
   for (const file of (input.role === 'implementer' && input.mockWrites) || []) {
-    const dest = path.join(input.worktree, file);
+    const dest = path.join(agentCwd(input), file);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, '// written by the mock implementer\n');
   }
@@ -181,10 +181,28 @@ export function claudeArgs(input) {
   return args;
 }
 
+// The tree the agent runs in. Every caller in the service names it `worktree` and
+// none of them names it `cwd`, which is the field the spawner reads - so the spawn
+// was handed `undefined` and the child inherited the server's own working directory
+// instead. That directory is the main checkout, so an implementer read and edited the
+// repository the dashboard was launched from while its worktree sat beside it as a
+// sibling it never entered. On 2026-09-23 run 787ded70 made nine edits into the main
+// checkout that way and caught itself at 22:13:57, having already run the main
+// repository's test suite and read its sources. The instruction "do not change files
+// outside the worktree" was unfollowable: every relative path already was outside it.
+//
+// Both names are honoured rather than one being renamed, because the two callers that
+// have a worktree and the two that only have a tree say different things and neither
+// is wrong. Undefined stays undefined, so a caller that names neither keeps the
+// inherit-from-server behaviour it had rather than being given a surprise root.
+export function agentCwd(input) {
+  return input?.cwd || input?.worktree || undefined;
+}
+
 // Drives the claude binary.
 export async function* runClaude(input) {
   const env = childEnv(input.env);
-  yield* runProcess('claude', claudeArgs(input), { cwd: input.cwd, env, role: input.role, signal: input.signal });
+  yield* runProcess('claude', claudeArgs(input), { cwd: agentCwd(input), env, role: input.role, signal: input.signal });
 }
 
 async function* runProcess(cmd, args, { cwd, env, role, signal }) {
