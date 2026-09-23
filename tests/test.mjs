@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig} from '../src/context.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig} from '../src/context.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -1782,6 +1782,109 @@ test('a lease that has gone stale does not refuse a plan',async()=>{
   assert.equal(s.task(t.id).state,'AWAITING_APPROVAL');
 });
 
+test('editing a plan keeps the revision it replaced',async()=>{
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);
+  const v1=s.task(t.id).plan;
+  s.updatePlan(t.id,'v2 first line\nv2 second line');
+  const after=s.task(t.id);
+  assert.equal(after.plan_prev,v1,'the revision it replaced, not the one before that');
+  assert.ok(Date.parse(after.plan_at)>0,'and when this one landed');
+  const r=s.revision(after);
+  assert.equal(r.at,after.plan_at);
+  assert.equal(r.hasPrev,true);
+  assert.equal(r.changed,true,'which is the condition the views key off, not hasPrev');
+  assert.match(r.diff,/-Proposed plan/);
+  assert.match(r.diff,/\+v2 first line/);
+});
+
+test('the plan columns survive the positional write they go through',async()=>{
+  // updateTask builds a positional SET list from a hand-ordered argument list of the
+  // same length. There is no type to catch a slip: plan, plan_prev, context and review
+  // are all TEXT, so a mid-list insertion writes a plan into context with no error and
+  // no symptom until a screen renders nonsense. This is the assertion that would fail.
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);
+  const v1=s.task(t.id).plan;
+  s.store.updateTask(t.id,{context:'CONTEXT_MARKER',review:'REVIEW_MARKER'});
+  s.updatePlan(t.id,'PLAN_MARKER');
+  const after=s.task(t.id);
+  assert.equal(after.plan,'PLAN_MARKER');
+  assert.equal(after.plan_prev,v1);
+  assert.equal(after.context,'CONTEXT_MARKER','context still holds context');
+  assert.equal(after.review,'REVIEW_MARKER','and review still holds a review');
+});
+
+test('a refine records the plan it replaced, and the diff is against that one',async()=>{
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);
+  const v1=s.task(t.id).plan;
+  // Set after the first plan, so the two revisions really differ. The mock planner's
+  // text is fixed otherwise, and a refine that returns its own input is deliberately
+  // not recorded as a revision at all.
+  s.updateProvider('mock',{config:{routable:false,planText:'Revised: do the smaller thing.'}});
+  await s.refine(t.id,'make it smaller');
+  const after=s.task(t.id);
+  assert.equal(after.plan,'Revised: do the smaller thing.');
+  assert.equal(after.plan_prev,v1);
+  const r=s.revision(after);
+  assert.equal(r.changed,true);
+  assert.match(r.diff,/-Proposed plan/);
+  assert.match(r.diff,/\+Revised: do the smaller thing\./);
+});
+
+test('a refine that changes nothing is not recorded as a revision',async()=>{
+  // The plan_at column is what the dashboard's "revised" marker compares, so a run
+  // that returned its own input would announce a new plan that is the old one - and
+  // the diff it offers would then be empty, contradicting the announcement.
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);
+  const at=s.task(t.id).plan_at;
+  await s.refine(t.id,'say something encouraging');
+  const after=s.task(t.id);
+  assert.equal(after.plan_at,at,'the same revision, so the same timestamp');
+  assert.equal(s.revision(after).changed,false);
+});
+
+test('a rejected plan takes its provenance with it',async()=>{
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);
+  s.updatePlan(t.id,'a second version');
+  s.reject(t.id);
+  const rejected=s.task(t.id);
+  assert.equal(rejected.plan,null);
+  assert.equal(rejected.plan_prev,null,'or the next plan is diffed against one the user refused');
+  assert.equal(rejected.plan_at,null);
+  assert.equal(s.revision(rejected).changed,false);
+  await s.plan(t.id);
+  assert.equal(s.task(t.id).plan_prev,null,'and the plan after the rejection has no predecessor');
+});
+
+test('the revision columns are added to a database that predates them',()=>{
+  // ensureColumn is the migration path for every install that already had a database
+  // when these two columns were introduced, and nothing else here exercises it: every
+  // other test builds a store from scratch, where CREATE TABLE has made them already.
+  // A column that gets dropped from the map is invisible in the whole rest of the suite.
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  s.store.db.exec('ALTER TABLE tasks DROP COLUMN plan_prev');
+  s.store.db.exec('ALTER TABLE tasks DROP COLUMN plan_at');
+  const reopened=new Service(root,{allowMock:true,silent:true});
+  const cols=reopened.store.db.prepare('PRAGMA table_info(tasks)').all().map((c)=>c.name);
+  assert.ok(cols.includes('plan_prev'));
+  assert.ok(cols.includes('plan_at'));
+});
+
 test('the plan records the branch it was written against',async()=>{
   const root=repoWith('app.mjs');
   const s=new Service(root,{allowMock:true,silent:true});
@@ -2033,4 +2136,83 @@ test('diffSides pads the other side, and never pairs across a hunk',()=>{
   assert.equal(rows[9].left.no,'21');
   assert.equal(rows[9].right.no,'22');
   assert.equal(rows.length,10);
+});
+
+// -- unifiedDiff: the producer for the format the two tests above consume ---------
+//
+// Every assertion here round-trips through diffLines rather than counting characters,
+// because the contract that matters is not "this is the diff git would write" - it is
+// "the reader renders it correctly", and the reader is diffLines.
+
+test('a diff of two texts is read back with the right numbers on both sides',()=>{
+  const diff=unifiedDiff('one\ntwo\nthree','one\nTWO\nthree');
+  assert.equal(diff.split('\n')[0],'diff --git a/plan b/plan','a file section, which is what closes a hunk for the reader');
+  const rows=diffLines(diff);
+  const by=(cls)=>rows.filter(r=>r.cls===cls);
+  assert.equal(by('diff-add').length,1);
+  assert.equal(by('diff-del').length,1);
+  assert.equal(by('diff-add')[0].text,'+TWO');
+  // The replacement sits on line 2 of both sides, so the numbers have to agree with
+  // each other and with the surrounding context, not merely be present.
+  assert.equal(by('diff-del')[0].old,'2');
+  assert.equal(by('diff-add')[0].new,'2');
+  assert.equal(by('diff-ctx')[0].old,'1');
+  assert.equal(by('diff-ctx')[0].new,'1');
+  assert.equal(by('diff-ctx')[1].old,'3');
+  assert.equal(by('diff-ctx')[1].new,'3');
+});
+
+test('an insertion is numbered without counting itself as an old line',()=>{
+  const rows=diffLines(unifiedDiff('one\nthree\nfour','one\ntwo\nthree\nfour'));
+  assert.equal(rows.find(r=>r.cls==='diff-add').text,'+two');
+  assert.equal(rows.filter(r=>r.cls==='diff-del').length,0,'an insertion deletes nothing');
+  // The line after the insertion has moved down on the new side and not on the old:
+  // this is the assertion a counter that incremented both sides would fail.
+  const after=rows.filter(r=>r.cls==='diff-ctx').pop();
+  assert.equal(after.text,' three');
+  assert.equal(after.old,'2','unchanged by the insertion');
+  assert.equal(after.new,'3','and one line further down than the old side has it');
+});
+
+test('a deletion is numbered the same way round',()=>{
+  const rows=diffLines(unifiedDiff('one\ntwo\nthree','one\nthree'));
+  assert.equal(rows.find(r=>r.cls==='diff-del').text,'-two');
+  const after=rows.filter(r=>r.cls==='diff-ctx').pop();
+  assert.equal(after.old,'3');
+  assert.equal(after.new,'2');
+});
+
+test('a diff of identical text is empty, so a caller can ask whether there is one',()=>{
+  assert.equal(unifiedDiff('one\ntwo\nthree','one\ntwo\nthree'),'');
+  assert.equal(unifiedDiff('',''),'');
+  // A trailing newline is not a line. Both of these describe the same three lines,
+  // and the diff of a plan against itself must not be a blank-line change.
+  assert.equal(unifiedDiff('one\ntwo\n','one\ntwo'),'');
+});
+
+test('hunks are far apart only when the change is, and the gap between them is context',()=>{
+  const para=(n)=>Array.from({length:n},(_,i)=>`line ${i}`);
+  const before=[...para(12),'old'];
+  const after=[...para(12),'new'];
+  const one=diffLines(unifiedDiff(before.join('\n'),after.join('\n')));
+  assert.equal(one.filter(r=>r.cls==='diff-hunk').length,1,'a single change is a single hunk');
+  assert.equal(unifiedDiff('a\nb\nc\nd\ne\nf','A\nb\nc\nd\ne\nF').split('\n').filter(l=>l.startsWith('@@')).length,2,'two changes far apart are two hunks, so neither carries a screenful of the other');
+});
+
+test('every diff carries the file section and the body kind the renderer reads',()=>{
+  const diff=unifiedDiff('a\nb','a\nB');
+  assert.equal(bodyKind(diff),'diff','the port tab decides how to render from this');
+  assert.equal(diffLines(diff).filter(r=>r.cls==='diff-file').length,2,'the --- and +++ headers, which the reader must not number');
+});
+
+test('a plan may contain lines that look like diff metadata',()=>{
+  // The reason diffLines keeps a hunk flag at all: `--- ` and `+++ ` are content inside
+  // a hunk and headers outside one, and a plan is prose that can begin a line with
+  // anything - a markdown rule, a bullet, an underline.
+  const rows=diffLines(unifiedDiff('intro','intro\n--- \n+++ not a header'));
+  // The generator's own prefix is the leading +, so the second line's text really does
+  // begin with four of them: three are content and one is the diff marker.
+  assert.deepEqual(rows.slice(-2).map(r=>r.text),['+--- ','++++ not a header']);
+  assert.deepEqual(rows.slice(-2).map(r=>r.cls),['diff-add','diff-add'],'content, not file headers, because a hunk is open above them');
+  assert.equal(rows.filter(r=>r.cls==='diff-file').length,2,'the only file headers are the two the generator wrote');
 });

@@ -330,6 +330,100 @@ export function diffLines(diff) {
   return out;
 }
 
+// A unified diff of two texts, in the shape git writes and diffLines() above reads.
+//
+// There was no producer for that shape anywhere: every diff in the product arrived
+// from git already formatted, so a screen showing "what changed in this plan" had
+// nothing to render and no way to make one. Two obvious alternatives were rejected.
+// Shelling out to `git diff --no-index` would write two temp files and spawn a process
+// for a screen that should be a pure function of a row. Diffing by hand somewhere else
+// would be a second reader of a format this file already parses - and the two would
+// drift.
+//
+// Plans are prose that is mostly unchanged between revisions, so the common prefix and
+// suffix are trimmed before the table is built. The LCS is O(n*m) in the lines that
+// actually moved, which on a plan that gained a paragraph is a handful rather than the
+// few hundred a whole-document table would need - and the whole-document table would
+// produce a diff so long nobody reads it.
+//
+// `context` is one rather than git's three: a revision is read in a panel, and the
+// surrounding paragraphs are the part the reader already has in front of them.
+export function unifiedDiff(oldText, newText, { label = 'plan', context = 1 } = {}) {
+  // A trailing newline is not a blank line. Splitting text that ends in one leaves a
+  // final '', so diffing "a\n" against "a" would report a line that neither side shows.
+  const lines = (text) => {
+    const l = String(text ?? '').split('\n');
+    return l.length && l[l.length - 1] === '' ? l.slice(0, -1) : l;
+  };
+  const oldLines = lines(oldText);
+  const newLines = lines(newText);
+
+  let pre = 0;
+  while (pre < oldLines.length && pre < newLines.length && oldLines[pre] === newLines[pre]) pre++;
+  let suf = 0;
+  while (suf < oldLines.length - pre && suf < newLines.length - pre && oldLines[oldLines.length - 1 - suf] === newLines[newLines.length - 1 - suf]) suf++;
+  const o = oldLines.slice(pre, oldLines.length - suf);
+  const n = newLines.slice(pre, newLines.length - suf);
+  // Identical text produces no diff rather than an empty diff, because the caller asks
+  // "is there anything to show" and '' is the honest answer to it.
+  if (!o.length && !n.length) return '';
+
+  // The table is filled from the end so the walk below can commit to a direction as
+  // soon as it knows which side is worth keeping, rather than backtracking through it.
+  const dp = Array.from({ length: o.length + 1 }, () => new Int32Array(n.length + 1));
+  for (let i = o.length - 1; i >= 0; i--) {
+    for (let j = n.length - 1; j >= 0; j--) {
+      dp[i][j] = o[i] === n[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops = [];
+  for (let i = 0, j = 0; i < o.length || j < n.length; ) {
+    if (i < o.length && j < n.length && o[i] === n[j]) { ops.push({ t: ' ', text: o[i] }); i++; j++; }
+    else if (i < o.length && (j >= n.length || dp[i + 1][j] >= dp[i][j + 1])) { ops.push({ t: '-', text: o[i] }); i++; }
+    else { ops.push({ t: '+', text: n[j] }); j++; }
+  }
+
+  // The trimmed lines come back as context, so the hunks below can be numbered by
+  // walking one sequence rather than by arithmetic on two.
+  const all = [
+    ...oldLines.slice(0, pre).map((text) => ({ t: ' ', text })),
+    ...ops,
+    ...oldLines.slice(oldLines.length - suf).map((text) => ({ t: ' ', text })),
+  ];
+  let oldNo = 1;
+  let newNo = 1;
+  for (const op of all) {
+    if (op.t === ' ') { op.old = oldNo++; op.new = newNo++; }
+    else if (op.t === '-') op.old = oldNo++;
+    else op.new = newNo++;
+  }
+
+  // One hunk per run of changes plus its context, and two runs merge when the gap
+  // between them is no wider than the context they would otherwise repeat.
+  const ranges = [];
+  for (let i = 0; i < all.length; i++) {
+    if (all[i].t === ' ') continue;
+    const start = Math.max(0, i - context);
+    const end = Math.min(all.length, i + context + 1);
+    const last = ranges[ranges.length - 1];
+    if (last && start <= last.end) last.end = Math.max(last.end, end);
+    else ranges.push({ start, end });
+  }
+
+  const out = [`diff --git a/${label} b/${label}`, `--- a/${label}`, `+++ b/${label}`];
+  for (const r of ranges) {
+    const hunk = all.slice(r.start, r.end);
+    const oldCount = hunk.filter((op) => op.t !== '+').length;
+    const newCount = hunk.filter((op) => op.t !== '-').length;
+    // A side with no lines starts at 0, which is git's own spelling for it - a hunk
+    // that adds lines to an empty side has no line to point at.
+    const first = (side) => hunk.find((op) => op[side] !== undefined);
+    out.push(`@@ -${first('old') ? first('old').old : 0},${oldCount} +${first('new') ? first('new').new : 0},${newCount} @@`);
+    for (const op of hunk) out.push(op.t + op.text);
+  }
+  return out.join('\n');
+}
+
 // The same unified diff, paired into side-by-side rows.
 //
 // A split view is a pairing problem rather than a second reading of the diff: which

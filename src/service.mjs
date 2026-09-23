@@ -12,6 +12,7 @@ import {
 import { runAgent, classify } from './agents.mjs';
 import { loadPolicies, savePolicies } from './policy.mjs';
 import { isTransient, healthThresholds, effectiveHealth } from './health.mjs';
+import { unifiedDiff } from './format.mjs';
 
 const exec = promisify(execFile);
 
@@ -539,10 +540,12 @@ export class Service {
     // is the dirty set as the planner found it; the read set comes from the run
     // that just finished and from the manifest prepare() persisted, so neither
     // costs a second look at the tree or a second run.
-    this.store.updateTask(id, {
-      plan: this.planFromRun(result.runId),
-      plan_base: recordPlanBase(this.store, p.path, t, result.runId, [...before]),
-    });
+    // No predecessor: a first plan replaced nothing. The plan and its baseline are two
+    // statements rather than one because #writePlan owns the three plan columns and
+    // recordPlanBase owns the fourth - and the baseline is computed from `t`, read
+    // before the plan was written, so the order between them does not matter.
+    this.#writePlan(id, this.planFromRun(result.runId), null);
+    this.store.updateTask(id, { plan_base: recordPlanBase(this.store, p.path, t, result.runId, [...before]) });
     return this.transition(id, 'AWAITING_APPROVAL');
   }
 
@@ -600,10 +603,13 @@ export class Service {
         // the only one available - the tree it was written against is gone.
         const task = this.task(task_id);
         const project = this.project(task.project_id);
-        this.store.updateTask(task_id, {
-          plan: this.planFromRun(run_id),
-          plan_base: recordPlanBase(this.store, project.path, task, run_id, dirtyPaths(project.path)),
-        });
+        // The predecessor is carried over: a process that died mid-refine leaves the
+        // task holding the plan the refine was revising, and that is exactly the plan
+        // the recovered revision should be diffed against. This is the case where the
+        // diff is most worth having, since the run that produced it left no record of
+        // what it was changing.
+        this.#writePlan(task_id, this.planFromRun(run_id), task.plan);
+        this.store.updateTask(task_id, { plan_base: recordPlanBase(this.store, project.path, task, run_id, dirtyPaths(project.path)) });
         this.transition(task_id, 'AWAITING_APPROVAL');
         recovered.push({ taskId: task_id, runId: run_id });
       } catch {
@@ -626,7 +632,10 @@ export class Service {
   reject(id) {
     const t = this.task(id);
     if (t.state !== 'AWAITING_APPROVAL') throw new Error('Can only reject when AWAITING_APPROVAL');
-    this.store.updateTask(id, { plan: null });
+    // The provenance goes with the plan it describes. Left behind, the next plan would
+    // be diffed against a plan the user refused - showing them changes against a
+    // revision that is no longer anywhere on the screen.
+    this.store.updateTask(id, { plan: null, plan_prev: null, plan_at: null });
     return this.transition(id, 'PLANNING');
   }
 
@@ -635,7 +644,7 @@ export class Service {
     if (t.state !== 'FAILED') throw new Error('Can only replan when FAILED');
     // plan_base goes with the plan it describes: between here and the next plan()
     // the task would otherwise carry a baseline for a plan that no longer exists.
-    this.store.updateTask(id, { plan: null, review: null, worktree: null, branch: null, base_commit: null, plan_base: null });
+    this.store.updateTask(id, { plan: null, plan_prev: null, plan_at: null, review: null, worktree: null, branch: null, base_commit: null, plan_base: null });
     return this.transition(id, 'PLANNING');
   }
 
@@ -660,10 +669,9 @@ export class Service {
     // A revised plan is a different plan, read against the tree as it is now, so
     // it gets its own baseline. Left at the previous one, the dashboard's Refine
     // button would quietly re-gate the new plan against the old plan's files.
-    this.store.updateTask(id, {
-      plan: this.finalText(result.runId) || t.plan,
-      plan_base: recordPlanBase(this.store, p.path, t, result.runId, before),
-    });
+    const plan = this.finalText(result.runId) || t.plan;
+    this.#writePlan(id, plan, t.plan);
+    this.store.updateTask(id, { plan_base: recordPlanBase(this.store, p.path, t, result.runId, before) });
     return this.task(id);
   }
 
@@ -674,7 +682,7 @@ export class Service {
     // while a refine is mid-run would be overwritten when that run writes its result,
     // and the revision the refine records as "previous" would be one no user ever saw.
     this.#assertIdle(id, 'editing the plan');
-    this.store.updateTask(id, { plan });
+    this.#writePlan(id, plan, t.plan);
     return this.task(id);
   }
 
@@ -904,6 +912,29 @@ export class Service {
   destinations(id) {
     const t = this.task(id);
     return branches(this.project(t.project_id).path).filter((b) => !b.startsWith('ai-code/'));
+  }
+
+  // The current plan against the one it replaced.
+  //
+  // `changed` rather than `hasPrev` is the condition every surface keys off, because
+  // the two answers differ in the case that matters: a refine that ran and returned
+  // the plan it was given has a predecessor and no change, and telling the user their
+  // plan was revised would be a lie the diff itself immediately contradicts.
+  //
+  // The diff is built on read rather than stored. It is a pure function of two columns
+  // already on the row, and a stored third copy is a third thing that can be wrong
+  // about what changed.
+  revision(t) {
+    const plan = t.plan;
+    const prev = t.plan_prev;
+    const hasPrev = typeof prev === 'string' && prev.length > 0;
+    const changed = hasPrev && prev !== plan;
+    return {
+      at: t.plan_at || null,
+      hasPrev,
+      changed,
+      diff: changed ? unifiedDiff(prev, plan, { label: 'plan' }) : '',
+    };
   }
 
   // Everything a human needs to decide, and nothing that writes a ref or a file.
@@ -1351,6 +1382,27 @@ export class Service {
       code: 'NO_MODEL',
       rejections,
     });
+  }
+
+  // The only place a plan and its provenance are written together.
+  //
+  // Three columns have to move as one. `plan_prev` is what the plan replaced and
+  // `plan_at` is when this one landed, and a write that moved `plan` on its own would
+  // leave the diff comparing the new plan against a predecessor from two revisions
+  // ago - a change the user never made and cannot account for. Two writers revise (a
+  // planner run, and the editor), so the rule is one helper rather than a convention.
+  //
+  // `prev` is passed in rather than read from the row: every caller already holds the
+  // task it read at the top of its own method, and a re-read here could pick up a
+  // plan written by another process between that read and this write.
+  #writePlan(id, plan, prev) {
+    // A write that does not change the text is not a revision. A refine whose feedback
+    // the model declined to act on produces exactly that - the run succeeds and returns
+    // the plan it was given - and bumping plan_at for it would announce a new plan that
+    // is word for word the old one. So the timestamp means "a revision landed", not "a
+    // planner ran", and nothing else has to know the difference.
+    if (this.store.getTask(id).plan === plan) return;
+    this.store.updateTask(id, { plan, plan_prev: prev ?? null, plan_at: new Date().toISOString() });
   }
 
   // -- run helpers ----------------------------------------------------------

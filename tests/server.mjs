@@ -85,7 +85,11 @@ test('the browser can load the shared formatters',async()=>{const root=fs.mkdtem
   // take the gutter with it - and nothing in the unit suite imports through here.
   // diffSides is the split view's other half; an export missing here is a blank pane
   // in the one view nothing on the server side would otherwise exercise.
-  assert.match(r.body,/export function diffLines/);assert.match(r.body,/export function diffSides/)}finally{s.stop()}});
+  assert.match(r.body,/export function diffLines/);assert.match(r.body,/export function diffSides/);
+  // unifiedDiff is the producer for what the two above consume, and it is only ever
+  // reached from a view: the revision panel is the sole caller, so nothing on the
+  // server side would notice the export going missing.
+  assert.match(r.body,/export function unifiedDiff/)}finally{s.stop()}});
 
 test('the dashboard pins the markdown renderer and the sanitiser beside it',async()=>{
   // The plan and review tabs hand untrusted model text to these two modules, so a
@@ -142,6 +146,32 @@ test('a background job stops when cancelled from another process and the stream 
     const runs=JSON.parse((await get(`${base}/api/runs?taskId=${taskId}`)).body);
     assert.equal(runs.filter(r=>r.role==='implementer')[0].status,'cancelled','the run in flight was stopped, not left running');
     assert.equal(JSON.parse((await get(`${base}/api/jobs?taskId=${taskId}`)).body)[0].state,'cancelled');
+  }finally{server.stop()}
+});
+
+test('show carries the revision of the plan, against the one it replaced',async()=>{
+  // The dashboard's whole revision panel reads from this one key: the diff, whether
+  // there is one to show, and the timestamp the "revised" marker compares per tick.
+  const {root,taskId}=seeded();
+  // The fixture's planner is a mock provider, so the server has to be told mocks are
+  // routable - production routing excludes them by construction.
+  const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  const base=server.base;
+  try{
+    assert.equal((await post(`${base}/api/tasks/${taskId}/plan`)).status,200);
+    const first=JSON.parse((await get(`${base}/api/tasks/${taskId}/show`)).body);
+    assert.equal(first.revision.changed,false,'a first plan replaced nothing');
+    assert.equal(first.revision.hasPrev,false);
+    assert.equal(first.revision.diff,'');
+
+    const patched=await fetch(`${base}/api/tasks/${taskId}/plan`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({plan:'a hand-written revision'})});
+    assert.equal(patched.status,200,await patched.text());
+    const second=JSON.parse((await get(`${base}/api/tasks/${taskId}/show`)).body);
+    assert.equal(second.task.plan,'a hand-written revision');
+    assert.equal(second.revision.changed,true);
+    assert.equal(second.revision.hasPrev,true);
+    assert.equal(second.revision.at,second.task.plan_at);
+    assert.match(second.revision.diff,/\+a hand-written revision/);
   }finally{server.stop()}
 });
 

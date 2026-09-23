@@ -53,6 +53,14 @@ export class Store {
         // planner saw. Execution refuses when the last two still overlap, because
         // the implementer runs in a worktree built from HEAD.
         ['plan_base', 'TEXT'],
+        // The revision before the current one, and when the current one landed.
+        // Two columns on the task rather than a plan_revisions table, because the only
+        // question ever asked is "what changed since the revision I was just reading",
+        // which is exactly one predecessor - and a table would be a second place that
+        // can disagree with the `plan` column it is meant to describe. It becomes the
+        // right shape the day someone wants to browse a history.
+        ['plan_prev', 'TEXT'],
+        ['plan_at', 'TEXT'],
       ],
       models: [
         ['provider_model_id', 'TEXT'],
@@ -243,12 +251,18 @@ export class Store {
     return this.db.prepare(q).all(...params);
   }
 
+  // The SET list is positional and the argument list beside it is hand-ordered to match,
+  // with no type to catch a slip: `plan`, `plan_prev`, `context` and `review` are all
+  // TEXT, so inserting into the middle of either list writes a plan into `context` with
+  // no error and no symptom until a screen renders nonsense. Append to the end of both,
+  // adjacent, and never reorder - a new column goes on the end of the SET list and the
+  // end of the .run() arguments, in that order.
   updateTask(id, patch) {
     const task = this.getTask(id);
     const n = { ...task, ...patch, updated_at: new Date().toISOString() };
     this.db
-      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=? WHERE id=?')
-      .run(n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, id);
+      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=?,plan_prev=?,plan_at=? WHERE id=?')
+      .run(n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, n.plan_prev ?? null, n.plan_at ?? null, id);
     return this.getTask(id);
   }
 

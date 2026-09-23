@@ -201,7 +201,10 @@ const server = http.createServer(async (req, res) => {
       // The branch list rides on `show` rather than getting an endpoint of its own:
       // it is a fixed read of the repository, and the port form needs it on the same
       // render as the task it would port.
-      if (op === 'show') return json(res, { task: svc.task(id), runs: svc.store.listRuns(id), branches: svc.destinations(id) });
+      if (op === 'show') {
+        const task = svc.task(id);
+        return json(res, { task, runs: svc.store.listRuns(id), branches: svc.destinations(id), revision: svc.revision(task) });
+      }
       if (op === 'refine') {
         const b = await body(req);
         return json(res, await svc.refine(id, b.feedback));
