@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -1315,6 +1315,48 @@ test('the def pass is reversible with define 0, and deterministic either way',()
   const b=relevantFiles(p,task,{cwd:root,config:{edge:0,define:0}}).paths;
   assert.deepEqual(a,b);
   assert.ok(!a.includes('src/form.mjs'),'define 0 is the ranking as it was before symbol retrieval, so a change it causes is attributable');
+});
+
+test('a file that merely mentions a name is not the file that declares it',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','def.mjs'),'export function widget(){}\nwidget();\n');
+  fs.writeFileSync(path.join(root,'src','use.mjs'),'import {widget} from "./def.mjs";\nwidget();\nwidget();\n');
+  const files=['src/def.mjs','src/use.mjs'];
+  const idx=declarationIndex(root,files);
+  const refs=references(root,files,idx.names,3);
+  // Three mentions in the user: the import specifier and two calls.
+  assert.equal(refs.get('widget').get('src/use.mjs'),3);
+  // Two mentions in the definer, one of which *is* the declaration. Without the
+  // subtraction every declaring file would also be its own strongest referencer,
+  // and the relation would collapse into a noisier copy of `declarations`.
+  assert.equal(refs.get('widget').get('src/def.mjs'),1);
+  // A name nothing declares is still a reference: `mjs` is a sub-token of the
+  // import specifier, and §5.1's relation is about mentions rather than about
+  // names that resolve.
+  assert.equal(refs.get('mjs').get('src/use.mjs'),1);
+  assert.equal(idx.defines.get('widget').size,1,'and the definition half still knows the one file');
+});
+
+test('the reference record separates reach beyond the window from reach beyond the ranker',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','def.mjs'),'export function widget(){}\n');
+  fs.writeFileSync(path.join(root,'src','use.mjs'),'import {widget} from "./def.mjs";\nwidget();\n');
+  fs.writeFileSync(path.join(root,'src','unrelated.mjs'),'export const nothing=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const picked=relevantFiles(p,{id:'t',title:'widget',description:'',plan:null},{cwd:root,limit:1,config:{debug:true}});
+  const ref=picked.debug.ref;
+  assert.ok(ref.reached>0,'the query token is a name the tree mentions');
+  // The two sets are different questions and the record has to keep them apart:
+  // `beyond` is what a reference pull could move into the window, `only` is what
+  // nothing else in the ranker touched at all. On this corpus the second is empty
+  // because the recency prior scores every file, which is a fact about the corpus
+  // rather than about the relation - so the test asserts the ordering, which holds
+  // either way.
+  for(const f of ref.only) assert.ok(ref.beyond.includes(f),'everything beyond the ranker is also beyond the window');
+  for(const f of ref.beyond) assert.ok(!picked.paths.includes(f),'and nothing beyond the window is in it');
+  assert.deepEqual(ref.only,[...ref.only].sort(),'sorted, so two records of one tree compare equal');
 });
 
 test('vendored and editor directories are dropped at the walk',()=>{

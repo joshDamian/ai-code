@@ -417,13 +417,14 @@ function digest(value) {
 // harness asked for and could not check, and it is checked here instead.
 //
 // Every figure the harness produces is a property of (ranker, tree), and until this
-// existed the second argument was unverifiable from a record. Cost is one pass over
-// the source files, paid only under `debug`.
-function contentDigest(root, files) {
+// existed the second argument was unverifiable from a record. Hashing shares the
+// call's source cache, so the text is read once for all four passes and this costs
+// the sha1s rather than another 648 KB.
+function contentDigest(root, files, cache) {
   const pairs = [];
   for (const f of files) {
     if (!SOURCE_FILE.test(f)) continue;
-    const text = readText(path.join(root, f));
+    const text = sourceText(root, f, cache);
     if (!text || text.includes('\u0000')) continue;
     pairs.push([f, createHash('sha1').update(text).digest('hex')]);
   }
@@ -547,14 +548,14 @@ function resolveSpecifier(from, spec, known) {
 // Both directions are kept because they are different signals and the frontier
 // needs both: a seed's imports are the files it is built on, and its importers are
 // the files built on it. Keeping only one loses half the frontier.
-export function importGraph(root, files) {
+export function importGraph(root, files, cache) {
   const known = new Set(files);
   const imports = new Map();
   const importedBy = new Map();
   for (const f of files) { imports.set(f, new Set()); importedBy.set(f, new Set()); }
   for (const file of files) {
     if (!SOURCE_FILE.test(file)) continue;
-    const text = readText(path.join(root, file));
+    const text = sourceText(root, file, cache);
     // A binary file read as UTF-8 yields replacement characters, and a NUL means
     // it was never text at all.
     if (!text || text.includes('\u0000')) continue;
@@ -657,28 +658,116 @@ const DECLARATION = [
 // it - so the only whole multi-word forms a task text contains are words like
 // `PLAN`, whose lowercase form is already a sub-token. The sub-token key is the
 // whole mechanism.
-export function declarations(root, files) {
+export function declarations(root, files, cache) {
+  return declarationIndex(root, files, cache).defines;
+}
+
+// The declaration pass, keeping the per-file name sets as well as the inverted
+// index. §5.1's reference scan needs both: the index to know which files declare a
+// token, and the name sets to subtract a file's own declarations from the mentions
+// of that token inside it. One pass, because the reads are the cost.
+export function declarationIndex(root, files, cache) {
   const defines = new Map();
+  const names = new Map();
   for (const file of files) {
     if (!SOURCE_FILE.test(file)) continue;
-    const text = readText(path.join(root, file));
+    const text = sourceText(root, file, cache);
     if (!text || text.includes('\u0000')) continue;
-    const names = new Set();
+    const declared = new Set();
     for (const re of DECLARATION) {
       // `matchAll` clones the regex and copies `lastIndex`, so a shared global
       // pattern is safe only while nothing leaves it advanced. Resetting says so
       // rather than relying on it.
       re.lastIndex = 0;
-      for (const m of text.matchAll(re)) names.add(m[1]);
+      for (const m of text.matchAll(re)) declared.add(m[1]);
     }
-    for (const name of names) {
+    names.set(file, declared);
+    for (const name of declared) {
       for (const key of new Set(tokenize(name))) {
         if (!defines.has(key)) defines.set(key, new Set());
         defines.get(key).add(file);
       }
     }
   }
-  return defines;
+  return { defines, names };
+}
+
+// §5.1's other half: which files *mention* a name, as opposed to which files
+// declare one. Aider's repo map needs both directions - a symbol's definers and its
+// referencers - and until this existed the ranker had only the declaration half.
+//
+// The subtraction is what makes this a different relation rather than a noisier
+// copy of `declarations`: a file that declares `route` mentions it too, and
+// counting that would make every declaring file its own strongest reference.
+// `refs(f, t)` is therefore the mentions of identifiers tokenizing to `t` inside
+// `f`, less the number of names `f` declares that tokenize to `t`, floored at zero.
+//
+// Mentions are counted per identifier rather than per occurrence of the token, so a
+// name used five times weighs five and a name used once weighs one - the usage
+// signal Aider's PageRank is built on - while the floor is on the token, because a
+// token can be declared once and mentioned once under two different identifiers.
+//
+// Recorded rather than scored in this commit. §5.1 is the phase's largest piece and
+// the cheapest way to find out whether it is worth building is to count what the
+// relation reaches that the ranker already reaches by another route.
+export function references(root, files, declared, floor, cache) {
+  const refs = new Map();
+  for (const file of files) {
+    if (!SOURCE_FILE.test(file)) continue;
+    const text = sourceText(root, file, cache);
+    if (!text || text.includes('\u0000')) continue;
+    const mentions = new Map();
+    IDENTIFIER.lastIndex = 0;
+    for (const m of text.matchAll(IDENTIFIER)) mentions.set(m[0], (mentions.get(m[0]) || 0) + 1);
+    const counts = new Map();
+    for (const [ident, n] of mentions) {
+      for (const key of new Set(tokenize(ident, floor))) counts.set(key, (counts.get(key) || 0) + n);
+    }
+    const self = new Map();
+    for (const name of declared.get(file) || []) {
+      for (const key of new Set(tokenize(name, floor))) self.set(key, (self.get(key) || 0) + 1);
+    }
+    for (const [key, n] of counts) {
+      const own = n - (self.get(key) || 0);
+      if (own <= 0) continue;
+      if (!refs.has(key)) refs.set(key, new Map());
+      refs.get(key).set(file, own);
+    }
+  }
+  return refs;
+}
+
+// `[A-Za-z_$][\w$]*` is the identifier shape both `DECLARATION` and this scan use,
+// so the two agree about what a name is. Splitting is `tokenize`'s job, not this
+// regex's: the scan counts identifiers, `tokenize` says which tokens each holds.
+const IDENTIFIER = /[A-Za-z_$][\w$]*/g;
+
+// One read per source file per `relevantFiles` call. Three passes now want the same
+// text - the import graph, the declarations and the references - and each reading
+// independently costs the same 648 KB. Measured before this: 7.0 ms for the graph
+// and 8.8 ms for the declarations inside a 45.8 ms call, both dominated by the reads
+// rather than by the regexes.
+//
+// Bounded at the same 2 MB the render treats as too big to inline, so the cache
+// cannot hold a repository the prompt itself would refuse to. Past the cap reads
+// still happen and are simply not kept, which costs the second reader of a large
+// file its hit rather than the memory.
+const SOURCE_CACHE_MAX = 2 * 1024 * 1024;
+
+function sourceCache() {
+  return { map: new Map(), bytes: 0 };
+}
+
+function sourceText(root, file, cache) {
+  if (!cache) return readText(path.join(root, file));
+  const hit = cache.map.get(file);
+  if (hit !== undefined) return hit;
+  const text = readText(path.join(root, file));
+  if (cache.bytes < SOURCE_CACHE_MAX) {
+    cache.map.set(file, text);
+    cache.bytes += text ? text.length : 0;
+  }
+  return text;
 }
 
 // What the task's own words pull in, as a path -> weight map. The query token is
@@ -903,6 +992,7 @@ export function relevantFiles(project, task, options = {}) {
   // `tokenize` per path, measured at 0.23 ms for this repository's 68. `dfHalf: 0`
   // leaves the score unweighted; it no longer leaves the table unbuilt.
   const trace = cfg.debug ? {} : null;
+  const cache = sourceCache();
   const t0 = trace ? performance.now() : 0;
   const df = pathDocFreq(rankable, cfg.floor);
   const tDf = trace ? performance.now() : 0;
@@ -926,10 +1016,12 @@ export function relevantFiles(project, task, options = {}) {
   // the seed. The defining file enters the list above the edge pass, so it is
   // within `seeds` and its own imports are followed.
   const tDefine = trace ? performance.now() : 0;
+  // The declaration pass is shared with the reference record at the bottom, which
+  // needs the same per-file name sets, so it is built once for either consumer.
+  const idx = cfg.define > 0 || trace ? declarationIndex(root, rankable, cache) : null;
   if (cfg.define > 0) {
     const entry = new Map(scored.map((f) => [f.path, f]));
-    const defines = declarations(root, rankable);
-    for (const [p, add] of declaredBy(tokens, defines, cfg.define)) {
+    for (const [p, add] of declaredBy(tokens, idx.defines, cfg.define)) {
       const hit = entry.get(p);
       // `define` marks a score that came from a declaration rather than from the
       // path, for the same reason `graph` does: it is the first thing a reader of
@@ -954,7 +1046,7 @@ export function relevantFiles(project, task, options = {}) {
     const entry = new Map(scored.map((f) => [f.path, f]));
     const strength = new Map(scored.map((f) => [f.path, f.score]));
     const seeds = scored.slice(0, limit).map((f) => f.path);
-    const pull = frontier(seeds, strength, importGraph(root, rankable), cfg.edge);
+    const pull = frontier(seeds, strength, importGraph(root, rankable, cache), cfg.edge);
     for (const [p, add] of pull) {
       const hit = entry.get(p);
       // A neighbour already in the list keeps its own lexical score and gains the
@@ -979,11 +1071,46 @@ export function relevantFiles(project, task, options = {}) {
     const text = readForPrompt(root, file, tokens, cfg);
     if (text !== null) contents.push({ path: file, text, tokens: estimateTokens(text) });
   }
+  // §5.1's reference relation, recorded rather than scored. `reached` is every file
+  // that mentions a query token; `only` is the part of it the ranker did not reach
+  // by any other route - not the lexical window, not a declaration, not the import
+  // frontier, not a test sibling. That difference is what the symbol graph would be
+  // buying, and it is cheap to count before deciding to build it.
+  const tRef = trace ? performance.now() : 0;
+  let ref = null;
+  if (idx) {
+    const refs = references(root, rankable, idx.names, cfg.floor, cache);
+    const reached = new Set();
+    let hit = 0;
+    for (const t of [...tokens].sort()) {
+      const files2 = refs.get(t);
+      if (!files2) continue;
+      hit++;
+      for (const f of files2.keys()) reached.add(f);
+    }
+    const known = new Set([...scored.map((f) => f.path), ...selected]);
+    const inWindow = new Set(selected);
+    ref = {
+      // How many of the query's tokens appear as names anywhere in the tree, which
+      // is the vocabulary the reference index has that the path index does not.
+      tokens: hit,
+      reached: reached.size,
+      // Beyond the offered window: a file a reference pull could move *into* the
+      // window. This is the discriminating half, because it can be non-zero.
+      beyond: [...reached].filter((f) => !inWindow.has(f)).sort(),
+      // Beyond everything the ranker scored at all. On this corpus this is empty
+      // for any relation, because the recency prior scores 68 of 68 files - so it
+      // is recorded as the reason the introduction question cannot be asked here
+      // rather than as evidence about the reference relation.
+      only: [...reached].filter((f) => !known.has(f)).sort(),
+    };
+  }
+
   const rankState = rankingState(scored, tokens, df, rankable.length);
   const tHash = trace ? performance.now() : 0;
-  const contentHash = trace ? contentDigest(root, files) : null;
+  const contentHash = trace ? contentDigest(root, files, cache) : null;
   const tEnd = trace ? performance.now() : 0;
-  const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state: rankState.state, contentHash, marks: { t0, tDf, tScore, tDefine, tEdge, tHash, tEnd } }) : null;
+  const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state: rankState.state, contentHash, ref, marks: { t0, tDf, tScore, tDefine, tEdge, tRef, tHash, tEnd } }) : null;
   return { paths: selected, contents, scores: scored, debug, ...rankState };
 }
 
@@ -1027,7 +1154,7 @@ function rankingState(scored, tokens, df, n) {
 // floor from 0.10 to 0.50. It is recorded because §5.7 asks for it and because the
 // measurement that says it does not work is the useful part; §5.10 and §9 carry it.
 const DEBUG_CANDIDATES = 200;
-function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state, marks, contentHash }) {
+function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state, marks, contentHash, ref }) {
   const n = rankable.length;
   const { ceil, coverage } = ceilQuery(tokens, df, n);
   const accepted = new Map(selected.map((p, i) => [p, i]));
@@ -1066,7 +1193,11 @@ function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected,
     // questions and a record that only carried the new one could not be compared
     // against anything recorded before this phase.
     contentHash,
-    timings: marks ? { df: round(marks.tDf - marks.t0), score: round(marks.tScore - marks.tDf), define: round(marks.tEdge - marks.tDefine), edge: round(marks.tHash - marks.tEdge), hash: round(marks.tEnd - marks.tHash) } : null,
+    // §5.1's reference relation, recorded and not scored. `refGold` is not here
+    // because gold is a fact about the harness rather than about the ranker; the
+    // harness intersects `only` with the case's own answer set and reports both.
+    ref,
+    timings: marks ? { df: round(marks.tDf - marks.t0), score: round(marks.tScore - marks.tDf), define: round(marks.tEdge - marks.tDefine), edge: round(marks.tRef - marks.tEdge), ref: round(marks.tHash - marks.tRef), hash: round(marks.tEnd - marks.tHash) } : null,
     candidates,
     truncated: scored.length > DEBUG_CANDIDATES,
   };

@@ -558,6 +558,54 @@ that merely share rare identifier sub-tokens, and adding the sub-tokens is repor
 to make BM25 carry the discriminative signal on its own (arXiv:2605.18561 — a
 preprint, not peer-reviewed; see §9).
 
+**Built and measured — phase 4, and phase 8.** The declaration half shipped in
+phase 4: `declarations()` builds `defines[ident] -> set(files)` at column 0, and
+`declaredBy()` turns a query token into a pull on the files that declare a name
+containing it. The reference half — Aider's `references[ident] -> list(files)`, the
+one that needs a scan of bodies rather than of signature lines — is phase 8, and it
+is **recorded rather than scored**, because it is the phase's largest piece and the
+cheapest way to find out whether it is worth building is to count what the relation
+reaches that the ranker does not reach by another route.
+
+`references(root, files, declared, floor)` is one `matchAll` of
+`[A-Za-z_$][\w$]*` per file, `tokenize` applied to each *distinct* identifier once,
+accumulated into `Map<token, Map<file, count>>`. Mentions are counted per identifier
+rather than per occurrence of the token, so a name used five times weighs five. It
+shares a per-call source cache with the import graph and the declarations, because
+three passes over the same 648 KB cost three reads otherwise; the hash that
+qualifies every figure below shares it too.
+
+**The self-declaration subtraction is what makes this a different relation.**
+`refs(f, t)` is the mentions of identifiers tokenizing to `t` inside `f`, less the
+number of names `f` declares that tokenize to `t`. Without it a declaring file is
+also its own strongest referencer — `src/def.mjs` mentioning `widget` twice, once in
+the declaration — and the relation collapses into a noisier copy of `declarations`.
+
+Measured over the 22-run corpus at `contentHash 96c9f77b81eb`:
+
+| quantity | meaning | value |
+|---|---|---|
+| `refOnly` | files the relation reaches that the ranker reaches by *no* other route | **0** |
+| `refGold` | how many of those the planner read | **0** |
+| `refBeyond` | files it reaches that are outside the offered window | 477 |
+| `refBeyondGold` | how many of those are answers, over the 22 runs | **38** |
+| `refBeyondRuns` | runs naming at least one answer the window missed | **8 of 22** |
+
+**`refOnly` is 0 for a reason that makes it uninformative, and the record says so
+rather than reading it as a rejection.** The recency prior scores 68 of 68 files in
+this tree — every path was touched in the last 200 commits — so `scored` is the
+whole repository and *no* relation can reach a file the ranker did not already
+score. The introduction question is therefore not one this corpus can ask. What it
+can ask is `refBeyond`: the relation reaches 32–38 files outside the offered window
+on every run, and 38 of those are answers, concentrated where the window is under
+the most pressure — the five Mission Control runs carry 5, 5, 5, 9 and 7 answers the
+window never offered. That is a positive signal for the PageRank in §5.2 and it is
+the reason phase 8.2 goes ahead rather than stopping here.
+
+Cost: 29 ms for the scan on this tree, more than half of a 45 ms call, measured
+under `debug` in this commit. It becomes unconditional in 8.2, and if the graph does
+not earn its place the scan goes with it.
+
 ### 5.2 Score multiplicatively, not additively
 
 Aider's edge weights compound. The portable set, with the reason for each:

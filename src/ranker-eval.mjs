@@ -194,6 +194,13 @@ function runArm(project, cases, o) {
       { cwd: o.root, limit: o.limit, config }
     );
     if (picked.debug?.contentHash) contentHash = picked.debug.contentHash;
+    // §5.1's kill-test, at the only place that can compute it: `relevantFiles` does
+    // not know the answer set, so it reports the files only the reference relation
+    // reaches and the harness says how many of them were read.
+    const refOnly = picked.debug?.ref?.only || null;
+    const refBeyond = picked.debug?.ref?.beyond || null;
+    const refGold = refOnly ? refOnly.filter((p) => c.gold.includes(p)).length : null;
+    const refBeyondGold = refBeyond ? refBeyond.filter((p) => c.gold.includes(p)).length : null;
     // The ranker is allowed to return the file list the planner's prompt would
     // carry, which is never smaller than the window; the metric is the ranking.
     rows.push({
@@ -205,6 +212,10 @@ function runArm(project, cases, o) {
       // would make that quiet behaviour load-bearing.
       tail: picked.tail || [],
       state: picked.state ?? null,
+      refOnly: refOnly ? refOnly.length : 0,
+      refGold: refGold || 0,
+      refBeyond: refBeyond ? refBeyond.length : 0,
+      refBeyondGold: refBeyondGold || 0,
       ...(o.debug ? { debug: picked.debug } : {}),
       ...scoreCase(picked.paths, c.gold, o.k),
     });
@@ -305,6 +316,16 @@ export function summarise(rows, k = EVAL_DEFAULTS.k) {
     // it cannot see the consumer, and this counts the windows that gave it nothing
     // rather than claiming to measure what it did next.
     zeroRuns: scored.filter((r) => r.hits === 0).length,
+    // §5.1's kill-test, over the runs that could answer it. The count is of files
+    // the reference relation reaches that nothing else in the ranker does; the gold
+    // column is how many of them the planner actually read. A relation that reaches
+    // candidates but no answers is a relation that would reorder the window, not
+    // widen it, and only the second is what §5.1 claims.
+    refOnly: scored.reduce((a, r) => a + (r.refOnly || 0), 0),
+    refGold: scored.reduce((a, r) => a + (r.refGold || 0), 0),
+    refBeyond: scored.reduce((a, r) => a + (r.refBeyond || 0), 0),
+    refBeyondGold: scored.reduce((a, r) => a + (r.refBeyondGold || 0), 0),
+    refBeyondRuns: scored.filter((r) => r.refBeyondGold > 0).length,
     // The part of recall the ranker is responsible for: answers the planner read
     // that the ranking never offered. A gold file that was offered *and* read is
     // partly a fact about the prompt - a planner reads what it is handed - so
