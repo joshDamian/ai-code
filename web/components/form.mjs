@@ -30,7 +30,7 @@ export function Select({ label, value, onChange, options, disabled, loading }) {
   `;
 }
 
-export function TextArea({ label, value, onInput, placeholder, disabled, loading, rows = 6 }) {
+export function TextArea({ label, value, onInput, onKeyDown, placeholder, disabled, loading, rows = 6 }) {
   return html`
     <label class="field">
       ${label ? html`<span class="field-label">${label}</span>` : null}
@@ -41,6 +41,7 @@ export function TextArea({ label, value, onInput, placeholder, disabled, loading
         placeholder=${placeholder || ''}
         disabled=${disabled || loading}
         onInput=${(e) => onInput(e.target.value)}
+        onKeyDown=${onKeyDown}
       ></textarea>
     </label>
   `;
