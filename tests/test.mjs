@@ -1380,6 +1380,39 @@ test('a file the task never names is offered for the name it declares',()=>{
   assert.equal(form.score,form.define,'and its whole score is the declaration, not a path it does not match');
 });
 
+test('a term the paths do not carry is answered by the declaration that names it, and the note says which happened',()=>{
+  // §5.7's relaxation retry assumes a query can return nothing that a looser index
+  // would have answered. This is the test that says the looser index is already the
+  // first one: `declarationIndex` keys the *names inside* files, so a term in no
+  // path at all still resolves to the file that declares it - on the first pass,
+  // with no retry, under the shipped `define`.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','alpha.mjs'),'export function widgetRunner(){ return 1; }\n');
+  fs.writeFileSync(path.join(root,'src','beta.mjs'),'export const other = 1;\n');
+  fs.writeFileSync(path.join(root,'index.mjs'),'export const i=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const ask=(title,config)=>relevantFiles(p,{id:'t',title,description:'',plan:null},{cwd:root,recent:[],config});
+  const widget=ask('widget',{edge:0});
+  assert.equal(widget.state,'NO_RESULTS','no term is in a path, which is what coverage measures');
+  assert.ok(widget.paths.includes('src/alpha.mjs'),'and the declaring file is offered anyway');
+  const hit=widget.scores.find(f=>f.define>0);
+  assert.equal(hit.score,hit.define,'with its whole score from the declaration, since it matches no path');
+  assert.match(widget.note,/match rather than a guess/,'so the note cannot call the list a starting point');
+  assert.match(widget.note,/no path anywhere/,'and it says what is missing, not that nothing matched');
+  // Off, the same query has nothing at all to answer with - the declaration index is
+  // the whole of what reached it.
+  const bare=ask('widget',{edge:0,define:0});
+  assert.ok(!bare.paths.includes('src/alpha.mjs'),'the wider vocabulary is the only channel that answered that query');
+  assert.match(bare.note,/starting point/,'and without it the note is right to call the list priors');
+  // The other situation: a term nothing anywhere carries. The list is priors, and
+  // the note has to say so - which is the sentence the declaration case must not use.
+  const zzzz=ask('zzzz',{edge:0});
+  assert.equal(zzzz.state,'NO_RESULTS');
+  assert.match(zzzz.note,/starting point/);
+  assert.doesNotMatch(zzzz.note,/match rather than a guess/);
+});
+
 test('a name one file declares speaks louder than a name the whole tree declares',()=>{
   // §5.3's rule, and the exponent is the part the sweep had to settle: undivided,
   // a name declared eleven times fills the window and the ranking becomes a

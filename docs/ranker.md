@@ -992,11 +992,59 @@ if coverage_max == 0:              # no query term present in any file
 **Phase 8 built the fallback and not the retry, and the trigger moved.** The
 fallback is a real branch now (§5.9). It fires on the query with *no searchable
 term at all* — `tokenize('a', 2)` is `[]` — rather than on a coverage-zero result,
-because that is the input for which no ranking exists to be declined. The `relax
-once` line is still unbuilt. Its expected ceiling is already visible from §5.10:
-coverage is never zero on this corpus — the weakest run is 1 in-vocabulary term of
-19 — so whatever the retry does, it cannot move a harness number, and §9 will have
-to say so rather than dress it up.
+because that is the input for which no ranking exists to be declined.
+
+**The `relax once` line is not built, because the condition it exists for cannot
+arise here.** This is phase 8's finding, and it is about the mechanism rather than
+the cost:
+
+- **The shape does not transfer.** FTS5's retry works because its default is AND:
+  a multi-term query can return nothing while every term individually matches, so
+  OR-ing the terms widens the result set. This matcher is already an OR with
+  partial credit — every matching token adds score and no file has to carry all of
+  them — so there is no boolean to relax, and `coverage = 0` means the tree
+  genuinely does not contain the query. Every trigger phrased as "the query
+  returned nothing" collapses onto that one condition.
+- **The wider index is already the first pass, not a second chance.** The
+  relaxation is specified to widen the *index*, and the index that would widen it
+  already runs unconditionally: `declarationIndex` keys the names *inside* files,
+  so a term in no path at all still resolves to the file that declares it. On a
+  fixture, `{title: 'widget'}` against a tree where only `src/alpha.mjs` declares
+  `widgetRunner` returns that file on the first pass, at `define` points, with
+  `coverage = 0`. Turn `define` off and the file disappears from the list. Channel
+  1 of the plan — the reference relationship — is the same capability under a
+  noisier key, and §5.1's measurement of it is that its output does not depend on
+  the query; as a retry it would hand back a constant list. It is also the most
+  expensive pass in the call, measured here at **24.9 ms of a 39.2 ms total**.
+- **The remaining channel is measured at zero.** The only relaxation left is
+  `floor: 1`, the tokenizer at one character. Swept in one process against one tree,
+  `floor: 1` and `floor: 2` produce **byte-identical windows on all 22 rows** and
+  identical metrics on all five. Where there is signal it changes nothing; where
+  there is no signal it admits single-character tokens, which is the measurement
+  the floor at 2 exists to prevent (§5.3: at the floor of 2 a single letter earns
+  nothing, and eight one- and two-letter words earn full weight).
+
+So the retry would be a second chance that either returns what the first pass
+already returned, or manufactures a match on one letter in the one state where
+declining is the correct answer — the state whose note already reads "no task term
+appears in any path in this repository". The honest record is that the FTS5 shape
+has no analogue here, and §9 carries it rather than a `relax` key.
+
+**What it costs to be wrong about that is one sentence, and it is written here.**
+The retry is unexercised by this corpus — no harness run has `coverage = 0`; the
+weakest is 1 in-vocabulary term of 19 — so this is an argument from mechanism and a
+measured zero, not from a harness result. A repository larger than this one, or one
+whose paths are systematically unlike its identifiers, is where the case would
+appear.
+
+**The note, and the defect the investigation found.** Two situations reach
+`NO_RESULTS` and they are not alike: a term nothing anywhere carries, where the
+list is the priors and "the tree below is a starting point" is true of it, and a
+term whose only answer is a declaration, where that sentence is false. The state is
+right either way — coverage is a path fact and the path is what a reader checks —
+and the note now says which of the two happened, and says "terms with no path
+anywhere" rather than "terms that matched nothing" in the second case, because
+something did match.
 
 **Strength — weak results.** The signal is not the top score but the *dispersion*
 of the top-k scores. Normalized Query Commitment (Shtok, Kurland, Carmel et al.,
@@ -1052,7 +1100,7 @@ The EACCES crash in §4 is the counter-example, and it is live.
 | `PARTIAL` | Walk or index incomplete | the incomplete note |
 | `DEGRADED` | The task text produced no searchable term at all | the heuristic floor — configs, then entry points, then recent — as paths, plus an explicit "this is a listing, search for more" |
 | `WEAK` | Scored, but `NQC ≈ 0` or top `normScore` below the floor (§5.7) | the results, labelled low confidence, with the relax count |
-| `NO_RESULTS` | Non-empty query, no term in any path | tree only, plus the terms that matched nothing |
+| `NO_RESULTS` | Non-empty query, no term in any path | the list, labelled with which of its two situations this is — a declaration answered the query, or nothing did — plus the terms with no path anywhere |
 | `EMPTY` | Nothing scored at all | tree only |
 | `FAILED` | Ranker threw | tree only, error recorded on the run |
 

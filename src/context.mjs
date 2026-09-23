@@ -1248,7 +1248,18 @@ function rankingState(scored, tokens, df, n) {
     const missing = [...tokens].filter((t) => !(df.get(t) > 0)).sort();
     const shown = missing.slice(0, 12).map((t) => `\`${t}\``).join(', ');
     const rest = missing.length > 12 ? `, and ${missing.length - 12} more` : '';
-    return { state: 'NO_RESULTS', note: `No task term appears in any path in this repository. The tree below is a starting point. Terms that matched nothing: ${shown}${rest}.` };
+    // Two situations reach this state and they look nothing alike downstream. The
+    // declaration pass indexes the *names inside* files as well as their paths, so a
+    // query absent from every path can still be answered - `{title:'widget'}` here
+    // returns the file that declares `widgetRunner`. In that case the list is a
+    // match and the sentence "the tree below is a starting point" is false about it.
+    // Coverage is the right condition either way, because it is a path fact and the
+    // path is what a reader will check; the note is what has to tell the two apart.
+    const named = scored.some((f) => f.define > 0);
+    const opening = named
+      ? `No task term appears in any path in this repository, but the files below declare a name one of the terms is part of, so this list is a match rather than a guess. Terms with no path anywhere: ${shown}${rest}.`
+      : `No task term appears in any path in this repository. The tree below is a starting point. Terms that matched nothing: ${shown}${rest}.`;
+    return { state: 'NO_RESULTS', note: opening };
   }
   return { state: 'FULL', note: null };
 }
