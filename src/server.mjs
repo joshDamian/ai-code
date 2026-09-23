@@ -50,6 +50,11 @@ const sse = (res) => {
     connection: 'keep-alive',
     'access-control-allow-origin': '*',
   });
+  // The stream ends on its own: the tick cap closes it on a resting task, and the
+  // browser reconnects. Without this the gap before it does is the browser's default
+  // of about three seconds, during which the tab is showing a state nobody is
+  // updating - and the reconnect replays from STREAM_TAIL, so nothing is missed.
+  res.write('retry: 1000\n\n');
 };
 
 // The activity tab replays a bounded backlog on connect, not the whole journal.
@@ -89,13 +94,21 @@ function taskStream(req, res, id) {
         last = Math.max(last, e.id);
         res.write(`event: event\ndata: ${JSON.stringify(e)}\n\n`);
       }
+      // Asked once, and used for both the frame and the check below it, so the two
+      // cannot come from queries milliseconds apart - a task whose run ended between
+      // them would be sent as live in a frame that then terminates the stream.
+      //
+      // `live` is the run itself rather than a boolean, because the view needs to know
+      // *what* is running: which role, since when, and from which provider it fell
+      // back. Computing that client-side is what put a stale answer in the tab.
+      const live = svc.liveRun(id);
       // Written before the termination check, so the last frame a client sees is
       // the terminal state rather than the one before it.
-      res.write(`event: state\ndata: ${JSON.stringify({ task })}\n\n`);
+      res.write(`event: state\ndata: ${JSON.stringify({ task, live })}\n\n`);
 
-      const live = WORKING_STATES.has(task.state) || svc.store.taskHasLiveRun(id);
-      if (live) sawLive = true;
-      const done = ['COMPLETE', 'FAILED'].includes(task.state) || (!live && sawLive);
+      const busy = WORKING_STATES.has(task.state) || !!live;
+      if (busy) sawLive = true;
+      const done = ['COMPLETE', 'FAILED'].includes(task.state) || (!busy && sawLive);
       if (done || ticks++ > STREAM_MAX_TICKS) {
         clearInterval(timer);
         res.end();
@@ -203,7 +216,7 @@ const server = http.createServer(async (req, res) => {
       // render as the task it would port.
       if (op === 'show') {
         const task = svc.task(id);
-        return json(res, { task, runs: svc.store.listRuns(id), branches: svc.destinations(id), revision: svc.revision(task) });
+        return json(res, { task, runs: svc.store.listRuns(id), branches: svc.destinations(id), revision: svc.revision(task), live: svc.liveRun(id) });
       }
       if (op === 'refine') {
         const b = await body(req);

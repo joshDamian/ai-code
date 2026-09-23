@@ -468,15 +468,29 @@ export class Store {
       .all(cutoff);
   }
 
-  // Does this task have a run in flight anywhere, as told by the leases rather
-  // than by a status column? Used by the event stream to decide whether the task
-  // is still moving, and cheap enough to ask on every tick.
-  taskHasLiveRun(taskId) {
+  // The run this task has in flight, as told by the leases rather than by a status
+  // column. One definition, because three surfaces used to answer this question
+  // differently and disagree: the dashboard held a local boolean that died on reload
+  // and could not see a second tab, and both the dashboard and the TUI scanned
+  // runs.status - a column that lingers as 'running' after the process that owned it
+  // is gone, which is exactly the case where "still moving" is the wrong answer.
+  //
+  // Newest first, so a task whose second run has started while a dead first one is
+  // still marked running reports the one that is actually running.
+  liveRun(taskId) {
     const cutoff = new Date(Date.now() - LEASE_STALE_MS).toISOString();
-    const r = this.db
-      .prepare('SELECT count(*) c FROM runs r JOIN run_leases l ON l.run_id=r.id WHERE r.task_id=? AND l.heartbeat_at>=?')
-      .get(taskId, cutoff);
-    return r.c > 0;
+    return (
+      this.db
+        .prepare('SELECT r.* FROM runs r JOIN run_leases l ON l.run_id=r.id WHERE r.task_id=? AND l.heartbeat_at>=? ORDER BY r.started_at DESC')
+        .get(taskId, cutoff) || null
+    );
+  }
+
+  // Does this task have a run in flight anywhere? Cheap enough to ask on every tick
+  // of the event stream, which is what asks it - through the same query, so the
+  // frame the stream sends and the condition it stops on cannot disagree.
+  taskHasLiveRun(taskId) {
+    return !!this.liveRun(taskId);
   }
 
   // Tasks left in PLANNING with a plan that only ever reached the events table:

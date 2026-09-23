@@ -115,7 +115,13 @@ async function taskCommand(sub, rest) {
     const pid = rest[0] && !rest[0].startsWith('--') ? rest[0] : undefined;
     return out(s.store.listTasks(pid, state));
   }
-  if (sub === 'show') return out({ task: s.task(rest[0]), runs: s.store.listRuns(rest[0]) });
+  // `live` and `revision` come along because they are the two things a task's own row
+  // cannot answer: whether a run is in flight right now, and what the current plan
+  // changed. Both are null or empty on a task that has neither.
+  if (sub === 'show') {
+    const task = s.task(rest[0]);
+    return out({ task, runs: s.store.listRuns(rest[0]), live: s.liveRun(rest[0]), revision: s.revision(task) });
+  }
   // What a background job is doing, which the run rows alone do not answer: a
   // queued job has no run yet, and the job is what says so.
   if (sub === 'status') return out({ task: s.task(rest[0]), jobs: s.store.listJobs(rest[0]), runs: s.store.listRuns(rest[0]) });

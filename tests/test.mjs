@@ -268,6 +268,24 @@ test('failed runs keep their session id and only transient failures are resumabl
 
 function seedRun(s,t,id){s.store.addRun({id,taskId:t.id,role:'implementer',providerId:'a',modelId:'m',status:'running',startedAt:new Date().toISOString()});return id}
 
+test('the run a task is live on comes from the lease, not from the status column',()=>{
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const t=s.createTask(s.initProject('p',root).id,'x');
+  seedRun(s,t,'live');
+  s.store.heartbeat('live',t.id);
+  const live=s.liveRun(t.id);
+  assert.equal(live.runId,'live');
+  assert.deepEqual(Object.keys(live).sort(),['fallbackFrom','modelId','providerId','role','runId','startedAt'],'a narrow shape: the runs list already carries the cost and the tokens');
+  // Backdated past the staleness window, which is what a process that died mid-run
+  // leaves behind: the row still says running and nothing holds the lease.
+  s.store.db.prepare('UPDATE run_leases SET heartbeat_at=? WHERE run_id=?')
+    .run(new Date(Date.now()-LEASE_STALE_MS-1000).toISOString(),'live');
+  assert.equal(s.store.listRuns(t.id)[0].status,'running','the status column still claims it');
+  assert.equal(s.liveRun(t.id),null,'and the lease is what decides');
+  assert.equal(s.store.taskHasLiveRun(t.id),false,'one definition, so the two cannot disagree');
+});
+
 test('a run held by a fresh lease survives another process opening the store',()=>{
   const root=repo();
   const s=new Service(root,{allowMock:true});

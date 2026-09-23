@@ -914,6 +914,28 @@ export class Service {
     return branches(this.project(t.project_id).path).filter((b) => !b.startsWith('ai-code/'));
   }
 
+  // The run this task has in flight, or null. The server's answer to "is this task
+  // busy", which the dashboard needs on every stream tick and cannot compute for
+  // itself: a local flag dies on reload and cannot see a second tab, and a status
+  // column lies for as long as it takes something to notice the process is gone.
+  //
+  // Deliberately not the whole run row. The dashboard already receives the runs list,
+  // with the cost, tokens and error on it; this is the one fact that has to be true to
+  // the millisecond, so it is a narrow shape that nothing else can quietly widen into
+  // a second copy of that list.
+  liveRun(taskId) {
+    const r = this.store.liveRun(taskId);
+    if (!r) return null;
+    return {
+      runId: r.id,
+      role: r.role,
+      providerId: r.provider_id,
+      modelId: r.model_id,
+      startedAt: r.started_at,
+      fallbackFrom: r.fallback_from || null,
+    };
+  }
+
   // The current plan against the one it replaced.
   //
   // `changed` rather than `hasPrev` is the condition every surface keys off, because

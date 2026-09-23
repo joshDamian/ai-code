@@ -175,6 +175,53 @@ test('show carries the revision of the plan, against the one it replaced',async(
   }finally{server.stop()}
 });
 
+test('live is the lease, not the status column, and the stream carries it',async()=>{
+  // Two surfaces used to answer "is this task busy" by asking the runs table whether
+  // anything was running - a column that stays 'running' for as long as it takes
+  // somebody to notice the process that owned it is gone. The first two assertions
+  // are the ones that stop this being simplified back into that scan.
+  const {root,taskId}=seeded();
+  const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  const base=server.base;
+  try{
+    // Opened after the server so its reaper has already run, and nothing reaps again
+    // for as long as either store stays open. The ghost below is what that buys: a
+    // running row with no lease, which is the exact shape being asserted on.
+    const s=new Service(root,{allowMock:true,silent:true});
+    // Parked, not planning: a task sitting in a WORKING_STATE is busy on its state
+    // alone, which would leave the lease with nothing to prove.
+    s.store.updateTask(taskId,{state:'AWAITING_APPROVAL'});
+    s.store.addRun({id:'ghost',taskId,role:'implementer',providerId:'worker',modelId:'worker-m',status:'running',startedAt:new Date().toISOString()});
+    let show=JSON.parse((await get(`${base}/api/tasks/${taskId}/show`)).body);
+    assert.equal(show.live,null,'a running status is not liveness');
+    assert.equal(show.runs.find(r=>r.id==='ghost').status,'running','and the two really do disagree');
+    assert.equal(show.revision.changed,false,'the revision rides on the same payload');
+
+    // The lease is what makes it live. The task is resting and stays resting, so the
+    // lease is the only thing in the system saying anything is happening.
+    s.store.heartbeat('ghost',taskId);
+    show=JSON.parse((await get(`${base}/api/tasks/${taskId}/show`)).body);
+    assert.deepEqual(Object.keys(show.live).sort(),['fallbackFrom','modelId','providerId','role','runId','startedAt'],'a narrow shape: /api/runs already carries the tokens and the cost');
+    assert.equal(show.live.runId,'ghost');
+    assert.equal(show.live.role,'implementer');
+    assert.equal(show.live.providerId,'worker');
+    assert.equal(show.live.fallbackFrom,null);
+    assert.ok(Date.parse(show.live.startedAt)>0);
+
+    // Ticks land at 500ms, so the read at 900ms is at least one in, and the lease
+    // drops with one more tick still to come.
+    const reading=stream(`${base}/api/tasks/${taskId}/stream`,25000);
+    await new Promise(r=>setTimeout(r,900));
+    s.store.releaseLease('ghost');
+    const {body}=await reading;
+    assert.match(body,/^retry: 1000/,'the reconnect gap is a second, not the browser default of three');
+    const states=frames(body).filter(f=>f.type==='state');
+    assert.equal(states[0].data.live.runId,'ghost','the frame says which run, not merely that one exists');
+    assert.equal(states[0].data.task.id,taskId,'and carries the task beside it, so the plan refreshes without a poll');
+    assert.ok(states.some(f=>f.data.live===null),'the field goes null when the lease does, which is also what ends the stream');
+  }finally{server.stop()}
+});
+
 test('--background without a server fails with a message that says what to do',async()=>{
   const {root,taskId}=seeded();
   // A port nothing holds, chosen rather than assumed: the test is about what the CLI
