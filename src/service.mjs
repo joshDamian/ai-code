@@ -1718,6 +1718,43 @@ export class Service {
 
   // -- provider connectivity and diagnostics --------------------------------
 
+  // A connection test that passes is the one piece of evidence the breaker cannot
+  // generate for itself, so it is the one thing that can lift an OPEN circuit.
+  //
+  // afterSuccess() will not do it, deliberately: a run that squeaked through a lapsed
+  // cooldown proves nothing about whether the fault is gone. A person clicking Test
+  // after correcting a key is a different claim of a different kind - a direct
+  // assertion that the cause was addressed, made against the very call that failed.
+  // Without this there is no way back: the circuit holds for its full hour, and every
+  // attempt in the meantime is refused by the health check before it reaches the
+  // provider, so nothing that happens can shorten it.
+  //
+  // Narrow enough to be safe. The failures that opened the circuit stay in the window,
+  // so a provider that is still broken re-opens it on the next real run; and only the
+  // decision fields move, leaving last_error and last_failure_at as the record of why
+  // it opened. The card can then read "Healthy · 1 recent failure" for the rest of the
+  // window, which is the honest reading of "the last real run failed and the last test
+  // passed".
+  #clearCircuit(providerId) {
+    const row = this.store.getProviderHealthRow(providerId);
+    if (!row) return null;
+    // Read the state through effectiveHealth rather than off the row, so a cooldown
+    // that has already lapsed reports DEGRADED - the state routing has been using -
+    // instead of the stale OPEN still sitting in the column.
+    const was = effectiveHealth(row, Date.now()).state;
+    if (was === 'HEALTHY') return null;
+    this.store.writeProviderHealth({
+      ...row,
+      state: 'HEALTHY',
+      reason: null,
+      consecutive_successes: 0,
+      cooldown_until: null,
+      opened_at: null,
+      last_success_at: new Date().toISOString(),
+    });
+    return was;
+  }
+
   async testProvider(id, modelId) {
     const p = this.store.getProvider(id);
     if (!p) throw new Error('Provider not found');
@@ -1747,8 +1784,13 @@ export class Service {
         if (tx) text += tx;
       }
       this.store.updateRun(run.id, { status: 'succeeded', ended_at: new Date().toISOString(), duration_ms: Date.now() - started });
-      return { ok: true, provider: p.name, model: m.name, response: text.slice(-1000), runId: run.id };
+      return { ok: true, provider: p.name, model: m.name, response: text.slice(-1000), runId: run.id, cleared: this.#clearCircuit(p.id) };
     } catch (e) {
+      // Deliberately no health write. countRecentFailures excludes role='provider-test'
+      // (src/store.mjs), so the button is the one way to inspect the breaker without
+      // moving it - and it has to stay that way: a test failing because the machine is
+      // offline, or because a model name was mistyped, would otherwise count toward the
+      // circuit that a real run's failures opened, and the two are not the same claim.
       this.store.updateRun(run.id, { status: 'failed', ended_at: new Date().toISOString(), error: `${e.code || ''} ${e.message}`, duration_ms: Date.now() - started });
       return { ok: false, provider: p.name, model: m.name, error: e.message, code: e.code || classify(e.message), runId: run.id };
     } finally {

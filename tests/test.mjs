@@ -450,6 +450,67 @@ test('a provider test never counts toward the breaker',()=>{
   assert.equal(s.store.getProviderHealthRow('bad'),null);
 });
 
+test('a passing connection test clears the circuit it disproves',async()=>{
+  // The second half of the incident. The key had been corrected and DeepSeek's circuit
+  // still stood OPEN for its full hour, and nothing could shorten it: every run in the
+  // meantime was refused by the health check before it reached the provider, so the one
+  // piece of evidence that could have moved it was a passing test - and the Test button
+  // wrote nothing. A human saying "I fixed this" is a different claim from a run that
+  // happened to succeed, which is why afterSuccess() declines to lift an OPEN row.
+  const root=repo();
+  const s=new Service(root,{allowMock:true});
+  s.addProvider({id:'p',name:'Provider',kind:'mock',enabled:true,config:{routable:true}});
+  s.addModel({id:'p-m',providerId:'p',name:'p-m',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  failRun(s,'p','AUTH_FAILURE');
+  assert.equal(s.store.getProviderHealthRow('p').state,'OPEN');
+  // Asked of the health list rather than of eligible(), because a mock provider is
+  // never routable whatever its health - this is the gate, not the routing table.
+  assert.equal(s.providerHealthList().find(x=>x.providerId==='p').eligible,false,'an open circuit takes the provider out of routing');
+
+  // The provider is a mock, so the test really runs and really passes.
+  const r=await s.testProvider('p','p-m');
+  assert.equal(r.ok,true);
+  assert.equal(r.cleared,'OPEN','the result names what it lifted, so the card can say so');
+
+  const after=s.store.getProviderHealthRow('p');
+  assert.equal(after.state,'HEALTHY');
+  assert.equal(after.cooldown_until,null,'the cooldown is what routing reads, so it has to go');
+  assert.equal(after.opened_at,null);
+  assert.equal(after.last_error,'AUTH_FAILURE','what opened it stays on the record; it is just not what routing reads');
+  const h=s.providerHealthList().find(x=>x.providerId==='p');
+  assert.equal(h.eligible,true);
+  assert.equal(h.penalty,0);
+  // Still on the record, and deliberately: a provider that is genuinely still broken
+  // re-opens its circuit on the next real run rather than hiding behind a passing test.
+  // The code is named because the default window holds only the count-policy codes, and
+  // AUTH_FAILURE opens a circuit on its own without needing a count.
+  assert.equal(s.store.countRecentFailures('p',new Date(Date.now()-3600000).toISOString(),['AUTH_FAILURE']),1);
+  assert.equal(s.providerHealthList().find(x=>x.providerId==='p').eligible,true,'and the gate lets it through again');
+});
+
+test('a connection test that fails leaves the circuit exactly where it was',async()=>{
+  // The other half of the asymmetry. A failing test is not evidence about the provider:
+  // the key may be wrong, but so may the machine's network, and only a real run
+  // separates those. So the button moves the breaker in one direction only.
+  const root=repo();
+  const s=new Service(root,{allowMock:false});
+  s.addProvider({id:'ds',name:'DeepSeek',kind:'deepseek',enabled:true,config:{routable:true,apiKeyEnv:'AICODE_TEST_KEY_THAT_IS_NEVER_SET'}});
+  s.addModel({id:'ds-m',providerId:'ds',name:'ds-m',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  failRun(s,'ds','AUTH_FAILURE');
+  const opened=s.store.getProviderHealthRow('ds');
+  assert.equal(opened.state,'OPEN');
+
+  const r=await s.testProvider('ds','ds-m');
+  assert.equal(r.ok,false);
+  assert.equal(r.code,'AUTH_FAILURE','the test reports the real fault');
+  assert.equal(r.cleared,undefined,'and clears nothing, so the view has nothing to announce');
+  assert.deepEqual(s.store.getProviderHealthRow('ds'),opened,'the row is what it was, cooldown and all');
+  // The failing test run is not counted, even with the code named - which is the only
+  // shape of this assertion that means anything, since the default window excludes it
+  // by policy rather than by design.
+  assert.equal(s.store.countRecentFailures('ds',new Date(Date.now()-3600000).toISOString(),['AUTH_FAILURE']),1,'only the real run is in the window');
+});
+
 test('health thresholds from routing.json override the defaults',()=>{
   const root=repo();
   const s=twoProviders(new Service(root,{allowMock:true}));
