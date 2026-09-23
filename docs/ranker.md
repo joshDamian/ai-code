@@ -188,6 +188,40 @@ The two signals are not alternatives. Fan-out is what finds the file the task is
 The graph is what finds the file *next to* what fan-out found. Neither reaches 7 of
 7, and §5.14 names what reaches neither.
 
+**Built and measured — phase 3.** One hop, both edge directions, over the import
+graph of §5.2. Same process, same tree, `edge: 0` against the default:
+
+| tree | | unoffered | recall@15 macro | micro | MRR | nDCG@15 |
+|---|---|---|---|---|---|---|
+| today | graph off | 22 | 0.691 | 0.600 | 0.644 | 0.559 |
+| today | graph on | **20** | **0.744** | **0.636** | **0.657** | **0.581** |
+| `066446e` | graph off | 31 | 0.531 | 0.436 | 0.612 | 0.512 |
+| `066446e` | graph on | **20** | **0.746** | **0.636** | **0.701** | **0.554** |
+
+Two things are worth more than the deltas. **The gain is diffuse**: leave-one-out
+over all 14 gold-bearing runs is positive in every fold for recall and for nDCG,
+so it is not one run carrying the mean. And **the graph is tree-insensitive where
+the lexical pass is not** — the two trees start 16 points apart and the graph
+lands them at 0.744 and 0.746, recovering 11 of the 13 extra unoffered files on
+the older tree. Most of what the tree moves is files that have nothing to do with
+the task; an import edge is evidence the task's own files can supply.
+
+What it changes, per task, is legible rather than statistical: on the
+`provider health` task it swaps `bin/install-ai-code`, `dev/ai-code` and
+`web/index.html` for `src/service.mjs` and `src/store.mjs`, which is the two files
+that task has to touch. On the reviewer-verdict task it drops three `PLAN-*.md`
+documents. `web/api.mjs` — one of the three named misses above — comes back on the
+form-component task that §2.1 is about.
+
+**§5.2's literal `×50` is the one part of the design that measured worse than
+doing nothing.** Swept over the weight, recall peaks at 3–5, decays from 6, and
+crosses below the graph-disabled baseline by 20. The table's constant is an edge
+weight in Aider's PageRank, where the mass is normalised across the graph; read as
+a score multiplier it evicts the seeds it expands from and the window fills with
+one seed's neighbours. Dividing by the seed's fan-out is likewise not optional:
+undivided, *every* weight is worse than disabling the graph (macro recall 0.691 →
+0.544). Both are recorded in §5.2.
+
 ### 2.5 The tokenizer discards the tokens that discriminate
 
 `tokenize()` at `src/context.mjs:200`. Run on identifiers, before and after the
@@ -239,26 +273,45 @@ came from the absence of a file-type gate, not from a weak IDF (§5.3, §5.13).
 corpus, under a pinned one. They are not comparable and should not be quoted
 together; §2.1 remains the case study that motivated the work.
 
-`ai-code eval`, run against this repository after phase 1 — 22 planner runs, of
-which 14 have a recoverable gold set:
+**The table first written here does not reproduce, and that is the finding.** It
+read `0.772` macro and 18 unoffered "after phase 1". Re-run against the tree of
+`066446e` — the commit that carries it — the same code measures `0.531` and 31.
+Against today's working tree, `0.691` and 22. Neither is `0.772`, and a stray file
+in the working tree at measurement time does not account for the gap either. It is
+recorded as unreproducible rather than quietly replaced with a number that is.
 
-| | |
-|---|---|
-| usable runs | 14 |
-| runs with **no** gold (died before reading anything) | 8 |
-| runs whose gold exceeds the window, recall capped at `k/|gold|` | 5 |
-| answers across the uncapped runs | 55 |
-| **answers the ranking never offered** | **18 (33%)** |
-| recall@15, macro | 0.772 |
-| recall@15, micro | 0.673 |
-| MRR | 0.645 |
-| nDCG@15 | 0.581 |
+The cause is structural rather than an arithmetic slip: `evaluate()` re-ranks
+against **the tree on disk**, so every figure here is a property of *(ranker,
+tree)* and not of the ranker. Adding one file to the repository moves the baseline.
 
-The 33% is the number that corroborates §2.1 and the only one of these the ranker
-is unambiguously responsible for: a gold file that was offered *and* then read is
-partly a fact about the prompt, because a planner reads what it is handed. §2.1
-found 7 of 11 misses on its single task; the corpus rate is 18 of 55. Same
-direction, and the case study was an unusually bad task rather than a typical one.
+22 planner runs, 14 with a recoverable gold set, in two tree states. Both columns
+are the ranker as it was before phase 3:
+
+| | `066446e`'s tree | today's tree |
+|---|---|---|
+| usable runs | 14 | 14 |
+| runs with **no** gold (died before reading anything) | 8 | 8 |
+| runs whose gold exceeds the window, recall capped at `k/|gold|` | 5 | 5 |
+| answers across the uncapped runs | 55 | 55 |
+| **answers the ranking never offered** | **31 (56%)** | **22 (40%)** |
+| recall@15, macro | 0.531 | 0.691 |
+| recall@15, micro | 0.436 | 0.600 |
+| MRR | 0.612 | 0.644 |
+| nDCG@15 | 0.512 | 0.559 |
+
+The sixteen-point spread between the columns is the tree alone — larger than
+anything phases 3–7 have produced so far, and enough on its own to explain the
+unreproducible row above. **A before/after comparison is therefore only valid
+within one tree state**: run `ai-code eval`, change the ranker, run it again,
+committing nothing in between. Across commits this measures the repository as
+much as the code. Every phase-3 number in §2.4 is same-process and same-tree.
+
+The unoffered rate is the number that corroborates §2.1 and the only one of these
+the ranker is unambiguously responsible for: a gold file that was offered *and*
+then read is partly a fact about the prompt, because a planner reads what it is
+handed. §2.1 found 7 of 11 misses on its single task; the corpus rate is 22 of 55
+on today's tree. Same direction, and the case study was an unusually bad task
+rather than a typical one.
 
 **The macro/micro gap of ten points is a warning about quoting either alone.**
 Nine runs carry the macro number and four of them have a gold set of three files
@@ -278,10 +331,11 @@ rather fewer independent judgments than its run count suggests, and all five
 capped runs come from the one task.
 
 **What this means for the phases ahead.** The corpus is large enough to detect a
-change of the size phase 3 and 4 promise — 18 misses is a real target — and far
-too small to fit parameters against, which is why §5.13's weights stay in the last
-phase. It also means the honest headline for phase 3 is *misses recovered*, not a
-delta in mean recall: 18 is small enough to inspect one at a time.
+change of the size phase 3 and 4 promise — twenty-odd misses is a real target —
+and far too small to fit parameters against, which is why §5.13's weights stay in
+the last phase. It also means the honest headline for phase 3 is *misses
+recovered*, not a delta in mean recall: those are small enough to inspect one at a
+time, and §2.4 does.
 
 ---
 
@@ -334,6 +388,8 @@ Verified against source unless noted.
 | `contextLength` absent | Assume a safe floor | Guard skipped entirely |
 | Vendored / generated / lockfiles | Never spend a slot | ~~`ignored` has 12 names~~ **Fixed in phase 1** — 28 directory names, plus `NOISE_FILE` for lockfiles, `*.min.{js,cjs,mjs,css}` and `*.map`, which leave the *scoring* pass but stay in the tree |
 | Planner at root, implementer in worktree | Stated invariant | Both re-rank different trees; the gate uses the planner's set. Divergence is by design but undocumented |
+| Import specifier is an alias, a glob or built at runtime | Resolve, or draw no edge | **Phase 3** — only relative and Python-dotted specifiers resolve; `@/lib/x` and a computed path draw nothing and contribute no frontier. Degrades to the pre-phase-3 ranking rather than throwing |
+| Import scan reads a file it cannot open | Skip, continue | **Phase 3** — `readText()` returns null and the file contributes no edges; a binary read as UTF-8 is rejected on its NUL |
 
 ---
 
@@ -375,7 +431,7 @@ Aider's edge weights compound. The portable set, with the reason for each:
 | long snake/kebab/camel identifier (≥8 chars) | ×10 | proxies "this name carries meaning" |
 | leading underscore (private) | ×0.1 | privacy convention as a relevance signal |
 | **defined in >5 files** | **×0.1** | demotes `task` (7) and `line` (5) — the ambiguous tokens |
-| referenced *from an already-selected file* | ×50 | the dominant term; turns global popularity into frontier expansion |
+| referenced *from an already-selected file* | ~~×50~~ **×3** | the dominant term; turns global popularity into frontier expansion |
 | reference count | `sqrt(n)` | a file that says `logger` 200× must not swamp a rare domain symbol |
 
 Additive scoring cannot produce this spread from the same signals, and the spread
@@ -385,6 +441,33 @@ These weights multiply along **graph edges**, not term frequencies inside a
 similarity function. §5.13's BM25F field weights are a separate mechanism and are
 capped at `1 + k1 = 2.2×`; the ×10 and ×50 above are not available there. The two
 compose — BM25F orders candidates, the graph re-weights them.
+
+**Measured in phase 3, and two of the three consequences are the opposite of what
+this section assumed.** The frontier ships; the constants do not survive contact.
+
+1. **`×50` is worse than no graph.** It is an edge weight in a PageRank, where the
+   mass is normalised across the graph and a large weight redistributes rather than
+   scales. Read as a score multiplier — which is what the table above invites — it
+   evicts the seeds it expands from: a seed scoring 15 hands each of its imports
+   750, and the window becomes that seed's import list. Swept over the corpus,
+   macro recall peaks at 3–5, decays from 6, and crosses below the
+   graph-disabled baseline by 20. Shipped at 3, where the pull is worth about one
+   lexical hit.
+2. **`sqrt(n)` is not enough normalisation.** The reference-count term is applied to
+   the edge's *source* as an outright divisor on the seed's fan-out, and `1 + n`
+   beat `1 + sqrt(n)` by three points of macro recall. Undivided, every weight is
+   worse than disabling the graph entirely (0.691 → 0.544): nine of
+   `web/views/task-detail.mjs`'s imports beat two of `src/server.mjs`'s purely on
+   that seed's size. This is §5.3's rule, not a new one — a signal's weight has to
+   fall as its coverage rises — and the measured size of the effect says the
+   normalisation is the load-bearing half of the design, not the multiplier.
+3. **The pull is bounded by the seed's own score**, so a pull a seed generates
+   cannot evict the seed that generated it. This one held.
+
+The generalisable finding: on this corpus the value is in *breaking the alphabetical
+tie toward adjacency*, not in a dominant term. §2.2's failure was 59 files tied at
+an identical score; a pull of a few points settles that, and 750 does not — it
+replaces one arbitrary order with another.
 
 ### 5.3 Every signal must be self-normalising
 
@@ -886,6 +969,23 @@ adversarial orders blow it up.
 3. **Graph expansion** — §5.2's ×50 edge rule, named explicitly, plus the one-hop
    import scan that feeds it. Measured at **3 of 7** misses in §2.4, for near-zero
    cost: it is a regex over files the ranker already reads.
+
+   **Landed — `importGraph()` and `frontier()` in `src/context.mjs`.** The scan
+   reads 648 KB of source in one regex pass and resolves five spellings of a local
+   import (ESM, dynamic, `require`, side-effect, and Python's dots-as-path form)
+   plus its own reverse direction. Two departures from the section above, both
+   forced by measurement rather than preference: **the ×50 ships as ×3**, because
+   at 50 the graph is worse than not having one, and **the seed's fan-out divides
+   its pull**, because undivided every weight is worse than not having a graph.
+   Both are in §5.2 with the sweep; §2.4 has the before/after.
+
+   The result is +5.3 macro recall / −2 unoffered on today's tree, and +21.5 /
+   −11 on the tree of `066446e`. That second column is the more interesting one:
+   it says the graph is what makes the score stop depending on which files happen
+   to be in the working tree, which §2.6 shows costs 16 points on its own.
+
+   Reversible by construction: `edge: 0` is the pre-phase-3 ranking exactly, and
+   a test asserts it still is.
 4. **Symbol-level retrieval with definition fan-out** (§5.1). **1 of 7** misses,
    but the one the graph cannot reach from a cold start — an import edge needs a
    seed, and this is what supplies it.
@@ -914,6 +1014,23 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   dependent and will drift.
 - The per-run recall figures (38–46%) treat directories reported by `Grep`/`Glob`
   as non-files. Counting them differently moves the number by a few points.
+- **§2.6's original baseline (`0.772` macro, 18 unoffered) does not reproduce** at
+  the commit that carries it or at the tree in use now, and no explanation was
+  found for the difference — not a stray file in the working tree, and not the
+  recency signal. It is treated as unreliable rather than reconciled, and §2.6
+  now reports two tree states measured directly instead.
+- Every `ai-code eval` figure is a property of (ranker, tree). §2.6 measures the
+  tree effect at 16 points of macro recall, so any comparison spanning a commit
+  is confounded. Same-process, same-tree only.
+- §5.2's measured weights come from 14 gold-bearing runs over 6 tasks, with 5 runs
+  capped and two tasks carrying 8 of the 14. The *direction* of the two findings
+  is well supported — the sweeps are monotone across a wide range and the
+  leave-one-out is positive in every fold — but the values 3 and `1 + n` are not
+  fitted, and §5.3's calibration phase can move them.
+- The import scan resolves a specifier only within the repository. An alias
+  (`@/lib/x`) or a path built at runtime draws no edge, so a repository that uses
+  either gets less frontier than the design assumes — untested, and this
+  repository has neither.
 - Prior-art figures are from the cited sources, not reproduced here. Anything in
   §5 not attributed to a measurement or a source is inference.
 - The prior-art numbers were gathered by research agents from fetched sources; the

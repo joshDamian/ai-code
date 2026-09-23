@@ -42,6 +42,10 @@ export const CONTEXT_DEFAULTS = {
   // Character caps for the two generated documents.
   architecture: 8000,
   conventions: 4000,
+  // §5.2's edge rule: how hard a file that already won a slot pulls on the files
+  // it imports and is imported by. 0 turns the graph off, which is how the
+  // harness measures it rather than asserting it - see the note on the value.
+  edge: 3,
 };
 
 export function contextConfig(configured) {
@@ -303,6 +307,143 @@ function readForPrompt(root, file, maxChars) {
   }
 }
 
+// -- the import graph -------------------------------------------------------
+
+// Extensions worth a regex pass for imports. Anything else - a lockfile, a
+// markdown doc, an asset - can name a path in prose, and an edge drawn from prose
+// is a wrong edge. The set is deliberately short: a language missing from it
+// contributes no edges, which costs recall, while a wrong entry costs precision on
+// every task in a repository of that kind.
+const SOURCE_FILE = /\.(mjs|cjs|js|jsx|ts|tsx|py|rb)$/;
+
+// Every form that names another file. In order: an ESM re-export or import, a
+// dynamic `import()`, a CommonJS `require()`, Python's `from x import y` and bare
+// `import x`, and the side-effect import `import './x.mjs'` - last because it
+// shares a prefix with the dynamic form and the `from` forms have to win where
+// they can. The leading `(?:^|[^.\w])` keeps the ESM alternatives from firing on
+// the tail of a longer word, so a comment mentioning `transform` is not a
+// specifier.
+const IMPORT_SPEC = /(?:^|[^.\w])from\s*['"]([^'"]+)['"]|import\s*\(\s*['"]([^'"]+)['"]\s*\)|require\s*\(\s*['"]([^'"]+)['"]\s*\)|^[ \t]*from\s+([.\w]+)\s+import\b|^[ \t]*import\s+([.\w]+)|(?:^|[^.\w])import\s+['"]([^'"]+)['"]/gm;
+
+// What a bare module name may resolve to. The empty string is first so an
+// explicit extension wins over a guessed one.
+const MODULE_EXT = ['', '.mjs', '.cjs', '.js', '.jsx', '.ts', '.tsx', '.py', '.rb'];
+
+// A specifier, as the file in this tree it denotes, or null when it denotes none.
+// A bare specifier is a package or a stdlib module, which is not in the tree, so
+// only the dotted form Python writes for its own modules is given a second chance.
+//
+// Cost of being wrong here is asymmetric and that is why it errs toward resolving:
+// a false positive costs one low-weight edge, and Aider's edge weights are what
+// the ranking is built on, while a false negative loses an edge that the frontier
+// expansion has no other way to recover.
+function resolveSpecifier(from, spec, known) {
+  const py = /\.py$/.test(from);
+  let base;
+  if (py) {
+    // Python writes a relative import as leading dots rather than as a path:
+    // `.helper` is the sibling module `helper` and `..util` is `util` one package
+    // up, so one dot means the current directory and every further dot means a
+    // parent. Read as a path this resolves `pkg/.helper`, which is nothing. The
+    // branch is keyed on the importing file, not on the specifier: `./deep.mjs`
+    // and `.helper` both start with a dot and mean entirely different things.
+    const dots = spec.startsWith('.') ? spec.match(/^\.+/)[0].length : 0;
+    const rest = (dots ? spec.replace(/^\.+/, '') : spec).split('.').filter(Boolean);
+    const up = new Array(Math.max(0, dots - 1)).fill('..');
+    base = path.normalize(path.join(path.dirname(from), ...up, ...rest));
+  } else if (spec.startsWith('.')) {
+    base = path.normalize(path.join(path.dirname(from), spec));
+  } else {
+    // A bare specifier in JS is a package or a builtin. Neither is in this tree.
+    return null;
+  }
+  for (const ext of MODULE_EXT) if (known.has(base + ext)) return base + ext;
+  // A directory import means its index. `__init__` is Python's spelling of the
+  // same thing.
+  for (const name of ['index', '__init__']) {
+    for (const ext of MODULE_EXT.slice(1)) {
+      const c = path.join(base, name + ext);
+      if (known.has(c)) return c;
+    }
+  }
+  return null;
+}
+
+// Which files name which others, and the reverse, in both directions.
+//
+// One pass over the files the walk already returned, at 648 KB of source for this
+// repository - the cost §2.4 calls near-zero, and it is a regex rather than a
+// parse because a false positive costs a low-weight edge, not a wrong answer.
+//
+// Both directions are kept because they are different signals and the frontier
+// needs both: a seed's imports are the files it is built on, and its importers are
+// the files built on it. Keeping only one loses half the frontier.
+export function importGraph(root, files) {
+  const known = new Set(files);
+  const imports = new Map();
+  const importedBy = new Map();
+  for (const f of files) { imports.set(f, new Set()); importedBy.set(f, new Set()); }
+  for (const file of files) {
+    if (!SOURCE_FILE.test(file)) continue;
+    const text = readText(path.join(root, file));
+    // A binary file read as UTF-8 yields replacement characters, and a NUL means
+    // it was never text at all.
+    if (!text || text.includes('\u0000')) continue;
+    for (const m of text.matchAll(IMPORT_SPEC)) {
+      const spec = m[1] || m[2] || m[3] || m[4] || m[5] || m[6];
+      if (!spec) continue;
+      const target = resolveSpecifier(file, spec, known);
+      if (!target || target === file) continue;
+      imports.get(file).add(target);
+      importedBy.get(target).add(file);
+    }
+  }
+  return { imports, importedBy };
+}
+
+// The frontier: what one hop of §5.2's edge rule reaches from the files the
+// lexical pass already picked, and how hard it pulls on each.
+//
+// The pull is `score(seed) × weight / (1 + fanout(seed))`, and both divisions are
+// measured rather than assumed. Against the 22-run corpus in `ai-code eval`:
+//
+//  - **`×50` is worse than no graph at all.** The table's constant is an edge
+//    weight in Aider's PageRank, where the mass is normalised; read as a score
+//    multiplier it evicts the seeds it expands from, and the window fills with
+//    one seed's neighbours. Swept over `edge`, recall peaks at 3-5 and decays
+//    from 6 onward, crossing below the graph-disabled baseline by 20.
+//  - **Fan-out division is not optional.** Undivided, every weight is strictly
+//    worse than disabling the graph (macro recall 0.69 -> 0.54): nine of
+//    `web/views/task-detail.mjs`'s imports beat the two of `src/server.mjs`
+//    purely on that seed's size. This is §5.3's "a signal's weight falls as its
+//    coverage rises", and §5.2's `sqrt(n)` reference-count term applied to the
+//    edge's source; `1 + n` beat `1 + sqrt(n)` by 3 points of macro recall.
+//
+// At 3 the pull is worth about one lexical hit, which is the calibration to
+// state rather than the sweep's argmax: `edge` 3 and 4 tie on recall and 3 leads
+// on nDCG, and the plateau is wide enough that the exact value inside it is not
+// load-bearing. Phase 5 owns the real calibration; this is a defensible default
+// with the measurement recorded, not a tuned constant.
+//
+// The pull is a max over seeds, not a sum, which is deliberate: summing makes a
+// file's rank a function of its degree, and the file imported by nine seeds wins
+// for being popular rather than for being relevant - the exact failure §5.2's
+// `1/(1+df)` term exists to prevent on the lexical side.
+//
+// Deterministic: the max is over a Set, but only the pull is kept, so the order
+// two equal pulls are discovered in cannot reach the output.
+function frontier(seeds, scores, graph, weight) {
+  const pull = new Map();
+  for (const seed of seeds) {
+    const strength = scores.get(seed) || 0;
+    const neighbours = new Set([...(graph.imports.get(seed) || []), ...(graph.importedBy.get(seed) || [])]);
+    if (!neighbours.size) continue;
+    const scale = (strength * weight) / (1 + neighbours.size);
+    for (const n of neighbours) pull.set(n, Math.max(pull.get(n) || 0, scale));
+  }
+  return pull;
+}
+
 // Ranks every file in the tree against the task and returns the best few, with
 // their contents. Deterministic: no model is consulted, and the same task against
 // the same tree always produces the same list.
@@ -326,7 +467,31 @@ export function relevantFiles(project, task, options = {}) {
   // contexts on two machines - which breaks the cache and the reproducibility the
   // ranking is supposed to have. Nearly every score here is a tie, so this is not
   // a cosmetic difference.
-  scored.sort((a, b) => b.score - a.score || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const byPath = (a, b) => b.score - a.score || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  scored.sort(byPath);
+
+  // One hop out from the files the lexical pass picked, which is where the seven
+  // named misses in §2.4 live: they score nothing lexically - `src/service.mjs`
+  // shares no token with the task - while every one of them is named by a file
+  // that already won a slot. A file the frontier introduces starts from 0 and is
+  // carried entirely by the pull, which is the point: it has no lexical evidence
+  // to be ranked on.
+  if (cfg.edge > 0 && scored.length) {
+    const entry = new Map(scored.map((f) => [f.path, f]));
+    const strength = new Map(scored.map((f) => [f.path, f.score]));
+    const seeds = scored.slice(0, limit).map((f) => f.path);
+    const pull = frontier(seeds, strength, importGraph(root, rankable), cfg.edge);
+    for (const [p, add] of pull) {
+      const hit = entry.get(p);
+      // A neighbour already in the list keeps its own lexical score and gains the
+      // pull on top; one the lexical pass never scored enters on the pull alone.
+      // `graph` marks which, because a score that appears from nowhere is the
+      // first thing a reader of this output will ask about.
+      if (hit) hit.score += add;
+      else scored.push({ path: p, score: add, graph: true });
+    }
+    scored.sort(byPath);
+  }
 
   const selected = scored.slice(0, limit).map((f) => f.path);
   // Second pass, so a test file is picked up for the source it covers even when

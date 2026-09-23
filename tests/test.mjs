@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,inspect,importGraph} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -769,6 +769,95 @@ test('a lockfile and a minified bundle stay in the tree but never take a slot',(
   assert.ok(picked.paths.includes('src/package-export.mjs'),'while the real source still does');
   const built=buildTaskContext(p,task,{role:'planner'});
   assert.ok(built.tree.includes('package-lock.json'),'but the tree still lists it, so the agent can find it');
+});
+
+test('the import graph follows the specifiers that name a file here, and only those',()=>{
+  // Five spellings of "this file, over there" in one fixture, plus the two that
+  // name something which is not in the tree at all. The confusion this guards
+  // against is Python's: `.helper` is a sibling module, not a path, and read as
+  // one it resolves to `pkg/.helper`, which exists nowhere.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  const w=(f,t)=>{fs.mkdirSync(path.dirname(path.join(root,f)),{recursive:true});fs.writeFileSync(path.join(root,f),t)};
+  w('src/a.mjs',[
+    "import {b} from './b.mjs';",
+    "import {c} from '../lib/c.mjs';",
+    "import fs from 'node:fs';",
+    "import express from 'express';",
+    "const d = await import('./d.mjs');",
+    "const e = require('./e.cjs');",
+    "export {f} from './f.ts';",
+  ].join('\n'));
+  w('src/b.mjs','export const b=1;\n');
+  w('lib/c.mjs','export const c=1;\n');
+  w('src/d.mjs','export const d=1;\n');
+  w('src/e.cjs','module.exports={};\n');
+  w('src/f.ts','export const f=1;\n');
+  w('pkg/main.py','from .helper import x\nfrom pkg.helper import y\nimport os\n');
+  w('pkg/helper.py','x=1\n');
+  const files=inspect(root).files;
+  const {imports,importedBy}=importGraph(root,files);
+  const got=(f)=>[...imports.get(f)].sort();
+  assert.deepEqual(got('src/a.mjs'),['lib/c.mjs','src/b.mjs','src/d.mjs','src/e.cjs','src/f.ts'],
+    'esm, cjs, dynamic import and re-export all name a file; a package and a builtin name none');
+  assert.deepEqual(got('pkg/main.py'),['pkg/helper.py'],'both python spellings resolve to the same file');
+  assert.equal(importedBy.get('lib/c.mjs').has('src/a.mjs'),true,'the reverse edge is kept, not only the forward one');
+  assert.equal(importedBy.get('src/a.mjs').size,0,'and an unimported file has none');
+});
+
+test('a file the task never names is offered for the file it is imported by',()=>{
+  // §2.4's mechanism, on a fixture: `src/deep.mjs` shares no token with the task
+  // and scores nothing lexically, but the file that won a slot imports it. No git
+  // history here, so the recency term cannot mask the difference - every score
+  // below is lexical or graph and nothing else.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','hub.mjs'),"import {d} from './deep.mjs';\nexport const h=1;\n");
+  fs.writeFileSync(path.join(root,'src','deep.mjs'),'export const d=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const task={id:'t',title:'hub',description:'',plan:null};
+  const off=relevantFiles(p,task,{cwd:root,config:{edge:0}});
+  const on=relevantFiles(p,task,{cwd:root});
+  assert.ok(!off.paths.includes('src/deep.mjs'),'with the graph off the file is invisible to the task');
+  assert.ok(on.paths.includes('src/deep.mjs'),'one hop of the import graph reaches it');
+  assert.equal(on.scores.find(f=>f.path==='src/deep.mjs').graph,true,'and it is marked as entering by the graph, not by a score it does not have');
+  assert.ok(on.paths.includes('src/hub.mjs'),'the seed that pull came from keeps its own slot');
+});
+
+test('a seed with a wide fan-out cannot flood the window with its imports',()=>{
+  // Two seeds of equal lexical weight. `hub.mjs` imports seven files, `narrow.mjs`
+  // imports one, so undivided the seven would take the window on the strength of
+  // one seed - which is what the sweep measured: without the fan-out divisor every
+  // edge weight is worse than disabling the graph entirely (macro recall 0.69 to
+  // 0.54 on the corpus).
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  const wide=[...Array(7)].map((_,i)=>`./wide${i}.mjs`);
+  fs.writeFileSync(path.join(root,'src','hub.mjs'),wide.map((w)=>`import '${w}';`).join('\n')+'\nexport const h=1;\n');
+  for(const [i] of wide.entries())fs.writeFileSync(path.join(root,'src',`wide${i}.mjs`),'export const w=1;\n');
+  fs.writeFileSync(path.join(root,'src','narrow.mjs'),"import {t} from './target.mjs';\nexport const n=1;\n");
+  fs.writeFileSync(path.join(root,'src','target.mjs'),'export const t=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const picked=relevantFiles(p,{id:'t',title:'hub narrow',description:'',plan:null},{cwd:root});
+  const rank=(f)=>picked.paths.indexOf(f);
+  assert.ok(rank('src/target.mjs')>=0&&rank('src/wide0.mjs')>=0,'both frontiers are reached');
+  assert.ok(rank('src/target.mjs')<rank('src/wide0.mjs'),'the narrow seed speaks louder about its one import than the wide seed does about each of seven');
+  assert.ok(rank('src/hub.mjs')>=0&&rank('src/narrow.mjs')>=0,'and a pull a seed generated never evicts the seed that generated it');
+});
+
+test('the graph is reversible with edge 0, and deterministic either way',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','hub.mjs'),"import {d} from './deep.mjs';\nexport const h=1;\n");
+  fs.writeFileSync(path.join(root,'src','deep.mjs'),'export const d=1;\n');
+  fs.writeFileSync(path.join(root,'src','other.mjs'),'export const o=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const task={id:'t',title:'hub',description:'',plan:null};
+  // Every score the frontier can add comes out of a Set, which is the iteration
+  // §5.11 names as the determinism hazard, so the second call is the assertion.
+  const a=relevantFiles(p,task,{cwd:root,config:{edge:0}}).paths;
+  const b=relevantFiles(p,task,{cwd:root,config:{edge:0}}).paths;
+  assert.deepEqual(a,b);
+  assert.ok(!a.includes('src/deep.mjs'),'edge 0 is the ranking as it was before the graph, so a change it causes is attributable');
 });
 
 test('vendored and editor directories are dropped at the walk',()=>{
