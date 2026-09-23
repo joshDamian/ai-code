@@ -1,8 +1,8 @@
 import { html, useState, useEffect, useMemo } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
-import { Spinner } from '../components/spinner.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
+import { SkeletonTable } from '../components/skeleton.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
 import { DataTable } from '../components/data-table.mjs';
 import { Select } from '../components/form.mjs';
@@ -11,6 +11,7 @@ export function Runs() {
   const [runs, setRuns] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
   const [roleFilter, setRoleFilter] = useState('');
+  const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState(null);
 
   async function load() {
@@ -30,10 +31,16 @@ export function Runs() {
 
   const filtered = useMemo(() => {
     if (!runs) return [];
-    return runs.filter((r) => (!statusFilter || r.status === statusFilter) && (!roleFilter || r.role === roleFilter));
-  }, [runs, statusFilter, roleFilter]);
+    const q = query.trim().toLowerCase();
+    return runs.filter(
+      (r) =>
+        (!statusFilter || r.status === statusFilter) &&
+        (!roleFilter || r.role === roleFilter) &&
+        (!q || [r.role, r.provider_id, r.model_id].some((v) => String(v || '').toLowerCase().includes(q)))
+    );
+  }, [runs, statusFilter, roleFilter, query]);
 
-  if (!runs) return html`<${Spinner} message="Loading runs..." />`;
+  if (!runs) return html`<${SkeletonTable} rows=${8} cols=${6} />`;
 
   const columns = [
     { key: 'role', label: 'Role', sortable: true },
@@ -49,8 +56,18 @@ export function Runs() {
   return html`
     <div class="view-runs">
       <div class="view-toolbar">
-        <${Select} label="Status" value=${statusFilter} onChange=${setStatusFilter} options=${[{ value: '', label: 'All' }, ...statuses.map((s) => ({ value: s, label: s }))]} />
-        <${Select} label="Role" value=${roleFilter} onChange=${setRoleFilter} options=${[{ value: '', label: 'All' }, ...roles.map((s) => ({ value: s, label: s }))]} />
+        <div class="row">
+          <${Select} label="Status" value=${statusFilter} onChange=${setStatusFilter} options=${[{ value: '', label: 'All' }, ...statuses.map((s) => ({ value: s, label: s }))]} />
+          <${Select} label="Role" value=${roleFilter} onChange=${setRoleFilter} options=${[{ value: '', label: 'All' }, ...roles.map((s) => ({ value: s, label: s }))]} />
+        </div>
+        <input
+          class="input search-input"
+          type="search"
+          data-search
+          placeholder="Search runs…"
+          value=${query}
+          onInput=${(e) => setQuery(e.target.value)}
+        />
       </div>
       ${
         filtered.length

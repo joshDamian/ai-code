@@ -1,8 +1,8 @@
 import { html, useState, useEffect, useMemo } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
-import { Spinner } from '../components/spinner.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
+import { SkeletonRows } from '../components/skeleton.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
 import { TextArea, Select } from '../components/form.mjs';
 
@@ -20,6 +20,7 @@ export function Tasks({ navigate }) {
   const [projects, setProjects] = useState([]);
   const [tab, setTab] = useState('all');
   const [showCancelled, setShowCancelled] = useState(false); // false = hide, the default
+  const [query, setQuery] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [projectId, setProjectId] = useState('');
   const [title, setTitle] = useState('');
@@ -60,9 +61,12 @@ export function Tasks({ navigate }) {
   const filtered = useMemo(() => {
     if (!tasks) return [];
     const t = TABS.find((x) => x.id === tab);
-    if (t.states) return tasks.filter((x) => t.states.includes(x.state));
-    return showCancelled ? tasks : tasks.filter((x) => x.state !== 'CANCELLED');
-  }, [tasks, tab, showCancelled]);
+    const base = t.states ? tasks.filter((x) => t.states.includes(x.state)) : showCancelled ? tasks : tasks.filter((x) => x.state !== 'CANCELLED');
+    const q = query.trim().toLowerCase();
+    // The tab is the filter of record; the query narrows what the tab already shows.
+    if (!q) return base;
+    return base.filter((x) => String(x.title || '').toLowerCase().includes(q));
+  }, [tasks, tab, showCancelled, query]);
 
   async function submit(e) {
     e.preventDefault();
@@ -85,7 +89,7 @@ export function Tasks({ navigate }) {
     }
   }
 
-  if (!tasks) return html`<${Spinner} message="Loading tasks..." />`;
+  if (!tasks) return html`<${SkeletonRows} count=${6} />`;
 
   return html`
     <div class="view-tasks">
@@ -100,6 +104,14 @@ export function Tasks({ navigate }) {
           )}
         </div>
         <div class="row">
+          <input
+            class="input search-input"
+            type="search"
+            data-search
+            placeholder="Search tasks…"
+            value=${query}
+            onInput=${(e) => setQuery(e.target.value)}
+          />
           ${
             // Only the All tab mixes cancelled tasks in, so this is the only tab the
             // toggle has anything to do on. Wrapped with the New Task button so the

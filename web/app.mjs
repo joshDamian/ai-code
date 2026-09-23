@@ -1,7 +1,8 @@
 // Router, global app shell, Preact mount point, global keyboard shortcuts.
-import { html, render, Fragment, useState, useEffect, useRef } from './lib.mjs';
+import { html, render, Fragment, useState, useEffect, useRef, useCallback } from './lib.mjs';
 import { Layout } from './components/layout.mjs';
 import { ShortcutLegend } from './components/kbd.mjs';
+import { CommandPalette } from './components/command-palette.mjs';
 import { Overview } from './views/overview.mjs';
 import { Projects } from './views/projects.mjs';
 import { Tasks } from './views/tasks.mjs';
@@ -57,6 +58,11 @@ function requestNewTask() {
 function App() {
   const [route, setRoute] = useState(parseHash());
   const [legendOpen, setLegendOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  // The breadcrumb's subject: only the page itself knows what it is showing, so a
+  // view that has one hands it up. Null everywhere else, and nulled on the way out
+  // so a task's title cannot follow the user to another view.
+  const [pageTitle, setPageTitle] = useState(null);
 
   // The keydown listener is bound once; keep the current legend state where it
   // can read it without rebinding on every toggle.
@@ -64,6 +70,22 @@ function App() {
   useEffect(() => {
     legendRef.current = legendOpen;
   }, [legendOpen]);
+
+  // Likewise for the palette, whose Escape key would otherwise be handled as "clear
+  // the search box" by the branch below.
+  const paletteRef = useRef(false);
+  useEffect(() => {
+    paletteRef.current = paletteOpen;
+  }, [paletteOpen]);
+
+  // New task is the palette's one action that is not a navigation: the form belongs
+  // to the tasks view, so the route is set first and the view's own trigger clicked
+  // once that view has rendered - a hash change and a click cannot both happen in
+  // the same turn.
+  const newTask = useCallback(() => {
+    navigate('#/tasks');
+    setTimeout(requestNewTask, 0);
+  }, []);
 
   useEffect(() => {
     function onHashChange() {
@@ -83,11 +105,25 @@ function App() {
     }
 
     function onKeyDown(e) {
-      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
       const key = e.key;
+
+      // The one shortcut that is pressed with a modifier held, so it is matched
+      // before the branch below drops every other modified key. `key` rather than
+      // `code` because Ctrl+K and Cmd+K are the same intent on either platform.
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+        return;
+      }
+
+      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
 
       // Esc works from anywhere, including inside a text field.
       if (key === 'Escape') {
+        if (paletteRef.current) {
+          setPaletteOpen(false);
+          return;
+        }
         if (legendRef.current) {
           setLegendOpen(false);
           return;
@@ -165,7 +201,7 @@ function App() {
       view = html`<${Tasks} navigate=${navigate} />`;
       break;
     case 'task-detail':
-      view = html`<${TaskDetail} id=${route.id} navigate=${navigate} />`;
+      view = html`<${TaskDetail} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
       break;
     case 'providers':
       view = html`<${Providers} navigate=${navigate} />`;
@@ -187,13 +223,20 @@ function App() {
   }
 
   const navRoute = route.view === 'task-detail' ? 'tasks' : route.view;
+  const title = route.view === 'task-detail' ? pageTitle : null;
 
   return html`
     <${Fragment}>
-      <${Layout} route=${navRoute}>
+      <${Layout} route=${navRoute} title=${title}>
         ${view}
       <//>
       <${ShortcutLegend} open=${legendOpen} onClose=${() => setLegendOpen(false)} />
+      <${CommandPalette}
+        open=${paletteOpen}
+        onClose=${() => setPaletteOpen(false)}
+        navigate=${navigate}
+        onNewTask=${newTask}
+      />
     <//>
   `;
 }

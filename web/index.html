@@ -33,6 +33,21 @@
   --radius:10px;
   --radius-sm:6px;
 
+  /* ---- spacing scale ----
+     Every gap, pad and offset in the stylesheet is a step on this scale, which is
+     what makes the rhythm read as one system rather than as a pile of nearby
+     numbers. A value below 4px is chrome rather than rhythm - a keycap's inset, a
+     badge's padding, a hairline offset - and stays a literal; so does anything
+     above 40px, which is layout geometry (an overlay's top inset, a pane's max
+     height) and not spacing at all. */
+  --space-1:4px;
+  --space-2:8px;
+  --space-3:12px;
+  --space-4:16px;
+  --space-5:20px;
+  --space-6:24px;
+  --space-7:32px;
+
   /* ---- chart tokens ----
      Categorical hues in fixed slot order (never cycled, never generated), plus
      the chrome the inline SVG charts draw against. Both the eight hues and the
@@ -66,7 +81,7 @@ body{
   -webkit-font-smoothing:antialiased;
 }
 button,input,select,textarea{font:inherit;color:inherit}
-h1,h2,h3{margin:0 0 8px;font-weight:650}
+h1,h2,h3{margin:0 0 var(--space-2);font-weight:650}
 h1{font-size:22px}
 h2{font-size:15px;color:var(--text)}
 h3{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
@@ -77,68 +92,108 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 
 /* ---- app shell ---- */
 .app-shell{display:grid;grid-template-columns:230px 1fr;min-height:100vh}
-.sidebar{border-right:1px solid var(--line);padding:22px 14px;background:#0d1014;display:flex;flex-direction:column}
-.logo{padding:0 10px 26px}
+.sidebar{border-right:1px solid var(--line);padding:var(--space-6) var(--space-4);background:#0d1014;display:flex;flex-direction:column}
+.logo{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--space-2);padding:0 var(--space-3) var(--space-6)}
+.sidebar-toggle{background:none;border:0;color:var(--muted);padding:var(--space-1) var(--space-2);border-radius:var(--radius-sm);font-size:13px;line-height:1;flex:0 0 auto}
+.sidebar-toggle:hover{background:var(--panel2);color:var(--text);opacity:1}
 .logo-title{font-weight:800;font-size:17px;letter-spacing:.03em}
 .logo-sub{font-size:12px;margin-top:2px}
 .nav{display:flex;flex-direction:column;gap:2px}
-.nav-item{display:block;padding:9px 10px;border-radius:var(--radius-sm);color:var(--muted);text-decoration:none;font-weight:550;font-size:13.5px}
+.nav-item{display:block;padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);color:var(--muted);text-decoration:none;font-weight:550;font-size:13.5px}
 .nav-item:hover{background:var(--panel2);color:var(--text)}
 .nav-item.active{background:var(--panel2);color:var(--text);box-shadow:inset 2px 0 0 var(--accent)}
+.nav-group{margin-top:var(--space-4)}
+.nav-group:first-of-type{margin-top:0}
+.nav-group-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:0 var(--space-3) var(--space-2)}
+.logo-text{min-width:0}
+/* Collapsed: the labels go, the destinations stay. The title attribute on each
+   nav item is the tooltip that makes the icons-only rail usable. */
+.app-shell.collapsed{grid-template-columns:64px 1fr}
+.app-shell.collapsed .logo-text,.app-shell.collapsed .nav-group-label,.app-shell.collapsed .nav-item-label{display:none}
+.app-shell.collapsed .logo{justify-content:center;padding:0 0 var(--space-5)}
+.app-shell.collapsed .nav-item{padding:var(--space-2);text-align:center}
 .main-col{display:flex;flex-direction:column;min-width:0}
-.app-header{padding:22px 34px 0;max-width:1550px;width:100%}
-.header-title{font-size:22px;font-weight:700}
-.content{padding:18px 34px 40px;max-width:1550px;width:100%}
+.app-header{padding:var(--space-6) var(--space-7) 0;max-width:1550px;width:100%}
+.header-title{font-size:22px;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Breadcrumb: the section, then the page's own subject when it has one. Muted and
+   smaller, so the pair reads as depth rather than as two titles. */
+.header-sep{color:var(--muted);margin:0 var(--space-2);font-weight:400}
+.header-crumb{color:var(--muted);font-weight:550;font-size:17px}
+.content{padding:var(--space-5) var(--space-7) var(--space-7);max-width:1550px;width:100%}
 
 /* ---- primitives ---- */
-.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:17px}
-.section{margin-top:26px}
-.section.card{margin-top:20px}
-.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
-.stack{display:grid;gap:12px}
-.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
-.kv-grid{display:grid;grid-template-columns:140px 1fr;gap:8px 12px;padding-top:8px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4)}
+.section{margin-top:var(--space-6)}
+.section.card{margin-top:var(--space-5)}
+.row{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap}
+.stack{display:grid;gap:var(--space-3)}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-3);margin-top:var(--space-3)}
+.kv-grid{display:grid;grid-template-columns:140px 1fr;gap:var(--space-2) var(--space-3);padding-top:var(--space-2)}
 
-button{background:var(--accent);color:#0b0d10;border:0;border-radius:var(--radius-sm);padding:9px 14px;font-weight:650;cursor:pointer;transition:opacity .15s}
+button{background:var(--accent);color:#0b0d10;border:0;border-radius:var(--radius-sm);padding:var(--space-2) var(--space-4);font-weight:650;cursor:pointer;transition:opacity .15s}
 button:hover{opacity:.9}
 button:disabled{opacity:.5;cursor:default}
 .btn.secondary{background:var(--panel3);color:var(--text);border:1px solid var(--line)}
 .btn.danger{background:#351b1b;color:#ffb5b5}
 
-.input{width:100%;background:#0b0e12;color:var(--text);border:1px solid var(--line);padding:9px 10px;border-radius:var(--radius-sm);outline:none}
+.input{width:100%;background:#0b0e12;color:var(--text);border:1px solid var(--line);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);outline:none}
 .input:focus{border-color:var(--accent-dim)}
-.field{display:grid;gap:6px}
+/* One focus ring for the whole app, drawn only for keyboard navigation. Until this
+   existed the only focus-visible rules in the file were on chart elements, so every
+   button, tab and nav item was invisible to a keyboard user. */
+button:focus-visible,.nav-item:focus-visible,.tab:focus-visible,a:focus-visible,.link-btn:focus-visible{outline:2px solid var(--accent-dim);outline-offset:2px;border-radius:var(--radius-sm)}
+.tab:focus-visible{outline-offset:-2px}
+.input:focus-visible{outline:2px solid var(--accent-dim);outline-offset:1px}
+.field{display:grid;gap:var(--space-2)}
 .field-label{font-size:12px;color:var(--muted);font-weight:600}
-.inline-form{display:grid;gap:12px;margin-bottom:16px}
+.inline-form{display:grid;gap:var(--space-3);margin-bottom:var(--space-4)}
 textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical}
 
-.badge{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px 9px;font-size:11.5px;font-weight:650;color:var(--muted);white-space:nowrap}
+.badge{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px var(--space-2);font-size:11.5px;font-weight:650;color:var(--muted);white-space:nowrap}
 .badge-good{color:var(--good);border-color:#2c5c46}
 .badge-bad{color:var(--bad);border-color:#5c2c2c}
 .badge-warn{color:var(--warn);border-color:#5c4f2c}
 .badge-neutral{color:var(--muted)}
 
-.list{display:flex;flex-direction:column;gap:8px;margin-top:10px}
-.list-row{display:flex;justify-content:space-between;align-items:center;gap:15px;background:var(--panel);border:1px solid var(--line);padding:14px 16px;border-radius:var(--radius-sm)}
+.list{display:flex;flex-direction:column;gap:var(--space-2);margin-top:var(--space-3)}
+.list-row{display:flex;justify-content:space-between;align-items:center;gap:var(--space-4);background:var(--panel);border:1px solid var(--line);padding:var(--space-4);border-radius:var(--radius-sm)}
 .list-row.clickable{cursor:pointer}
 .list-row.clickable:hover{border-color:var(--accent-dim)}
 .list-row-main{display:flex;flex-direction:column;gap:3px}
-.list-row-side{display:flex;align-items:center;gap:12px}
+.list-row-side{display:flex;align-items:center;gap:var(--space-3)}
 
-.empty-state{text-align:center;padding:36px 20px;color:var(--muted);display:grid;gap:12px;justify-items:center}
+.empty-state{text-align:center;padding:var(--space-7) var(--space-5);color:var(--muted);display:grid;gap:var(--space-3);justify-items:center}
 
-.spinner-wrap{display:flex;align-items:center;gap:10px;padding:18px 4px}
+.spinner-wrap{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-5) var(--space-1)}
 .spinner{width:16px;height:16px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--accent);animation:spin .7s linear infinite;flex:0 0 auto}
 @keyframes spin{to{transform:rotate(360deg)}}
 
-.toast-stack{position:fixed;top:18px;right:18px;display:flex;flex-direction:column;gap:8px;z-index:1000}
-.toast{background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:11px 16px;box-shadow:0 6px 20px rgba(0,0,0,.35);font-size:13px;min-width:220px;max-width:360px;animation:toast-in .15s ease}
+/* ---- skeletons ---- */
+/* First paint, before the data arrives. Each placeholder is the shape and the
+   spacing of the row it stands in for, so nothing jumps when the real rows land. */
+.skeleton{display:block;border-radius:var(--radius-sm);background:linear-gradient(90deg,var(--panel2) 0%,var(--panel3) 50%,var(--panel2) 100%);background-size:200% 100%;animation:shimmer 1.4s ease-in-out infinite}
+@keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
+.skeleton-list{display:flex;flex-direction:column;gap:var(--space-2)}
+.skeleton-row{display:flex;justify-content:space-between;align-items:center;gap:var(--space-4);background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-4)}
+.skeleton-lines{display:flex;flex-direction:column;gap:var(--space-2);flex:1;min-width:0}
+.skeleton-line{height:12px;max-width:320px}
+.skeleton-line.short{width:38%}
+.skeleton-badge{height:22px;width:84px;border-radius:999px;flex:0 0 auto}
+.skeleton-value{height:28px;width:56%;margin-top:var(--space-1)}
+.skeleton-table{display:flex;flex-direction:column;gap:var(--space-3)}
+.skeleton-trow{display:flex;gap:var(--space-5)}
+.skeleton-trow .skeleton-cell:first-child{flex:2}
+.skeleton-cell{height:12px;flex:1}
+@media(prefers-reduced-motion:reduce){.skeleton{animation:none}}
+
+.toast-stack{position:fixed;top:var(--space-5);right:var(--space-5);display:flex;flex-direction:column;gap:var(--space-2);z-index:1000}
+.toast{background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-3) var(--space-4);box-shadow:0 6px 20px rgba(0,0,0,.35);font-size:13px;min-width:220px;max-width:360px;animation:toast-in .15s ease}
 .toast-success{border-color:#2c5c46;color:var(--good)}
 .toast-error{border-color:#5c2c2c;color:var(--bad)}
 .toast-info{color:var(--text)}
 @keyframes toast-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
 
-.code-block{white-space:pre-wrap;word-break:break-word;background:#090b0e;border:1px solid var(--line);border-radius:var(--radius);padding:16px;max-height:480px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.code-block{white-space:pre-wrap;word-break:break-word;background:#090b0e;border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4);max-height:480px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
 .error-text{color:var(--bad)}
 
 /* ---- markdown ---- */
@@ -146,8 +201,8 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    the base rules for h1/h2/h3 (:67-70) are sized for chrome, not for a document:
    h3 is uppercased, letter-spaced and muted, which would render a plan's "### Step"
    as shouting grey caps. Inheritance is not enough there, so h3 is restated. */
-.md{word-break:break-word;background:#090b0e;border:1px solid var(--line);border-radius:var(--radius);padding:16px;max-height:480px;overflow:auto;font-size:13.5px;line-height:1.65}
-.md h1,.md h2,.md h3{margin:18px 0 8px;font-weight:650;color:var(--text)}
+.md{word-break:break-word;background:#090b0e;border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4);max-height:480px;overflow:auto;font-size:13.5px;line-height:1.65}
+.md h1,.md h2,.md h3{margin:var(--space-5) 0 var(--space-2);font-weight:650;color:var(--text)}
 .md h1{font-size:19px}
 .md h2{font-size:16px}
 .md h3{font-size:14px;color:var(--text);text-transform:none;letter-spacing:normal}
@@ -155,21 +210,21 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    margins would double it up at the top and bottom of the block. */
 .md> :first-child{margin-top:0}
 .md> :last-child{margin-bottom:0}
-.md p{margin:0 0 11px}
-.md ul,.md ol{margin:0 0 11px;padding-left:20px}
+.md p{margin:0 0 var(--space-3)}
+.md ul,.md ol{margin:0 0 var(--space-3);padding-left:var(--space-5)}
 .md li{margin:2px 0}
 .md li>ul,.md li>ol{margin-bottom:0}
 /* Inline code sits on a lighter surface than the .md background, and a fenced
    block sits on the card surface so it stays legible as a distinct block rather
    than a hole in the prose. */
-.md code{background:var(--panel3);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
-.md pre{margin:0 0 11px;padding:12px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-sm);overflow:auto;white-space:pre}
+.md code{background:var(--panel3);border:1px solid var(--line);border-radius:4px;padding:1px var(--space-1);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.md pre{margin:0 0 var(--space-3);padding:var(--space-3);background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-sm);overflow:auto;white-space:pre}
 .md pre code{background:none;border:0;padding:0;font-size:12.5px}
-.md blockquote{margin:0 0 11px;padding:0 0 0 12px;border-left:2px solid var(--accent-dim);color:var(--muted)}
-.md table{width:100%;border-collapse:collapse;margin:0 0 11px}
-.md th,.md td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.md blockquote{margin:0 0 var(--space-3);padding:0 0 0 var(--space-3);border-left:2px solid var(--accent-dim);color:var(--muted)}
+.md table{width:100%;border-collapse:collapse;margin:0 0 var(--space-3)}
+.md th,.md td{padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 .md th{color:var(--muted);font-weight:600;font-size:12.5px}
-.md hr{border:0;border-top:1px solid var(--line);margin:16px 0}
+.md hr{border:0;border-top:1px solid var(--line);margin:var(--space-4) 0}
 /* Underlined at rest, unlike the app's own .link: a link inside a document is a
    link, and every one of these now opens a new tab, which a reader should see
    coming. Stated explicitly rather than left to the UA stylesheet. */
@@ -177,21 +232,21 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .md img{max-width:100%}
 
 /* ---- metrics ---- */
-.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--space-3)}
 /* min-width:0 stops the charts' measured SVG width from feeding back into the
    grid track and widening the column past the viewport. */
-.metric-card{display:flex;flex-direction:column;gap:6px;min-width:0}
+.metric-card{display:flex;flex-direction:column;gap:var(--space-2);min-width:0}
 .metric-label{font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 .metric-value{font-size:27px;font-weight:750}
 .metric-note{font-size:11.5px}
 
 /* ---- charts ---- */
-.chart-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:22px;align-items:start}
+.chart-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:var(--space-3);margin-top:var(--space-6);align-items:start}
 .chart-card{margin:0;min-width:0;overflow:visible}
-.chart-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:4px}
+.chart-head{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-1)}
 .chart-head h2{margin:0}
-.chart-toggle{padding:5px 10px;font-size:12px}
-.chart-figure{position:relative;margin-top:10px;min-width:0}
+.chart-toggle{padding:var(--space-1) var(--space-3);font-size:12px}
+.chart-figure{position:relative;margin-top:var(--space-3);min-width:0}
 /* Clamp the first paint (before the ResizeObserver reports) to the container,
    so a chart never pushes the page wide for a frame. */
 .chart-figure svg{max-width:100%}
@@ -204,11 +259,11 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .chart-bar{transition:filter .12s}
 .chart-bar-row:hover .chart-bar{filter:brightness(1.18)}
 .chart-bar-row:focus-visible{outline:2px solid var(--accent-dim);outline-offset:2px}
-.chart-nodata{margin:14px 0}
+.chart-nodata{margin:var(--space-4) 0}
 .sparkline{margin-top:2px;min-height:34px}
 .sparkline svg{display:block}
-.chart-tip{position:absolute;top:0;transform:translateX(-50%);background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:6px 10px;pointer-events:none;box-shadow:0 6px 20px rgba(0,0,0,.4);white-space:nowrap;z-index:2}
-.chart-tip-row{display:flex;align-items:center;gap:7px}
+.chart-tip{position:absolute;top:0;transform:translateX(-50%);background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-2) var(--space-3);pointer-events:none;box-shadow:0 6px 20px rgba(0,0,0,.4);white-space:nowrap;z-index:2}
+.chart-tip-row{display:flex;align-items:center;gap:var(--space-2)}
 .chart-tip-key{width:12px;height:2px;border-radius:1px;flex:0 0 auto}
 .chart-tip-value{font-weight:700;font-size:13px;font-variant-numeric:tabular-nums}
 .chart-tip-label{font-size:11.5px;color:var(--muted);margin-top:1px}
@@ -216,7 +271,7 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    identifies it. Capped so the box can never widen the page - chart cards have
    no scroll container of their own. */
 .chart-tip-multi{max-width:min(240px,100%);white-space:normal}
-.chart-tip-head{font-size:11.5px;color:var(--muted);margin-bottom:4px}
+.chart-tip-head{font-size:11.5px;color:var(--muted);margin-bottom:var(--space-1)}
 .chart-tip-multi .chart-tip-key{width:10px;height:10px;border-radius:2px}
 .chart-tip-multi .chart-tip-value{font-size:11.5px;font-weight:600;margin-left:auto}
 .chart-tip-name{flex:1 1 auto;min-width:0;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -224,12 +279,12 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* Legend: the identity channel for a multi-series chart. The swatch carries the
    hue, the text stays in an ink token, and the series total rides along so the
    chart is readable without hovering. */
-.legend{list-style:none;display:flex;flex-wrap:wrap;gap:4px 14px;margin:10px 0 0;padding:0}
-.legend-item{display:flex;align-items:center;gap:6px;font-size:12px;min-width:0}
+.legend{list-style:none;display:flex;flex-wrap:wrap;gap:var(--space-1) var(--space-4);margin:var(--space-3) 0 0;padding:0}
+.legend-item{display:flex;align-items:center;gap:var(--space-2);font-size:12px;min-width:0}
 .legend-key{width:10px;height:10px;border-radius:2px;flex:0 0 auto}
 .legend-label{color:var(--text)}
 .legend-value{color:var(--muted);font-variant-numeric:tabular-nums}
-.chart-note{margin:10px 0 0;font-size:12px}
+.chart-note{margin:var(--space-3) 0 0;font-size:12px}
 
 /* Refetching keeps the previous render in place at reduced opacity rather than
    flashing a skeleton and jumping the layout. */
@@ -239,56 +294,86 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 
 /* ---- segmented control (period selector) ---- */
 .seg{display:inline-flex;gap:2px;background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:2px}
-.seg-btn{background:transparent;color:var(--muted);padding:6px 12px;border-radius:4px;font-weight:600;font-size:12.5px}
+.seg-btn{background:transparent;color:var(--muted);padding:var(--space-2) var(--space-3);border-radius:4px;font-weight:600;font-size:12.5px}
 .seg-btn:hover{color:var(--text);opacity:1}
 .seg-btn.active{background:var(--panel3);color:var(--text)}
 
 /* ---- keyboard shortcuts ---- */
-.kbd{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 6px;background:var(--panel3);border:1px solid var(--line);border-bottom-width:2px;border-radius:var(--radius-sm);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;font-weight:600;color:var(--text)}
-.kbd-keys{display:inline-flex;gap:4px;flex:0 0 auto}
-.kbd-hint{display:inline-flex;align-items:center;gap:6px;font-size:12px}
-.kbd-overlay{position:fixed;inset:0;background:rgba(4,6,9,.62);display:flex;align-items:flex-start;justify-content:center;padding:80px 16px 24px;overflow-y:auto;z-index:900}
+.kbd{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 var(--space-2);background:var(--panel3);border:1px solid var(--line);border-bottom-width:2px;border-radius:var(--radius-sm);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;font-weight:600;color:var(--text)}
+.kbd-keys{display:inline-flex;gap:var(--space-1);flex:0 0 auto}
+.kbd-hint{display:inline-flex;align-items:center;gap:var(--space-2);font-size:12px}
+.kbd-overlay{position:fixed;inset:0;background:rgba(4,6,9,.62);display:flex;align-items:flex-start;justify-content:center;padding:80px var(--space-4) var(--space-6);overflow-y:auto;z-index:900}
 .kbd-legend{width:100%;max-width:440px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
-.kbd-legend-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+.kbd-legend-head{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-3)}
 .kbd-list{list-style:none;margin:0;padding:0;display:grid;gap:0}
-.kbd-row{display:flex;align-items:center;gap:14px;padding:9px 4px;border-bottom:1px solid var(--line)}
+.kbd-row{display:flex;align-items:center;gap:var(--space-4);padding:var(--space-2) var(--space-1);border-bottom:1px solid var(--line)}
 .kbd-row:last-child{border-bottom:0}
 .kbd-row-label{font-size:13px}
 
+/* ---- command palette (Cmd/Ctrl+K) ---- */
+/* Same overlay chrome as the shortcut legend, with the list padded out of the card
+   edge so the highlighted row has somewhere to sit. */
+.cmd{width:100%;max-width:560px;padding:0;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.cmd-input{width:100%;background:transparent;border:0;border-bottom:1px solid var(--line);padding:var(--space-4);font-size:15px;outline:none}
+.cmd-list{list-style:none;margin:0;padding:var(--space-2);display:flex;flex-direction:column;gap:2px;max-height:min(60vh,420px);overflow-y:auto}
+.cmd-group{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:var(--space-2) var(--space-3) var(--space-1)}
+.cmd-item{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);cursor:pointer}
+.cmd-item.active{background:var(--panel3)}
+.cmd-item-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px}
+.cmd-item-hint{font-size:11.5px;color:var(--muted);flex:0 0 auto}
+.cmd-empty{padding:var(--space-5) var(--space-3);text-align:center}
+.cmd-foot{display:flex;gap:var(--space-4);border-top:1px solid var(--line);padding:var(--space-2) var(--space-4);font-size:11.5px;color:var(--muted)}
+
 /* ---- toolbar / tabs ---- */
-.view-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
-.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line)}
-.tab{background:transparent;color:var(--muted);border-radius:0;padding:9px 14px;font-weight:600}
+.view-toolbar{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-4);flex-wrap:wrap}
+/* The search field the `/` shortcut has always looked for. Fixed width so the
+   toolbar does not reflow as the user types. */
+.search-input{width:240px;max-width:100%}
+.tabs{display:flex;gap:var(--space-1);border-bottom:1px solid var(--line)}
+.tab{background:transparent;color:var(--muted);border-radius:0;padding:var(--space-2) var(--space-4);font-weight:600}
 .tab:hover{background:transparent;color:var(--text);opacity:1}
 .tab.active{color:var(--text);border-bottom:2px solid var(--accent)}
 .tab-count{color:var(--muted);font-weight:500;font-size:12px}
 .tab.active .tab-count{color:var(--accent)}
 /* A revision that landed while the user was on another tab. Not .tab-count, which is
    for numbers: this is a flag, and there is only ever one of it. */
-.tab-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-left:6px;vertical-align:middle}
-.tab-content{margin-top:16px}
+.tab-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-left:var(--space-2);vertical-align:middle}
+.tab-content{margin-top:var(--space-4)}
+/* The next step in the workflow, when it lives on another tab. A pill like
+   .plan-notice, but it carries the page's primary action rather than an aside, so
+   the button is a real .btn: on a page whose only other affordance is a tab click,
+   this is the thing to press. */
+.next-step-banner{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap;font-size:13px;padding:var(--space-3) var(--space-4);border:1px solid var(--accent-dim);border-radius:var(--radius-sm);background:var(--panel2);margin-bottom:var(--space-4)}
+.next-step-banner .btn{padding:var(--space-2) var(--space-3);font-size:12.5px}
 
 /* ---- task detail ---- */
-.task-header{display:flex;justify-content:space-between;align-items:flex-start;gap:15px;margin-bottom:6px}
-.task-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px;margin-top:6px}
-.task-description{margin:10px 0 0;color:var(--muted);font-size:13.5px;line-height:1.55;max-width:700px;white-space:pre-line}
-.action-bar{margin-top:22px;padding-top:16px;border-top:1px solid var(--line);display:flex;justify-content:flex-end}
-.activity-box{position:relative;max-height:560px;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
-.activity-notice{position:sticky;top:-14px;z-index:2;margin:-14px -14px 10px;padding:9px 14px;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+/* A step above the scale's 6px rounding: the tabs sit directly under this, and at
+   8px the title and the tab row read as one crowded block. */
+.task-header{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-4);margin-bottom:var(--space-3)}
+.task-meta{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap;font-size:12.5px;margin-top:var(--space-2)}
+.task-description{margin:var(--space-3) 0 0;color:var(--muted);font-size:13.5px;line-height:1.55;max-width:700px;white-space:pre-line}
+.action-bar{margin-top:var(--space-6);padding-top:var(--space-4);border-top:1px solid var(--line);display:flex;justify-content:flex-end}
+.activity-box{position:relative;max-height:560px;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4)}
+.activity-notice{position:sticky;top:calc(-1 * var(--space-4));z-index:2;margin:calc(-1 * var(--space-4)) calc(-1 * var(--space-4)) var(--space-3);padding:var(--space-2) var(--space-4);background:var(--panel);border-bottom:1px solid var(--line);font-size:12px;color:var(--muted);display:flex;align-items:center;gap:var(--space-2)}
 .link-btn{background:none;border:0;padding:0;color:var(--accent);font:inherit;font-size:12px;font-weight:600;text-decoration:underline;cursor:pointer}
 .link-btn:hover{opacity:1;text-decoration:none}
-.jump-btn{position:sticky;bottom:10px;margin:10px auto 0;display:block}
+.jump-btn{position:sticky;bottom:var(--space-3);margin:var(--space-3) auto 0;display:block}
 /* The revision notice, and the same shape reused for the mid-edit one. Neutral rather
    than a warning tone: a revision landing is the thing that was asked for. */
-.plan-notice{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px;padding:9px 13px;border:1px solid var(--accent-dim);border-radius:var(--radius-sm);background:var(--panel2)}
+.plan-notice{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;font-size:13px;padding:var(--space-2) var(--space-3);border:1px solid var(--accent-dim);border-radius:var(--radius-sm);background:var(--panel2)}
 .plan-live{margin-bottom:0}
-.plan-action{margin-top:9px;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plan-action{margin-top:var(--space-2);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* ---- event stream ---- */
-.event-stream{display:flex;flex-direction:column;gap:8px}
-.event-row{display:flex;align-items:baseline;gap:10px;border-left:2px solid var(--line);padding:6px 0 6px 12px;font-size:13px}
+.event-stream{display:flex;flex-direction:column;gap:var(--space-2)}
+.event-row{display:flex;align-items:baseline;gap:var(--space-3);border-left:2px solid var(--line);padding:var(--space-2) 0 var(--space-2) var(--space-3);font-size:13px}
+/* The kind column is a fixed width so the badges stack into a scannable column
+   rather than each row starting at its own offset, and the clock is pushed to the
+   right edge instead of riding the end of a variable-length message. */
+.event-row .badge{min-width:76px;justify-content:center}
+.event-row:hover{background:rgba(255,255,255,.02)}
 .event-msg{flex:1;word-break:break-word}
-.event-time{font-size:11.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.event-time{font-size:11.5px;white-space:nowrap;font-variant-numeric:tabular-nums;margin-left:auto;padding-left:var(--space-3)}
 /* The left rule carries the kind, so a column of rows can be scanned without reading
    every badge. Quiet kinds - a tool's output, a reasoning trace, a notice - recede
    to the muted colour; they are context for the row above them, not news. */
@@ -309,31 +394,31 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* Next steps in the port tab: a numbered list where each step may carry the command
    that performs it. The command is a block rather than inline, so it can be selected
    and copied whole instead of by drag. */
-.steps{margin:0;padding-left:20px;display:grid;gap:10px;font-size:13px}
+.steps{margin:0;padding-left:var(--space-5);display:grid;gap:var(--space-3);font-size:13px}
 .steps li{padding-left:2px}
-.steps .code-block{margin:6px 0 0}
+.steps .code-block{margin:var(--space-2) 0 0}
 /* The port verdict. The left rule carries the state's tone the way the activity feed's
    rules carry an event's kind, so the answer is legible before the words are read. */
-.port-state{background:var(--panel);border:1px solid var(--line);border-left-width:3px;border-radius:var(--radius);padding:17px}
+.port-state{background:var(--panel);border:1px solid var(--line);border-left-width:3px;border-radius:var(--radius);padding:var(--space-4)}
 .port-state.good{border-left-color:var(--good)}
 .port-state.warn{border-left-color:var(--warn)}
 .port-state.bad{border-left-color:var(--bad)}
 .port-state.neutral{border-left-color:var(--accent-dim)}
-.port-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:9px}
+.port-head{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;margin-bottom:var(--space-2)}
 .port-head h2{margin:0;font-size:15px;color:var(--text)}
 .port-state p{margin:0}
-.port-result{margin-top:10px;color:var(--good);font-size:13px}
+.port-result{margin-top:var(--space-3);color:var(--good);font-size:13px}
 /* The commits to be able to name. Referenceable rather than described: a hash is what
    you paste into git, and the subject is what makes it recognisable in a log. */
-.refs{margin-top:12px;display:grid;gap:6px}
-.ref{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:12.5px}
-.ref-sha{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:1px 6px;color:var(--accent)}
+.refs{margin-top:var(--space-3);display:grid;gap:var(--space-2)}
+.ref{display:flex;align-items:baseline;gap:var(--space-2);flex-wrap:wrap;font-size:12.5px}
+.ref-sha{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:1px var(--space-2);color:var(--accent)}
 .ref-subject{color:var(--text)}
-.diff-modes{display:flex;gap:6px;justify-content:flex-end;margin-bottom:8px}
-.diff-modes .btn{padding:5px 11px;font-size:11.5px;font-weight:600}
+.diff-modes{display:flex;gap:var(--space-2);justify-content:flex-end;margin-bottom:var(--space-2)}
+.diff-modes .btn{padding:var(--space-1) var(--space-3);font-size:11.5px;font-weight:600}
 .diff-modes .btn.on{color:var(--accent);border-color:var(--accent-dim)}
 .diff-viewer{background:#090b0e;border:1px solid var(--line);border-radius:var(--radius);overflow:auto;max-height:520px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
-.diff-line{display:flex;gap:10px;padding:1px 10px}
+.diff-line{display:flex;gap:var(--space-3);padding:1px var(--space-3)}
 .diff-lineno{color:var(--muted);width:36px;text-align:right;flex:0 0 auto;user-select:none}
 .diff-add{background:rgba(111,224,161,.10);color:var(--good)}
 .diff-del{background:rgba(255,133,133,.10);color:var(--bad)}
@@ -345,43 +430,50 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    is what keeps every row's columns at exactly half: without it a long unbroken line
    widens its own column and the two halves of the diff stop lining up. */
 .diff-row{display:grid;grid-template-columns:1fr 1fr}
-.diff-cell{display:flex;gap:10px;padding:1px 10px;min-width:0}
+.diff-cell{display:flex;gap:var(--space-3);padding:1px var(--space-3);min-width:0}
 .diff-cell+.diff-cell{border-left:1px solid var(--line)}
-.diff-span{padding:1px 10px}
+.diff-span{padding:1px var(--space-3)}
 .diff-blank{background:rgba(255,255,255,.02)}
 
 /* ---- providers ---- */
-.provider-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
-.provider-card{display:grid;gap:12px}
-.provider-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.provider-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-4)}
+.provider-card{display:grid;gap:var(--space-3)}
+.provider-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-3)}
 /* Circuit-breaker dot. The state is in the title attribute, so the card head
    stays one line and needs no extra column. */
 .health{display:inline-block;flex:0 0 auto;width:8px;height:8px;border-radius:50%}
 .health.good{background:var(--good)}
 .health.warn{background:var(--warn)}
 .health.bad{background:var(--bad)}
-.model-list{display:grid;gap:8px}
-.model-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 12px}
-.test-result{border-radius:var(--radius-sm);padding:9px 11px;font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;word-break:break-word}
+.model-list{display:grid;gap:var(--space-2)}
+.model-row{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-3);background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-3)}
+.test-result{border-radius:var(--radius-sm);padding:var(--space-2) var(--space-3);font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;word-break:break-word}
 .test-result.good{background:rgba(111,224,161,.08);color:var(--good);border:1px solid #2c5c46}
 .test-result.bad{background:rgba(255,133,133,.08);color:var(--bad);border:1px solid #5c2c2c}
 
 /* ---- data table ---- */
 .data-table{width:100%;border-collapse:collapse}
-.data-table th,.data-table td{padding:11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.data-table th,.data-table td{padding:var(--space-3);border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 .data-table th{color:var(--muted);font-weight:600;font-size:12.5px;user-select:none}
 .data-table th.sortable{cursor:pointer}
 .data-table th.sortable:hover{color:var(--text)}
-.sort-arrow{margin-left:4px;font-size:10px}
+.sort-arrow{margin-left:var(--space-1);font-size:10px}
 .data-table tr.clickable{cursor:pointer}
 .data-table tr.clickable:hover td{background:var(--panel2)}
+/* The row the arrow keys are on. Same wash as hover, so pointer and keyboard land
+   on the same affordance. */
+.data-table tr.focused td{background:var(--panel2);box-shadow:inset 2px 0 0 var(--accent)}
+/* The header stays put while a long table scrolls under it. The background is not
+   decoration: a sticky cell shows the rows behind it without one. */
+.data-table thead th{position:sticky;top:0;background:var(--panel);z-index:1}
+.data-table:focus-visible{outline:2px solid var(--accent-dim);outline-offset:-2px}
 
 @media(max-width:1000px){
-  .app-shell{grid-template-columns:1fr}
+  .app-shell,.app-shell.collapsed{grid-template-columns:1fr}
   .sidebar{display:none}
   .metric-grid,.provider-grid,.grid3{grid-template-columns:1fr 1fr}
   .chart-grid{grid-template-columns:1fr}
-  .app-header,.content{padding-left:20px;padding-right:20px}
+  .app-header,.content{padding-left:var(--space-5);padding-right:var(--space-5)}
 }
 @media(max-width:650px){
   /* Metric cards stay paired - four full-width count cards is a lot of scroll
@@ -390,25 +482,25 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   .provider-grid,.grid3,.chart-grid{grid-template-columns:1fr}
   .list-row{flex-direction:column;align-items:flex-start}
   .kv-grid{grid-template-columns:1fr}
-  .app-header,.content{padding-left:14px;padding-right:14px}
-  .app-header{padding-top:16px}
-  .content{padding-bottom:28px}
-  .card{padding:14px}
+  .app-header,.content{padding-left:var(--space-4);padding-right:var(--space-4)}
+  .app-header{padding-top:var(--space-4)}
+  .content{padding-bottom:var(--space-7)}
+  .card{padding:var(--space-4)}
   .header-title{font-size:19px}
   .metric-value{font-size:23px}
   /* Long titles and paths must break rather than widen the page. */
   .list-row-main{min-width:0}
   .list-row-main b,.list-row-main span{overflow-wrap:anywhere}
   .list-row-side{flex-wrap:wrap}
-  .view-toolbar{gap:8px}
-  .seg-btn{padding:6px 10px}
-  .kbd-overlay{padding:24px 12px}
+  .view-toolbar{gap:var(--space-2)}
+  .seg-btn{padding:var(--space-2) var(--space-3)}
+  .kbd-overlay{padding:var(--space-6) var(--space-3)}
   /* Toasts are fixed, so an oversized one is clipped rather than scrolled -
      pin them to the viewport edges instead. */
-  .toast-stack{left:14px;right:14px}
+  .toast-stack{left:var(--space-4);right:var(--space-4)}
   .toast{min-width:0;max-width:none}
-  .data-table th,.data-table td{padding:9px 8px}
-  .md th,.md td{padding:7px 6px}
+  .data-table th,.data-table td{padding:var(--space-2)}
+  .md th,.md td{padding:var(--space-2)}
   /* A wide table gets its own horizontal scroll instead of pushing the whole
      page sideways. Chart cards are excluded on purpose: a scroll container on
      one axis forces the other to auto, which would clip the chart tooltip. */
