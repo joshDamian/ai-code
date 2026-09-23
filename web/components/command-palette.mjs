@@ -20,6 +20,39 @@ const NAV = [
   { label: 'Settings', href: '#/settings' },
 ];
 
+// Fuzzy match, scored. Every query character must appear in order, so "ovw"
+// finds Overview and "rt" finds Routing; a character that starts a word, or that
+// runs on from the previous match, counts for more, which is what keeps the
+// intended row on top when several contain the same letters. Typos are not
+// tolerated - a wrong character is a miss, not a near miss - because a palette
+// that answers "Prmviders" with Providers also answers "P" with everything.
+//
+// `hits` are the matched offsets, which the row tints so a fuzzy hit reads as a
+// match rather than as a row that happens to be there.
+function fuzzy(text, q) {
+  const hay = text.toLowerCase();
+  // Lowercasing that changes length (İ -> i̇) would put every offset off by one.
+  // Such a label still matches exactly; it just gets no highlight.
+  if (hay.length !== text.length) return hay.includes(q) ? { score: 0, hits: [] } : null;
+  const hits = [];
+  let score = 0;
+  let from = 0;
+  let prev = -1;
+  let streak = 0;
+  for (const ch of q) {
+    const at = hay.indexOf(ch, from);
+    if (at === -1) return null;
+    streak = at === prev + 1 ? streak + 1 : 0;
+    score += 1 + (at === 0 || !/[a-z0-9]/.test(hay[at - 1]) ? 4 : 0) + streak * 2;
+    hits.push(at);
+    prev = at;
+    from = at + 1;
+  }
+  // Front-weighted: a hit that starts early in the label beats the same letters
+  // buried in a long title.
+  return { score: score - prev * 0.1, hits };
+}
+
 export function CommandPalette({ open, onClose, navigate, onNewTask }) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
@@ -77,7 +110,10 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
     const q = query.trim().toLowerCase();
     const buckets = new Map();
     for (const c of commands) {
-      if (q && !c.label.toLowerCase().includes(q)) continue;
+      const m = q ? fuzzy(c.label, q) : { score: 0, hits: [] };
+      if (!m) continue;
+      c.score = m.score;
+      c.hits = m.hits;
       if (!buckets.has(c.group)) buckets.set(c.group, []);
       buckets.get(c.group).push(c);
     }
@@ -85,6 +121,9 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
     const flat = [];
     const groups = [];
     for (const [label, items] of buckets) {
+      // Best match first. sort is stable, so equal scores keep the order the
+      // commands were declared in, and the groups themselves never reorder.
+      if (q) items.sort((a, b) => b.score - a.score);
       groups.push({ label, items });
       for (const item of items) {
         item.i = flat.length;
@@ -93,6 +132,22 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
     }
     return { groups, flat };
   }, [query, recent]);
+
+  // The label as nodes, with the characters the query matched tinted. A fuzzy
+  // hit is not self-evident - "ovw" landing on Overview looks arbitrary
+  // otherwise - so the row shows its work.
+  function labelOf(item) {
+    if (!item.hits || !item.hits.length) return item.label;
+    const parts = [];
+    let at = 0;
+    for (const i of item.hits) {
+      if (i > at) parts.push(item.label.slice(at, i));
+      parts.push(html`<mark class="cmd-hit" key=${i}>${item.label[i]}</mark>`);
+      at = i + 1;
+    }
+    if (at < item.label.length) parts.push(item.label.slice(at));
+    return parts;
+  }
 
   // Close before acting, not after: New task hands focus to a form in the tasks
   // view, and a still-mounted overlay would take it straight back.
@@ -166,7 +221,7 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
                           onClick=${() => choose(item)}
                           onMouseEnter=${() => setActive(item.i)}
                         >
-                          ${html`<span class="cmd-item-label">${item.label}</span>`}
+                          ${html`<span class="cmd-item-label">${labelOf(item)}</span>`}
                           ${item.hint ? html`<span class="cmd-item-hint">${item.hint}</span>` : null}
                         </li>
                       `

@@ -99,19 +99,27 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 .logo-title{font-weight:800;font-size:17px;letter-spacing:.03em}
 .logo-sub{font-size:12px;margin-top:2px}
 .nav{display:flex;flex-direction:column;gap:2px}
-.nav-item{display:block;padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);color:var(--muted);text-decoration:none;font-weight:550;font-size:13.5px}
+.nav-item{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);color:var(--muted);text-decoration:none;font-weight:550;font-size:13.5px}
+.nav-icon{flex:0 0 auto;display:block}
+.nav-item-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nav-item:hover{background:var(--panel2);color:var(--text)}
 .nav-item.active{background:var(--panel2);color:var(--text);box-shadow:inset 2px 0 0 var(--accent)}
 .nav-group{margin-top:var(--space-4)}
 .nav-group:first-of-type{margin-top:0}
 .nav-group-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:0 var(--space-3) var(--space-2)}
 .logo-text{min-width:0}
-/* Collapsed: the labels go, the destinations stay. The title attribute on each
-   nav item is the tooltip that makes the icons-only rail usable. */
+/* Collapsed: the labels go, the icons stay. Both states render the same markup -
+   the label is hidden rather than swapped out - so the rail cannot drift from
+   the expanded sidebar. `title` on each link is the tooltip that names a
+   destination the icon alone only suggests, and it is also the link's accessible
+   name while the label is out of the tree. The group headings become hairline
+   rules, since the sections they name are what the rail would otherwise lose. */
 .app-shell.collapsed{grid-template-columns:64px 1fr}
 .app-shell.collapsed .logo-text,.app-shell.collapsed .nav-group-label,.app-shell.collapsed .nav-item-label{display:none}
 .app-shell.collapsed .logo{justify-content:center;padding:0 0 var(--space-5)}
-.app-shell.collapsed .nav-item{padding:var(--space-2);text-align:center}
+.app-shell.collapsed .nav-item{justify-content:center;gap:0;padding:var(--space-2)}
+.app-shell.collapsed .nav-group{margin-top:var(--space-3);padding-top:var(--space-3);border-top:1px solid var(--line)}
+.app-shell.collapsed .nav-group:first-of-type{margin-top:0;padding-top:0;border-top:0}
 .main-col{display:flex;flex-direction:column;min-width:0}
 .app-header{padding:var(--space-6) var(--space-7) 0;max-width:1550px;width:100%}
 .header-title{font-size:22px;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -320,6 +328,8 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .cmd-item{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);cursor:pointer}
 .cmd-item.active{background:var(--panel3)}
 .cmd-item-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px}
+/* The characters a fuzzy query matched. `mark`'s own yellow is not this theme. */
+.cmd-hit{background:none;color:var(--accent);font-weight:700}
 .cmd-item-hint{font-size:11.5px;color:var(--muted);flex:0 0 auto}
 .cmd-empty{padding:var(--space-5) var(--space-3);text-align:center}
 .cmd-foot{display:flex;gap:var(--space-4);border-top:1px solid var(--line);padding:var(--space-2) var(--space-4);font-size:11.5px;color:var(--muted)}
