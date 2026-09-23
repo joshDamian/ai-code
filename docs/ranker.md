@@ -233,6 +233,56 @@ cleared the floor, appears in the task, and has `df = 1` across the 72 paths, so
 its IDF is 3.88, which is *high*. IDF would not have removed this file. Rank 3
 came from the absence of a file-type gate, not from a weak IDF (§5.3, §5.13).
 
+### 2.6 The corpus baseline, and why §2.1 is not it
+
+§2.1 is one task under a loose gold definition. The harness of §5.12 is the
+corpus, under a pinned one. They are not comparable and should not be quoted
+together; §2.1 remains the case study that motivated the work.
+
+`ai-code eval`, run against this repository after phase 1 — 22 planner runs, of
+which 14 have a recoverable gold set:
+
+| | |
+|---|---|
+| usable runs | 14 |
+| runs with **no** gold (died before reading anything) | 8 |
+| runs whose gold exceeds the window, recall capped at `k/|gold|` | 5 |
+| answers across the uncapped runs | 55 |
+| **answers the ranking never offered** | **18 (33%)** |
+| recall@15, macro | 0.772 |
+| recall@15, micro | 0.673 |
+| MRR | 0.645 |
+| nDCG@15 | 0.581 |
+
+The 33% is the number that corroborates §2.1 and the only one of these the ranker
+is unambiguously responsible for: a gold file that was offered *and* then read is
+partly a fact about the prompt, because a planner reads what it is handed. §2.1
+found 7 of 11 misses on its single task; the corpus rate is 18 of 55. Same
+direction, and the case study was an unusually bad task rather than a typical one.
+
+**The macro/micro gap of ten points is a warning about quoting either alone.**
+Nine runs carry the macro number and four of them have a gold set of three files
+or fewer, so a run that read one file weighs as much as a run that read fifteen.
+
+`|gold|` is not small. Distribution over the 14 usable runs:
+
+```
+ 1:2   2:1   3:1   4:2   11:1  14:1  15:1  16:1  19:1  22:1  25:1  27:1
+```
+
+Six runs have a gold set of four files or fewer, which is a benchmark item that
+cannot discriminate: offering four files and finding all four is not evidence of
+anything. And two of the six tasks carry eight of the fourteen usable runs —
+`d25abe5b` was planned seven times and `53da01a5` four — so the corpus holds
+rather fewer independent judgments than its run count suggests, and all five
+capped runs come from the one task.
+
+**What this means for the phases ahead.** The corpus is large enough to detect a
+change of the size phase 3 and 4 promise — 18 misses is a real target — and far
+too small to fit parameters against, which is why §5.13's weights stay in the last
+phase. It also means the honest headline for phase 3 is *misses recovered*, not a
+delta in mean recall: 18 is small enough to inspect one at a time.
+
 ---
 
 ## 3. Requirements
@@ -514,6 +564,41 @@ with no annotation work. The failure in §2.1 is precisely a recall@15 miss.
 Build this **before** changing the scorer, so each change is provable and
 reversible.
 
+**Built — `src/ranker-eval.mjs`, `ai-code eval`.** The paragraph above turned out
+to be under-specified in four ways that each change the number, and building it
+is what surfaced them:
+
+1. **Gold is a read, not a search.** §2.1 above counts `Read`/`Grep`/`Glob`
+   together. Grep and Glob name a directory or a search root far more often than
+   an answer — `tests` appears in this repository's own gold set as a Glob
+   argument — so the harness counts `Read`/`NotebookRead` only. Under the loose
+   definition the same corpus scores 0.568 mean recall instead of 0.633, and the
+   difference is entirely files that were searched rather than read.
+2. **The unit is a run, not a task.** §2.1 pools one task's four attempts into a
+   single gold set of 11 files, which is why its recall is 36% where the per-run
+   figure for the same task is 46–71%. Pooling makes the answer set larger than
+   the window and the number a measure of the window.
+3. **Paths need normalising across three shapes**, all present in this database:
+   project-relative, absolute in the project, and absolute inside a per-task
+   worktree (`\.ai-code-worktrees-<project>/<uuid>/…`). The third names the same
+   file as the first; left as-is it both inflates the gold set and invents misses.
+   `readPaths()` at `src/service.mjs:49` already drops these, because the
+   normalised form starts with `..` — correct for the gate, whose root is the
+   project, and invisible there because the gate only ever reads the planner's
+   own run.
+4. **A gold set larger than the window caps recall at `k/|gold|`**, however good
+   the ranking is. Five of the fourteen usable runs here are in that state. They
+   are reported and held out of the recall mean rather than averaged in as if the
+   shortfall were the ranker's.
+
+Two more things the paragraph above did not anticipate. Recall has two defensible
+definitions that differ by nine points on this corpus, so both are reported:
+**macro** (mean of per-run recalls, which lets a run with one answer weigh as much
+as a run with twenty-seven) and **micro** (answers found over answers asked). And
+eight of the twenty-two planner runs have no recoverable gold at all — a run that
+died before opening anything is a case the benchmark silently drops, so it is
+counted as `empty` rather than passed over.
+
 **The published ceiling for this exact task is not high.** BugLocator (ICSE 2012)
 is the closest analogue — rank source files against a natural-language bug report.
 On Eclipse 3.1 (12,863 files) the file that needed changing landed in the top 10
@@ -784,8 +869,20 @@ adversarial orders blow it up.
    the weight is the strictly worse half of the pair, so both ship in phase 5 together.
    The acronym rule has no such pairing and shipped alone: `HTTPServer` now yields
    `http` and `server` instead of the unsplittable `httpserver`.
-2. **Instrument and measure.** Debug record; gold set mined from `events`;
-   recall@15 / nDCG@15 reporting. This is what makes everything after it provable.
+2. **Instrument and measure.** Gold set mined from `events`; recall@15 / MRR /
+   nDCG@15 reporting. This is what makes everything after it provable.
+
+   **Landed — `src/ranker-eval.mjs`, `ai-code eval`.** The baseline is in §2.6:
+   14 usable runs, 33% of answers never offered, and a macro/micro recall gap of
+   ten points that makes quoting either alone misleading. What building it
+   surfaced — the read/search distinction, run-not-task scoping, the three path
+   shapes, and the `k/|gold|` cap — is recorded in §5.12, because each one changes
+   the number.
+
+   The **debug record** of §5.10 is not in this phase. It exists to calibrate
+   thresholds that do not exist yet, and nothing in phases 3 or 4 reads it; the
+   metrics above are what those phases have to move. It moves to phase 5, beside
+   the weights it feeds.
 3. **Graph expansion** — §5.2's ×50 edge rule, named explicitly, plus the one-hop
    import scan that feeds it. Measured at **3 of 7** misses in §2.4, for near-zero
    cost: it is a regex over files the ranker already reads.
@@ -793,8 +890,10 @@ adversarial orders blow it up.
    but the one the graph cannot reach from a cold start — an import edge needs a
    seed, and this is what supplies it.
 5. **Self-normalising weights and the floor** (§5.3). The tokenizer floor ships here,
-   as a pair with step 3's `1/(1+df)` weight — see the note in phase 1. Removes the
-   40% dead weight.
+   as a pair with step 3's `1/(1+df)` weight — see the note in phase 1. Also the
+   **debug record** (§5.10), moved here from phase 2: `normScore` and `ceil(q)`
+   are the inputs these weights are calibrated against, so record and calibration
+   belong in one change.
 6. **Window-derived budget, total shrink ladder, named degradation states** (§5.6, §5.9).
 7. **Hierarchical render and content tier** (§5.4–5.5, §5.13), then the content
    index of §6.3 — and a *persistent* index only past the §6.1 threshold.

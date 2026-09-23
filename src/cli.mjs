@@ -48,6 +48,8 @@ Routing
 Runs
   runs
   usage [24h|7d|30d|all]
+Ranker
+  eval [project-id]
 Automation
   automation list
   automation add <name> <trigger> <action>
@@ -238,6 +240,16 @@ async function main() {
   if (cmd === 'routing' && sub === 'set') {
     const fs = await import('node:fs');
     return out(s.saveRouting(JSON.parse(fs.readFileSync(rest[0], 'utf8'))));
+  }
+  if (cmd === 'eval') {
+    const { plannerCases, evaluate } = await import('./ranker-eval.mjs');
+    const projects = s.store.listProjects();
+    const project = sub ? projects.find((p) => p.id === sub || p.name === sub) : projects[0];
+    if (!project) throw Error(`Unknown project: ${sub}`);
+    const cases = plannerCases(s.store, project);
+    // The summary carries how many runs fed it, because a metric over four runs
+    // and a metric over four hundred read the same and mean different things.
+    return out({ cases: cases.length, ...evaluate(project, cases).summary });
   }
   if (cmd === 'runs') return out(s.store.listRuns());
   if (cmd === 'usage') return out(s.usage(rest[0] || '7d'));

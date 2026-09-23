@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig} from '../src/context.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -827,6 +827,97 @@ test('an unreadable directory degrades the ranking instead of failing the run',(
     assert.deepEqual(built.manifest.unreadable,['locked'],'the walk records what it could not read');
     assert.ok(!built.tree.some(f=>f.startsWith('locked/')),'and lists nothing under it');
   } finally { fs.chmodSync(locked,0o755); }
+});
+
+test('a tool path is normalised across the three shapes the database holds',()=>{
+  const root='/repo';
+  assert.equal(normalisePath('src/a.mjs',root),'src/a.mjs','project-relative');
+  assert.equal(normalisePath('/repo/src/a.mjs',root),'src/a.mjs','absolute in the project');
+  assert.equal(
+    normalisePath('/x/.ai-code-worktrees-ai-code/0123abcd-0000-4000-8000-000000000000/src/a.mjs',root),
+    'src/a.mjs','absolute in a per-task worktree, which names the same file as the first two'
+  );
+  // Neither of these is a file in the project: a Grep records the root, and a
+  // path outside the tree is not something the ranking could ever be scored on.
+  assert.equal(normalisePath('/repo',root),null,'the repository root is not a file');
+  assert.equal(normalisePath('/elsewhere/a.mjs',root),null,'nor is a path outside it');
+});
+
+test('gold is what the planner read, not what it searched',()=>{
+  const events=[{data:{message:{content:[
+    {type:'tool_use',name:'Read',input:{file_path:'/repo/src/a.mjs'}},
+    {type:'tool_use',name:'NotebookRead',input:{notebook_path:'/repo/n.ipynb'}},
+    {type:'tool_use',name:'Grep',input:{path:'/repo/tests'}},
+    {type:'tool_use',name:'Glob',input:{path:'/repo'}},
+    {type:'tool_use',name:'Bash',input:{command:'ls'}},
+    {type:'text',text:'a reply is not a tool call'},
+  ]}}}];
+  assert.deepEqual([...goldFromEvents(events,'/repo')],['src/a.mjs','n.ipynb']);
+  // Events that are not the shape this reads are skipped, not fatal: a stream
+  // carries frames of several kinds and only some of them are tool calls.
+  assert.deepEqual([...goldFromEvents([{data:null},{data:{message:{content:'x'}}},{}],'/repo')],[]);
+});
+
+test('a score case counts what the ranking found and flags a capped window',()=>{
+  const s=scoreCase(['a','b','c','d','e'],['a','c','zz'],5);
+  assert.equal(s.hits,2,'two of the three answers are in the window');
+  assert.equal(s.gold,3);
+  assert.equal(s.recall,2/3);
+  assert.equal(s.mrr,1,'the first answer is at the top');
+  // Binary gain: DCG = 1/log2(2) + 1/log2(4), ideal = the three hits packed in.
+  const ideal=1/Math.log2(2)+1/Math.log2(3)+1/Math.log2(4);
+  assert.ok(Math.abs(s.ndcg-(1+0.5)/ideal)<1e-12);
+  assert.equal(s.capped,false);
+
+  // A gold set larger than the window cannot score above k/|gold|, whatever the
+  // ranking does: both answers are in the window and the recall is still a half.
+  // The flag is what keeps that out of the mean.
+  const capped=scoreCase(['a','b','c'],['a','b','c','d'],2);
+  assert.equal(capped.capped,true);
+  assert.equal(capped.hits,2);
+  assert.equal(capped.recall,0.5);
+});
+
+test('an empty gold set is no measurement rather than a perfect score',()=>{
+  const s=scoreCase(['a'],[],15);
+  assert.equal(s.recall,null,'a run that read nothing is not a run that ranked perfectly');
+  assert.equal(s.ndcg,0);
+  assert.equal(s.mrr,0);
+});
+
+test('the summary separates the two recalls and keeps capped runs out of both',()=>{
+  const mk=(gold,hits,capped,gone=[])=>({gold,hits,capped,recall:hits/gold,mrr:0,ndcg:0,case:{gone}});
+  const s=summarise([mk(2,2,false),mk(4,1,false),mk(20,10,true,['a/deleted.mjs'])]);
+  // Macro is the mean of per-run recalls, so the run with two answers moves it as
+  // much as the run with four. Micro pools the answers and describes the corpus.
+  assert.equal(s.recallMacro,(1+0.25)/2);
+  assert.equal(s.recallMicro,3/6);
+  assert.equal(s.recallRuns,2);
+  assert.equal(s.capped,1);
+  // What the ranking never offered, which is the part of recall it owns: a file
+  // that was offered and then read is partly a fact about the prompt.
+  assert.equal(s.unoffered,3);
+  assert.equal(s.gone,1,'an answer naming a file the repository no longer has is counted, not scored');
+});
+
+test('the harness mines a gold set from a run and scores the ranker against it',()=>{
+  const root=depsRepo();
+  const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'fix the router');
+  // The run and its reads are written directly. What the harness reads is the
+  // events table, so how a run came to write them is not part of the question.
+  s.store.addRun({id:'r1',taskId:t.id,role:'planner',providerId:'x',modelId:'m',status:'succeeded',startedAt:new Date().toISOString()});
+  s.store.addEvent({runId:'r1',type:'stream',data:{message:{content:[{type:'tool_use',name:'Read',input:{file_path:'src/router.mjs'}}]}}});
+  const cases=plannerCases(s.store,{id:p.id,path:root});
+  assert.equal(cases.length,1,'one planner run is one case');
+  assert.equal(cases[0].taskId,t.id);
+  assert.deepEqual(cases[0].gold,['src/router.mjs']);
+  const {summary,rows}=evaluate({id:p.id,path:root},cases);
+  assert.equal(summary.runs,1);
+  assert.equal(rows[0].hits,1,'the ranker offers the file the planner read');
+  assert.equal(rows[0].recall,1);
+  assert.equal(summary.recallMicro,1);
 });
 
 test('the implementer is given its own worktree, not the main checkout',async()=>{
