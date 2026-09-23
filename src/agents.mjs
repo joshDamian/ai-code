@@ -53,6 +53,12 @@ export async function* runMock(input) {
       sessionId: input.mockSessionId ?? null,
     });
   }
+  // Usage is what the cost ceiling is computed from, so it is emittable too - and
+  // it comes before the tool calls, because that is the order a real provider
+  // reports in: a turn's usage arrives with the turn, and the tool calls follow. A
+  // mock that reported usage only at the end could not exercise the case that
+  // matters, which is a run stopped mid-stream by a budget.
+  if (input.mockUsage) yield { type: 'message', data: { usage: input.mockUsage } };
   // A real agent's stream is mostly tool calls, and the per-role budget counts
   // them. The mock emits them on demand so that budget is exercisable without a
   // provider, in the same shape a claude assistant message carries them.
@@ -75,8 +81,6 @@ export async function* runMock(input) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, '// written by the mock implementer\n');
   }
-  // Usage is what the cost ceiling is computed from, so it is emittable too.
-  if (input.mockUsage) yield { type: 'message', data: { usage: input.mockUsage } };
   if (input.role === 'planner') {
     // Overridable for the same reason the reviewer's verdict is: the plan a refine
     // returns has to be able to differ from the plan it was given, or nothing can test
