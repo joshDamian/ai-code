@@ -3545,4 +3545,13 @@ test('closeTask throws when a run is live',()=>{const root=repo();const s=new Se
 // A cancel only marks the lease; the process that owns the run releases it on the way out. Until then the run is still driving the task - which is the whole point of gating on liveness rather than on the task's state, so close keeps refusing after the cancel and unblocks when the lease goes.
 s.cancelTask(t.id);let stillThrew=false;try{s.closeTask(t.id)}catch(e){stillThrew=true;assert.match(e.message,/task cancel/)}assert.ok(stillThrew,'a cancelled-but-unreleased run is still live');s.store.releaseLease('live');const closed=s.closeTask(t.id);assert.equal(closed.state,'CANCELLED')});
 test('CANCELLED is a terminal state',()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.closeTask(t.id);assert.throws(()=>s.transition(t.id,'PLANNING'),/Invalid transition/)});
+// The state an implementer leaves behind when its process dies. IMPLEMENTING is set
+// before the run starts and moved on after it ends, so nothing running means nothing
+// will ever move it - and every step refuses it, which is what made the dashboard a
+// dead end: implement wants APPROVED, test wants TESTING, review wants REVIEWING.
+test('a task left in IMPLEMENTING is re-armed by approve, and no step before that',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);s.transition(t.id,'IMPLEMENTING');assert.equal(s.task(t.id).state,'IMPLEMENTING');await assert.rejects(s.implement(t.id),/approval required/);await assert.rejects(s.runTests(t.id),/TESTING/);await assert.rejects(s.review(t.id),/REVIEWING/);
+// approve is a bare transition, so it takes the one edge the map allows back from
+// here. The implementer is the only role whose resume is recorded, and the worktree
+// survives this, so what the next run picks up is the work the dead one left.
+assert.equal(s.approve(t.id).state,'APPROVED')});
 test('closeTask removes the worktree if it exists',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const beforeClose=s.task(t.id);assert.equal(beforeClose.state,'APPROVED');const wtDir=createWorktree(s.project(p.id).path,t.id);s.store.updateTask(t.id,{worktree:wtDir.dir,branch:wtDir.branch,base_commit:wtDir.base});assert.ok(fs.existsSync(wtDir.dir));s.closeTask(t.id);assert.equal(fs.existsSync(wtDir.dir),false)});

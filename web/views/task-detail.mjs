@@ -219,7 +219,7 @@ export function TaskDetail({ id, navigate }) {
 
       <div class="tab-content">
         ${tab === 'plan' ? html`<${PlanTab} task=${task} busy=${busy} run=${run} live=${live} revision=${data.revision} revisedAt=${revisedAt} readAction=${readAction} onAcknowledge=${acknowledgeRevision} lastRun=${runs[runs.length - 1] || null} />` : null}
-        ${tab === 'execute' ? html`<${ExecuteTab} task=${task} runs=${runs} busy=${busy} run=${run} />` : null}
+        ${tab === 'execute' ? html`<${ExecuteTab} task=${task} runs=${runs} busy=${busy} run=${run} live=${live} />` : null}
         ${tab === 'review' ? html`<${ReviewTab} task=${task} busy=${busy} run=${run} live=${live} />` : null}
         ${tab === 'port' ? html`<${PortTab} task=${task} branches=${data.branches || []} busy=${busy} run=${run} />` : null}
         ${tab === 'activity' ? html`<${ActivityTab} taskId=${task.id} store=${buffer} />` : null}
@@ -514,7 +514,7 @@ function planBase(task) {
   }
 }
 
-function ExecuteTab({ task, runs, busy, run }) {
+function ExecuteTab({ task, runs, busy, run, live }) {
   const base = planBase(task);
   return html`
     <div class="stack">
@@ -545,6 +545,32 @@ function ExecuteTab({ task, runs, busy, run }) {
           }
         </div>
       </div>
+
+      ${
+        // IMPLEMENTING is set before the implementer starts and moved on after it
+        // ends, so a process that dies mid-run leaves the task here with nothing
+        // running it. Every step a reader would guess refuses - implement wants
+        // APPROVED, test wants TESTING, review wants REVIEWING - and the only
+        // button was Close, which discards the worktree. The way back is `approve`,
+        // a bare transition that the map allows from IMPLEMENTING, so the task can
+        // be re-armed and execution started again over the work already on disk.
+        // Without this the state had no exit from the dashboard at all.
+        task.state === 'IMPLEMENTING' && !live
+          ? html`
+              <div class="card">
+                <h3>No implementer running</h3>
+                <p class="muted">
+                  This task is implementing, but no implementer is running — the run that set this state ended
+                  before it could move the task on. Re-arming it returns the task to APPROVED so execution can
+                  start again; the worktree and anything already changed in it are kept.
+                </p>
+                <div class="row">
+                  <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskApprove(task.id), 'Re-armed. Start execution when ready.')}>Re-arm</button>
+                </div>
+              </div>
+            `
+          : null
+      }
 
       ${
         task.state === 'APPROVED'
