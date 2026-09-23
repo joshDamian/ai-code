@@ -512,6 +512,7 @@ Verified against source unless noted.
 | Ranker throws | Degrade, never throw | **Phase 6** — `FAILED`: `Service#ranked()` catches on both call sites (`prepare()` was unwrapped), returns a tree-only context with the error in `manifest.note`, and the run continues. Persisted as `runs.context_state` |
 | Binary / >2 MB file | Path only | Handled, silently |
 | **File larger than the per-file cap** | Emit its surface, not its head | ~~**First 12 000 characters, whatever they contained**~~ **Phase 7** — §5.5's surface: head, every declaration with its line number, the comment above each, and the body of any declaration the task names. 190 of the harness's 347 slots render this way; the other 157 are inlined whole because they always were. A file with no declarations — or not source — still gets the head, and the surface is capped at the same `fileChars` the head is, so it is never the larger of the two |
+| **A file's contents match the task but its path does not** | Retrieve the change surface, not just the names the task utters | ~~Path-only; the file is unreachable by any path token~~ **Phase 7** — §5.13's BM25F was built as specified, measured against the gold set, and removed: at every weight that makes content evidence matter it ranks `src/service.mjs` first in 22 of 22 runs and costs 6–15 unoffered gold files, because a term repeated in a large body saturates at the same value a path hit reaches. §5.13 carries the table |
 | Symlinked directory | Follow or report | `Dirent.isDirectory()` is false for a symlink → pushed as a file, never recursed |
 | Filename containing a newline | Correct parsing | `git log --name-only` split on `\n` yields garbage entries |
 | Monorepo, 200k files | Bounded work | Full sync walk ×2; `tree: 400` is an alphabetical prefix, so anything past the 400th path is undiscoverable |
@@ -1107,8 +1108,11 @@ file-level ranker and measure against the baseline rather than against 100%.
 
 ### 5.13 If content is scored, score it with BM25F — and normalise it
 
-A content tier is the fix for R2. The formula is BM25F (Robertson, Zaragoza &
-Taylor, CIKM 2004), not BM25, and not summed per-field BM25:
+A content tier is the fix for R2 by construction, and phase 7 built it and found
+that on this corpus it is not: the measurement is at the end of this section, and
+the conclusion is that R2 was repaired by phases 3 and 4 instead. The formula below
+is what was built and measured, and it is BM25F (Robertson, Zaragoza & Taylor, CIKM
+2004), not BM25, and not summed per-field BM25:
 
 ```
 rejected: bm25(content) + 2.5·bm25(symbols) + 5·bm25(filenames)
@@ -1202,6 +1206,66 @@ under this formula the doc takes `w = 1` on every term while the component takes
 weighting is enough to flip the order is a question for the §5.12 gold set — which
 is why §8 puts the harness before the scorer.
 
+**Built and measured — phase 7, and not shipped.** The formula above was
+implemented as written: term frequencies weighted and summed across the two field
+groups before one saturating term, `k1 = 1.2`, `b = 0.75` on contents and `0` on
+paths, `w = 5` against `1`, Lucene IDF over the union of the two postings lists.
+It replaced the ×10/×4 path hits as the lexical scorer, with the priors, `define`
+and `edge` left on top unchanged. Every figure below is one process on one tree,
+which is the only comparison §5.12 item 5 allows: the same 22 harness cases, each
+a re-ranking, with the tier's weight as the only difference.
+
+| tier weight | macro | micro | unoffered | MRR | nDCG |
+|---|---|---|---|---|---|
+| off (shipped) | **0.8805** | **0.7818** | **12** | 0.6667 | 0.6408 |
+| 0.05 | 0.8885 | 0.8000 | 11 | 0.6735 | 0.6481 |
+| 1 | 0.7950 | 0.6364 | 20 | 0.7262 | 0.6705 |
+| 5 | 0.7849 | 0.6182 | 21 | **1.0000** | 0.7313 |
+| 12 | 0.7362 | 0.5091 | 27 | **1.0000** | 0.7075 |
+
+**The one setting that reads as a win is one file in one run.** At weight 0.05
+every metric moves the right way, and the whole of the macro move is run 3 of 22
+going from ten gold files to eleven. A tier that costs a full pass over the tree to
+move one file is not a tier; it is a tie-break that happened to break well once.
+
+**Every weight that makes content evidence matter loses recall, and the mechanism
+is §2.4's.** At weight 5 `src/service.mjs` — the 3 000-line file that mentions
+every task's vocabulary — is ranked first in **22 of 22 runs**. The field weights
+and the `1 + k1 = 2.2x` cap do not prevent it, because the cap is what causes it: a
+term repeated fifty times in a body saturates at very nearly the same value a term
+reaching `w = 5` through the path saturates at, and a file that carries eight query
+terms at that value outscores a file the task actually named. §2.4 measured this on
+raw term count against a markdown document and predicted the fix; BM25F moves the
+winner from the prose doc to the largest source file and leaves the outcome.
+
+**MRR and nDCG rise while recall falls, which is the shape to distrust.** At
+weight 5 MRR is exactly 1.0000 — the first gold file is at rank 1 in every scored
+run — while 21 gold files go unoffered against 12. `src/service.mjs` is a gold file
+in most of those runs, so putting it first buys both metrics and drops the file the
+task was about. Recall's macro and micro fall by 10 and 16 points and unoffered
+rises by 9.
+
+Three of §5.13's own caveats were tested and none of them rescued it. `b_content`
+was swept upward — 1.2, 2, 3 — and every value is worse than 0.75, with 2
+collapsing to 0.3972 macro; the caveat above asks for a *lower* value, and a lower
+value is less length normalisation, so it would raise the long file's score and
+worsen the reported failure rather than fix it. IDF removed entirely
+(Sourcegraph's choice) moves macro 0.7849 → 0.7950 at weight 2 and does not change
+the outcome. Raising `w` to 20 changes nothing measurable, which is the cap again:
+past `w ≈ 5` the path field is already saturated and further weight is inert.
+
+**The cost is a full read of the tree on every call.** The tier cannot score a file
+it has not read, so the harness's 22 cases go from 1.0 s to 1.9 s. §6.1's argument
+that this workload does not need an index is an argument about the *scorer* that
+would consume one, and this is that scorer: a second read of every file, every
+time, in exchange for a ranking that is worse.
+
+**It is removed rather than shipped off, which is phase 4's precedent.** The
+whole-identifier half of the `define` key was built, measured at 0.000000 on all
+four metrics, and deleted; a config knob defaulting to zero is a knob nobody will
+re-measure. The measurement is the deliverable, and §9 carries what it leaves
+untested.
+
 ### 5.14 The ceiling: files with no lexical or graph relationship to each other
 
 The ranker is a **local** method. Every signal in it starts either from something
@@ -1232,7 +1296,7 @@ Three consequences, none of which is "build a better ranker":
 
 | Structure | Cost | Use here? |
 |---|---|---|
-| **In-memory** inverted index `Map<token, Uint32Array>`, content + path | one pass; 0.3–1.5 s at ~6 M tokens | **Yes — this is the structure** (§6.3) |
+| **In-memory** inverted index `Map<token, Uint32Array>`, content + path | one pass; 0.3–1.5 s at ~6 M tokens | ~~**Yes — this is the structure** (§6.3)~~ **Not built in phase 7** — its one consumer was §5.13's scorer, which was measured and removed. §6.3 has the reasoning |
 | **Persistent** index on disk | 3× corpus (Zoekt), 20% (Cox) | Not until the source passes ~200 MB (§6.1) |
 | Skip pointers on postings | +<20% size; Moffat's L=100 best for short queries | Only for posting lists above ~1000 entries; a linear merge over a `Uint32Array` wins below that |
 | Roaring bitmaps for **filter sets** (branch mask, path prefix, language) | 2 B/elem sparse, 8 KiB dense | Yes **here** — dense and intersected often. Not for term postings, which are sparse |
@@ -1294,6 +1358,14 @@ One pass produces two `Map<token, Uint32Array>` — content tokens and path toke
 with doc IDs as indices into a file array. Intersect rarest-first by linear merge
 over the sorted arrays; merge the path index with a multiplier at query time; score
 with the §5.13 formula. That is the whole structure.
+
+**Not built, and phase 7 is why.** The structure has exactly one consumer — §5.13's
+scorer — and that scorer was built, measured and removed; §5.13 has the table and
+§8 item 7 has the reasoning. A path-only index is not this structure: the path pass
+is one `tokenize` per path over a list the walk already produced, measured in §5.3
+at 0.23 ms for this repository's 68 files, and 22 harness cases at that cost are
+what phase 6 shipped. The remainder of this section is therefore design carried
+forward rather than a description of anything in `src/context.mjs`.
 
 What is deliberately absent, and why:
 
@@ -1501,17 +1573,26 @@ adversarial orders blow it up.
 7. **Hierarchical render and content tier** (§5.4–5.5, §5.13), then the content
    index of §6.3 — and a *persistent* index only past the §6.1 threshold.
 
-   **The render has landed; the content tier has not.** §5.4's file → function stage
-   ships inside the render rather than as a second ranking pass, and §5.5's surface
-   is measured above: the harness's 347 file slots all survive the 50 000-token
-   budget, where the old render held 129 and dropped 218 bodies. §5.13's BM25F
-   content tier and §6.3's index are untouched by this and remain the rest of the
-   item.
+   **The render has landed; the content tier was built and rejected; the index is
+   consequently gone with it.** §5.4's file → function stage ships inside the render
+   rather than as a second ranking pass, and §5.5's surface is measured above: the
+   harness's 347 file slots all survive the 50 000-token budget, where the old
+   render held 129 and dropped 218 bodies.
 
    The render is **not** an eval-number change, and could not be one: the harness
    scores `paths` and the ranking produces the same `paths` to the digit. Its
    measurement is the table in §5.5, and its risk is the one §5.12 item 5 names —
    a figure quoted across a commit boundary is not a comparison.
+
+   §5.13's BM25F was built exactly as the section specifies and measured against the
+   gold set: it loses recall at every weight that makes content evidence matter, by
+   ranking the repository's longest source file first in 22 of 22 runs. The table is
+   in §5.13, the mechanism is §2.4's, and the tier is removed rather than shipped
+   off. **§6.3's index is not built, and this is why**: the index exists to answer
+   this scorer's queries, and the scorer does not ship. Building a content index for
+   a ranking that does not read content would be the §6.1 mistake — structure paid
+   for and never used — so the item ends here rather than continuing into a
+   structure with no consumer. §9 carries what this leaves untested.
 
 Phase 2 precedes 3 and 4 deliberately: without the baseline number, you cannot
 tell whether graph expansion or definition fan-out earned the improvement. Phases 3
@@ -1583,6 +1664,20 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   for them, because no metric in the harness moves with a render. `fileChars` is the
   exception and is argued in §5.5 — it is the head the surface replaces, so the
   render's whole per-file cost is the number that was already there.
+- **§5.13's rejection is a measurement of this corpus, and two variants of it were
+  not built.** The tier was tested as the section writes it — one content field, the
+  whole file, saturated per term. A content field restricted to the file's
+  *declarations and comments* rather than its body is a different signal and was not
+  tried; it would be closer to "the change surface" and further from §2.4's failure,
+  and it is the one shape left that could rescue the idea. So is a content tier used
+  only as a fallback for tasks with no path signal at all, which would preserve the
+  ranking by construction and could not be measured here: every harness run already
+  has path hits.
+- **§6.3's index is unbuilt, so its numbers are the doc's and not this
+  repository's.** The `Uint32Array`-and-merge shape, the sizing claim about
+  compressed inverted files, and the ~200 MB threshold in §6.1 are all from the
+  sources cited there. Nothing in this repository is large enough to test any of
+  them, and with §5.13's scorer gone there is no caller to test them against.
 - **§5.4's declaration end is a heuristic: a declaration ends where the next one
   begins.** That is wrong for a declaration inside a body — a nested function's body
   is bounded by its sibling at the outer level — so a task-named inner function can
@@ -1652,8 +1747,11 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   few-thousand-file repository is a guess. `QUERY_IDF_FLOOR` and
   `NO_MATCH_FLOOR` are both uncalibrated starting values.
 - §5.13's field weight (`w = 5` on every non-content field) is borrowed from
-  Sourcegraph's constant, not measured on this corpus. The `b = 0` on the path
-  fields follows from the model's structure rather than from a measurement.
+  Sourcegraph's constant, not measured on this corpus, and phase 7 did not change
+  that: the weight was swept from 5 to 20 and the ranking did not move, because a
+  path term reaches saturation well below either. The `b = 0` on the path fields
+  follows from the model's structure rather than from a measurement, and with the
+  tier unshipped neither constant is in the shipped code.
 - §2.4's fan-out table probes 5 tokens out of ~15, so its "1 of 7" is a floor, not
   a count. The floor was the right number to carry into phase 4 anyway: the token
   it named is the one the phase recovers, and it is recovered for the reason the
