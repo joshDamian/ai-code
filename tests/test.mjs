@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -2179,6 +2179,61 @@ test('plan mode is countermanded in the system prompt, not the task prompt',()=>
   // An implementer has no plan mode to countermand, and prompting it not to write
   // would contradict the only role that is supposed to write.
   assert.equal(claudeArgs({role:'implementer',model:'m',prompt:'p'}).indexOf('--append-system-prompt'),-1);
+});
+
+test('an agent is handed a port of its own, so its smoke-test server cannot collide with the dashboard',()=>{
+  // The collision is the trigger for the kill the hook refuses, so it is worth
+  // removing on its own: on 2026-09-23 an implementer ran `npm start` in a worktree,
+  // inherited the default port, found the live dashboard on it, and killed its parent.
+  // A dashboard launched as `PORT=4317 ai-code dashboard` used to hand its own port to
+  // every agent it spawned, which is why the variable is deleted rather than defaulted.
+  const before=process.env.PORT;
+  process.env.PORT='4317';
+  try{
+    assert.equal(childEnv({}).PORT,'0');
+    // Last in the merge, so a caller cannot reintroduce the collision by accident.
+    assert.equal(childEnv({PORT:'4317'}).PORT,'0');
+  } finally {
+    if(before===undefined) delete process.env.PORT; else process.env.PORT=before;
+  }
+});
+
+test('a kill that computes its targets is refused, and a kill that names one is not',()=>{
+  // The guard exists because the implementer that killed the dashboard ran with
+  // --dangerously-skip-permissions, which skips the permission prompt but not hooks.
+  // These are exit codes rather than recorded text: what is asserted is which
+  // commands the guard refuses, and that it refuses them for no run but an agent's.
+  const hook=path.join(process.cwd(),'.claude','hooks','deny-port-kill.mjs');
+  const run=(command,mode='bypassPermissions')=>spawnSync(process.execPath,[hook],{
+    input:JSON.stringify({hook_event_name:'PreToolUse',permission_mode:mode,tool_name:'Bash',tool_input:{command}}),
+    encoding:'utf8',
+  });
+  const denied=[
+    // The command that did it, verbatim.
+    "lsof -i :4317 | grep -v COMMAND | awk '{print $2}' | xargs kill -9 2>/dev/null; sleep 1; echo \"Port freed\"",
+    'kill -9 $(lsof -ti:4317)',
+    'pkill -f node',
+    'killall node',
+  ];
+  for(const cmd of denied){
+    const r=run(cmd);
+    assert.equal(r.status,2,`allowed: ${cmd}`);
+    assert.match(r.stderr,/^Denied: /,`no reason given for: ${cmd}`);
+  }
+  const allowed=[
+    // Specific enough to be a decision: a path, an interpreter's file, a pid.
+    'pkill -f "node src/server.mjs"',
+    'pkill -f "AI_CODE_ROOT.*server.mjs"',
+    'kill 4321',
+    // A signal-0 liveness check is a kill by name and touches nothing.
+    'kill -0 4321',
+    'node --test tests/*.mjs',
+  ];
+  for(const cmd of allowed) assert.equal(run(cmd).status,0,`refused: ${cmd}`);
+  // The user's own terminal keeps it. The dashboard is theirs to stop, and
+  // bypassPermissions is the line between their shell and an agent that has no one
+  // to prompt - which is the only reason the guard is allowed to be this blunt.
+  assert.equal(run("lsof -i :4317 | xargs kill -9",'default').status,0);
 });
 
 test('uncommitted work already in the tree is not a planning violation',async()=>{

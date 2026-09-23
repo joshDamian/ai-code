@@ -73,6 +73,30 @@ async function startServer(root,extra={}){
   return {proc,base,port,stderr:()=>stderr,stop:()=>proc.kill('SIGTERM')};
 }
 
+// PORT=0 is what every agent run is handed, so a smoke-test server cannot collide with
+// the dashboard that spawned the agent. That only works if the port the kernel picked is
+// announced: a line echoing the request back would print `localhost:0` and leave the
+// agent with nothing to curl, which is how the collision turned into a kill in the first
+// place. Asserted by reaching the announced port, not by matching the log text.
+test('a server asked for port 0 announces the port it bound, and answers there',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-port0-'));
+  const proc=spawn(process.execPath,['src/server.mjs'],{cwd:process.cwd(),env:{...process.env,AI_CODE_ROOT:root,PORT:'0'},stdio:['ignore','pipe','pipe']});
+  try{
+    const port=await new Promise((res,rej)=>{
+      let out='';
+      const t=setTimeout(()=>rej(new Error(`no port announced: ${JSON.stringify(out)}`)),20000);
+      proc.stdout.on('data',(c)=>{
+        out+=c;
+        const m=out.match(/localhost:(\d+)/);
+        if(m){clearTimeout(t);res(Number(m[1]))}
+      });
+      proc.on('exit',()=>{clearTimeout(t);rej(new Error('server exited before announcing a port'))});
+    });
+    assert.ok(port>0,`announced ${port}, which is the request rather than the result`);
+    assert.equal((await get(`http://localhost:${port}/api/overview`)).status,200);
+  } finally { proc.kill('SIGKILL') }
+});
+
 test('dashboard API responds',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-server-'));const s=await startServer(root);try{const r=await get(`${s.base}/api/overview`);assert.equal(r.status,200);assert.ok(JSON.parse(r.body).providers)}finally{s.stop()}});
 
 test('dashboard control-plane APIs exist',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-api-'));const s=await startServer(root);try{for(const u of ['/api/providers','/api/routing','/api/runs','/api/usage','/api/automations','/api/doctor','/api/jobs']){const r=await get(s.base+u);assert.equal(r.status,200,u)}}finally{s.stop()}});

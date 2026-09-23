@@ -362,4 +362,8 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-server.listen(port, () => console.log(`AI Code Mission Control: http://localhost:${port}`));
+// The requested port is not always the bound port: PORT=0 asks the kernel for a free
+// one, and every agent run is handed PORT=0 (see AGENT_PORT in src/agents.mjs) so a
+// smoke-test server can never collide with the dashboard that spawned the agent. A log
+// that echoed the request back would print `localhost:0` and send the reader hunting.
+server.listen(port, () => console.log(`AI Code Mission Control: http://localhost:${server.address().port}`));

@@ -310,10 +310,22 @@ const AMBIENT_ROUTING_VARS = [
   'CLAUDE_CODE_EFFORT_LEVEL',
 ];
 
+// A server the agent starts must not land on the port the live dashboard is holding.
+// `npm start` in a worktree would answer EADDRINUSE, and on 2026-09-23 an implementer
+// read that as "the port is stuck" and cleared it with
+// `lsof -i :4317 | grep -v COMMAND | awk '{print $2}' | xargs kill -9` - which killed
+// the dashboard, and the dashboard is the agent's own parent, so the run died with it.
+// Zero asks the kernel for a free port, so the collision cannot happen at all; the
+// server prints the port it actually received, which is how the agent finds it.
+const AGENT_PORT = '0';
+
 function childEnv(extra) {
   const env = { ...process.env };
   for (const k of AMBIENT_ROUTING_VARS) delete env[k];
-  return { ...env, ...(extra || {}) };
+  // Deleted rather than overridden in place: a dashboard launched as `PORT=4317
+  // ai-code dashboard` would otherwise hand its own port to every agent it spawns.
+  delete env.PORT;
+  return { ...env, ...(extra || {}), PORT: AGENT_PORT };
 }
 
 // DeepSeek is reached through Claude Code's Anthropic-compatible endpoint, so the
