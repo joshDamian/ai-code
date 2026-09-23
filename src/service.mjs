@@ -1593,6 +1593,26 @@ export class Service {
     return { cost, input, output, cacheRead, cacheWrite, basis };
   }
 
+  // The usage columns of a run row, built once so all three endings write the same
+  // numbers. A run that failed or was cancelled still spent what it spent, and the
+  // two paths that dropped this left the cost aggregates reading as though the work
+  // were free - on exactly the runs whose cost is the interesting one.
+  //
+  // `approxTokens` stands in for `tokens` when the provider reported no usage at
+  // all, which is the preference the success path already applied; the cost stays
+  // zero in that case, because there is no rate to apply to a guess.
+  #usagePatch(priced, usage, approxTokens) {
+    return {
+      tokens: usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens || approxTokens,
+      cost: priced.cost,
+      input_tokens: usage.inputTokens,
+      output_tokens: usage.outputTokens,
+      cache_read_tokens: usage.cacheReadTokens,
+      cache_write_tokens: usage.cacheWriteTokens,
+      cost_basis: priced.basis,
+    };
+  }
+
   // Runs one agent role, walking the fallback chain until one attempt succeeds.
   // Every attempt is its own run row and its own lease, so a failure is recorded
   // rather than retried invisibly.
@@ -1727,22 +1747,16 @@ export class Service {
 
         // Prefer the provider's own usage numbers; fall back to the estimate when
         // it reported none at all.
-        const total = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens || approxTokens;
         const priced = this.price(m, usage, new Date(run.started_at || run.startedAt || new Date()).toISOString());
+        const spent = this.#usagePatch(priced, usage, approxTokens);
         this.store.updateRun(run.id, {
           status: 'succeeded',
           ended_at: new Date().toISOString(),
-          tokens: total,
-          cost: priced.cost,
           duration_ms: Date.now() - started,
           session_id: sessionId,
-          input_tokens: usage.inputTokens,
-          output_tokens: usage.outputTokens,
-          cache_read_tokens: usage.cacheReadTokens,
-          cache_write_tokens: usage.cacheWriteTokens,
-          cost_basis: priced.basis,
+          ...spent,
         });
-        log(`done in ${Math.round((Date.now() - started) / 1000)}s, ${total} tokens`);
+        log(`done in ${Math.round((Date.now() - started) / 1000)}s, ${spent.tokens} tokens`);
         // Nothing used to be written on success, so a DEGRADED provider had no way
         // back to HEALTHY.
         try {
@@ -1755,6 +1769,14 @@ export class Service {
         last = e;
         log(`failed: ${e.code || ''} ${e.message.split('\n')[0]}`);
         const code = e.code || classify(e.message);
+        // Priced from whatever the stream had reported when it stopped. A budget
+        // stop and a cancel both end a run mid-flight, and the tokens it burned to
+        // reach that point are precisely the ones worth recording.
+        const spent = this.#usagePatch(
+          this.price(m, usage, new Date(run.started_at || run.startedAt || new Date()).toISOString()),
+          usage,
+          approxTokens
+        );
 
         if (code === 'CANCELLED') {
           // A cancel is not a provider fault, so the provider is not penalised and
@@ -1765,6 +1787,7 @@ export class Service {
             error: 'Cancelled by user',
             duration_ms: Date.now() - started,
             session_id: e.sessionId ?? null,
+            ...spent,
           });
           // The cancel has been delivered, so it is spent. Leaving the flag set
           // would abort the next agent the moment it started.
@@ -1778,6 +1801,7 @@ export class Service {
           error: `${code} ${e.message}`,
           duration_ms: Date.now() - started,
           session_id: e.sessionId ?? null,
+          ...spent,
         });
         // Health lives in its own table rather than in provider config, so this
         // write cannot race a config edit on the same provider.

@@ -884,8 +884,8 @@ test('a run that exceeds its tool-call budget is stopped',async()=>{
   // The seeded test provider answers every role immediately, so it would be the
   // last-resort mock and the config below would never apply.
   s.updateProvider('mock',{enabled:false});
-  s.addProvider({id:'spiral',name:'Spiral',kind:'mock',enabled:true,config:{routable:true,toolCalls:50}});
-  s.addModel({id:'spiral-m',providerId:'spiral',name:'spiral',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  s.addProvider({id:'spiral',name:'Spiral',kind:'mock',enabled:true,config:{routable:true,toolCalls:50,usage:{input_tokens:100000,output_tokens:5000}}});
+  s.addModel({id:'spiral-m',providerId:'spiral',name:'spiral',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:2000000,inputCostPerMTok:2,outputCostPerMTok:10,billingMode:'api'});
   const r=s.getRouting();
   s.saveRouting({...r,planner:{...r.planner,maxToolCalls:3}});
   const t=s.createTask(p.id,'x');s.prepare(t.id);
@@ -894,6 +894,13 @@ test('a run that exceeds its tool-call budget is stopped',async()=>{
   const run=s.store.listRuns(t.id).pop();
   assert.equal(run.status,'failed');
   assert.match(run.error,/TOOL_CALL_LIMIT/);
+  // Being stopped is not a refund. The provider had already reported this turn's
+  // usage when the budget tripped, and those tokens were spent - three deepseek
+  // planner runs stopped exactly here and every one of them recorded cost 0, which
+  // reads as free work on the only runs whose cost is worth knowing.
+  assert.equal(run.tokens,105000);
+  assert.equal(run.cost,0.25,'100K input at $2/MTok and 5K output at $10/MTok');
+  assert.equal(run.cost_basis,'published-api-rate','priced on the same basis a completed run would be');
   // The provider worked exactly as asked, so the breaker must not hear about it.
   assert.equal(s.providerHealthList().find((h)=>h.providerId==='spiral').state,'HEALTHY');
   assert.equal(s.store.listRuns(t.id).length,1,'a budget failure is not retried on another provider');
@@ -912,6 +919,15 @@ test('a run that exceeds its cost ceiling is stopped',async()=>{
   const t=s.createTask(p.id,'x');s.prepare(t.id);
   await assert.rejects(()=>s.plan(t.id),(e)=>e.code==='COST_LIMIT'&&/over its ceiling of \$1/.test(e.message));
   assert.equal(s.store.listRuns(t.id).length,1,'a budget failure is not retried on another provider');
+  // The run was stopped, not refunded. It burned 800K tokens at $10/MTok to reach
+  // the ceiling, and a row that records that burn as zero reads as free work - on
+  // the one run whose cost is the entire reason it exists. The ceiling is checked
+  // as the stream arrives, so the tokens that tripped it are already counted.
+  const stopped=s.store.listRuns(t.id)[0];
+  assert.equal(stopped.cost,8,'the spend that tripped the ceiling is the spend recorded');
+  assert.equal(stopped.tokens,800000);
+  assert.equal(stopped.input_tokens,800000);
+  assert.equal(stopped.cost_basis,'published-api-rate','priced on the same basis a completed run would be');
 });
 
 // The state a crash between the planner run succeeding and plan() writing that
