@@ -786,7 +786,15 @@ export class Service {
       }
     }
     const wt = createWorktree(p.path, t.id);
-    this.store.updateTask(id, { worktree: wt.dir, branch: wt.branch, base_commit: wt.base });
+    // A reused worktree is still on the commit it was cut from, while createWorktree
+    // returns today's HEAD for the base. Rewriting the recorded cut to HEAD is not a
+    // refresh: the reviewer's diff is taken against this field, so every commit that
+    // landed on main since the cut enters the diff as a deletion, and the reviewer
+    // reads the repository's own history as the agent having reverted it. Keeping the
+    // recorded base is what makes a re-run over an existing worktree show that work
+    // and nothing else. Only a worktree created just now takes the new cut.
+    const base = t.base_commit && revParse(wt.dir, t.base_commit) ? t.base_commit : wt.base;
+    this.store.updateTask(id, { worktree: wt.dir, branch: wt.branch, base_commit: base });
     this.transition(id, 'IMPLEMENTING');
     try {
       await this.runRole(t, 'implementer', 'Implement the approved plan in this worktree. Do not change files outside the worktree. Do not alter AI Code task metadata.', wt.dir);

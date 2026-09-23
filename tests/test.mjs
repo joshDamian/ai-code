@@ -3554,4 +3554,17 @@ test('a task left in IMPLEMENTING is re-armed by approve, and no step before tha
 // here. The implementer is the only role whose resume is recorded, and the worktree
 // survives this, so what the next run picks up is the work the dead one left.
 assert.equal(s.approve(t.id).state,'APPROVED')});
+// The reviewer's diff is taken against base_commit, and a reused worktree is still on
+// the commit it was cut from while createWorktree hands back today's HEAD. Rewriting
+// the field to HEAD therefore does not refresh anything: it puts every commit that
+// landed on main since the cut into the diff as a deletion, and the reviewer reads
+// the repository's own history as the agent having reverted it. This is the state the
+// Re-arm button leads into, so it is the state that has to hold.
+test('a re-run over an existing worktree keeps the cut it was made from',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+// The worktree as the dead run left it, with main free to move on afterwards.
+const wt=createWorktree(root,t.id);s.store.updateTask(t.id,{worktree:wt.dir,branch:wt.branch,base_commit:wt.base});const cut=wt.base;
+fs.writeFileSync(path.join(root,'README.md'),'moved on');sh(root,['add','.']);commitAs(root,'later');assert.notEqual(sh(root,['rev-parse','HEAD']),cut,'main has to have moved for this to mean anything');
+await s.implement(t.id);
+assert.equal(fs.realpathSync(s.task(t.id).worktree),fs.realpathSync(wt.dir),'the worktree is reused, not recreated');
+assert.equal(s.task(t.id).base_commit,cut,"the diff base stays where the worktree was cut, so main's own commits are not read as deletions")});
 test('closeTask removes the worktree if it exists',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const beforeClose=s.task(t.id);assert.equal(beforeClose.state,'APPROVED');const wtDir=createWorktree(s.project(p.id).path,t.id);s.store.updateTask(t.id,{worktree:wtDir.dir,branch:wtDir.branch,base_commit:wtDir.base});assert.ok(fs.existsSync(wtDir.dir));s.closeTask(t.id);assert.equal(fs.existsSync(wtDir.dir),false)});
