@@ -4,7 +4,7 @@ import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
-import { TextInput, Select } from '../components/form.mjs';
+import { TextArea, Select } from '../components/form.mjs';
 
 const TABS = [
   { id: 'all', label: 'All', states: null },
@@ -101,7 +101,21 @@ export function Tasks({ navigate }) {
                   options=${projects.map((p) => ({ value: p.id, label: p.name }))}
                   loading=${saving}
                 />
-                <${TextInput} label="Description" value=${title} onInput=${setTitle} placeholder="Describe what the task should accomplish" loading=${saving} />
+                <${TextArea}
+                  label="Description"
+                  value=${title}
+                  onInput=${setTitle}
+                  placeholder="Describe what the task should accomplish"
+                  rows=${4}
+                  loading=${saving}
+                  onKeyDown=${(e) => {
+                    // Enter inserts a newline in a textarea, so submission needs a modifier.
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                      e.preventDefault();
+                      submit(e);
+                    }
+                  }}
+                />
                 <button class="btn" type="submit" disabled=${saving || !projects.length}>${saving ? 'Creating…' : 'Create task'}</button>
                 ${!projects.length ? html`<div class="muted">Add a project first.</div>` : null}
               </form>
