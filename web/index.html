@@ -263,6 +263,9 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .tab.active{color:var(--text);border-bottom:2px solid var(--accent)}
 .tab-count{color:var(--muted);font-weight:500;font-size:12px}
 .tab.active .tab-count{color:var(--accent)}
+/* A revision that landed while the user was on another tab. Not .tab-count, which is
+   for numbers: this is a flag, and there is only ever one of it. */
+.tab-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-left:6px;vertical-align:middle}
 .tab-content{margin-top:16px}
 
 /* ---- task detail ---- */
@@ -275,6 +278,11 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .link-btn{background:none;border:0;padding:0;color:var(--accent);font:inherit;font-size:12px;font-weight:600;text-decoration:underline;cursor:pointer}
 .link-btn:hover{opacity:1;text-decoration:none}
 .jump-btn{position:sticky;bottom:10px;margin:10px auto 0;display:block}
+/* The revision notice, and the same shape reused for the mid-edit one. Neutral rather
+   than a warning tone: a revision landing is the thing that was asked for. */
+.plan-notice{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px;padding:9px 13px;border:1px solid var(--accent-dim);border-radius:var(--radius-sm);background:var(--panel2)}
+.plan-live{margin-bottom:0}
+.plan-action{margin-top:9px;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* ---- event stream ---- */
 .event-stream{display:flex;flex-direction:column;gap:8px}

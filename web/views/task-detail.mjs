@@ -1,5 +1,5 @@
 // Full-page task view (not a modal). URL hash: #/tasks/:id
-import { html, useState, useEffect, useRef, useCallback, bodyKind } from '../lib.mjs';
+import { html, useState, useEffect, useRef, useCallback, useMemo, bodyKind, describeEvent, formatDuration } from '../lib.mjs';
 import { api, taskStreamUrl } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
@@ -21,10 +21,25 @@ export function TaskDetail({ id, navigate }) {
   const [tab, setTab] = useState('plan');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  // When the revision on screen landed. Session-local, and only ever set for a
+  // revision that arrived while the user was looking at another tab: the marker means
+  // "this changed under you", not "this plan has a predecessor".
+  const [revisedAt, setRevisedAt] = useState(null);
+  // The plan timestamp the user has seen. `undefined` until the first payload, because
+  // a revision that landed before this page opened is not news.
+  const seenPlanAtRef = useRef(undefined);
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const liveRef = useRef(null);
+  // The newest event belonging to the run the server says is live, which is what the
+  // plan tab reads for its action line.
+  const actionRef = useRef(null);
+  const buffer = useMemo(() => createEventBuffer(), [id]);
 
   const load = useCallback(async () => {
     try {
       const d = await api.taskShow(id);
+      liveRef.current = d.live || null;
       setData(d);
       setError(null);
     } catch (e) {
@@ -35,19 +50,115 @@ export function TaskDetail({ id, navigate }) {
   useEffect(() => {
     setData(null);
     setTab('plan');
+    setRevisedAt(null);
+    seenPlanAtRef.current = undefined;
+    liveRef.current = null;
+    actionRef.current = null;
     load();
   }, [id, load]);
 
-  // Ground truth for "something is happening" is a run with status running, not the
-  // task state. States linger in the database after a crash or a cancel; runs do not.
-  const live = !!(data && data.runs.some((r) => r.status === 'running'));
+  // The one event stream on the page. It used to live in the activity tab, which tore
+  // it down on every tab switch: a refine that landed while the user was reading the
+  // plan was never seen, and the plan sat stale until a reload. Hoisted here it
+  // survives the switch, and the `state` frame the server already sends every 500ms -
+  // which the tab used to drop - becomes what keeps the task current.
+  useEffect(() => {
+    buffer.reset();
+    let es = null;
+    try {
+      es = new EventSource(taskStreamUrl(id));
+      es.addEventListener('meta', (e) => {
+        try {
+          const parsed = JSON.parse(e.data);
+          // How many events this task has in total, versus how many the server sent
+          // us. Drives the truncation notice.
+          if (parsed && Number.isFinite(parsed.total)) buffer.setMeta(parsed);
+        } catch (err) {
+          /* ignore malformed frame */
+        }
+      });
+      es.addEventListener('event', (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          buffer.push(ev);
+          // Kept here rather than derived from the rendered list, because the plan tab
+          // reads it on its own one-second clock: re-parsing the plan markdown for every
+          // event of a token stream is what makes a live tab stutter.
+          if (ev.run_id && ev.run_id === liveRef.current?.runId) actionRef.current = ev;
+        } catch (err) {
+          /* ignore malformed event */
+        }
+      });
+      es.addEventListener('state', (e) => {
+        let frame;
+        try {
+          frame = JSON.parse(e.data);
+        } catch (err) {
+          return;
+        }
+        if (!frame || !frame.task) return;
+        const next = frame.live || null;
+        // The frame carries the task but not the runs' cost, tokens or duration, so
+        // both ends of a run - a new run id, and a run id going away - are worth one
+        // full read rather than a timer.
+        const started = next && next.runId !== liveRef.current?.runId;
+        const ended = !next && !!liveRef.current;
+        liveRef.current = next;
+        if (started) actionRef.current = null;
+        if (started || ended) load();
+
+        const at = frame.task.plan_at || null;
+        if (seenPlanAtRef.current === undefined) {
+          seenPlanAtRef.current = at;
+        } else if (at !== seenPlanAtRef.current) {
+          // The ref moves whether or not the user is looking, so a second revision is
+          // not mistaken for the first. What clears the marker is acting on the
+          // revision, not glancing at the tab it is on.
+          seenPlanAtRef.current = at;
+          setRevisedAt(Date.now());
+          // No toast for the tab the user is already reading: the notice below the
+          // plan says the same thing and does not disappear on its own.
+          if (tabRef.current !== 'plan') showToast('Plan revised.', 'success');
+        }
+        // One update per frame rather than one per field, so the task, the live run
+        // and the revision marker all describe the same instant.
+        setData((d) => (d ? { ...d, task: frame.task, live: next } : d));
+        // A finished task is the one case the browser must not reconnect on. Every
+        // other stream ending is the tick cap closing a resting task, and the next
+        // connection is answered by a fresh tail; this one would be answered by a
+        // stream that ends on its first tick, and the retry is a second.
+        if (frame.task.state === 'COMPLETE' || frame.task.state === 'FAILED') es.close();
+      });
+      es.addEventListener('error', () => {
+        /* EventSource retries automatically; nothing to surface here */
+      });
+    } catch (err) {
+      showToast('Could not open activity stream.', 'error');
+    }
+    return () => {
+      if (es) es.close();
+      buffer.stop();
+    };
+  }, [id, buffer, load]);
+
+  // Acting on the revision is the acknowledgement. Opening the tab is not: the dot
+  // says "this changed under you", and clearing it on arrival would mean the sentence
+  // it was pointing at had already been dismissed by the time it was read.
+  const readAction = useCallback(() => actionRef.current, []);
+  const acknowledgeRevision = useCallback(() => setRevisedAt(null), []);
+
+  // The server's answer, not a scan of the runs table: a run row sits at 'running'
+  // for as long as it takes something to notice the process that owned it is gone,
+  // and a task state is set before its run starts and cleared after it ends.
+  const live = data?.live || null;
+  const liveOn = !!live;
   const working = data ? WORKING_STATES.has(data.task.state) : false;
 
   useEffect(() => {
-    if (!live && !working) return;
+    if (!liveOn && !working) return;
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
-  }, [live, working, load]);
+  }, [liveOn, working, load]);
 
   // `okMsg` may be a function of what `fn` returned, because an operation that can end
   // more than one way - a port that lands, or one that stops short and leaves a command
@@ -78,7 +189,6 @@ export function TaskDetail({ id, navigate }) {
   if (!data) return html`<${Spinner} message="Loading task..." />`;
 
   const { task, runs } = data;
-  const activeRun = runs.find((r) => r.status === 'running') || null;
 
   return html`
     <div class="view-task-detail">
@@ -97,19 +207,26 @@ export function TaskDetail({ id, navigate }) {
       </div>
 
       <div class="tabs">
-        ${TABS.map((t) => html`<button key=${t} class="tab ${tab === t ? 'active' : ''}" onClick=${() => setTab(t)}>${t.toUpperCase()}</button>`)}
+        ${TABS.map(
+          (t) => html`
+            <button key=${t} class="tab ${tab === t ? 'active' : ''}" onClick=${() => setTab(t)}>
+              ${t.toUpperCase()}
+              ${t === 'plan' && revisedAt && tab !== 'plan' ? html`<span class="tab-dot" role="img" aria-label="Plan revised"></span>` : null}
+            </button>
+          `
+        )}
       </div>
 
       <div class="tab-content">
-        ${tab === 'plan' ? html`<${PlanTab} task=${task} busy=${busy} run=${run} activeRun=${activeRun} lastRun=${runs[runs.length - 1] || null} />` : null}
+        ${tab === 'plan' ? html`<${PlanTab} task=${task} busy=${busy} run=${run} live=${live} revision=${data.revision} revisedAt=${revisedAt} readAction=${readAction} onAcknowledge=${acknowledgeRevision} lastRun=${runs[runs.length - 1] || null} />` : null}
         ${tab === 'execute' ? html`<${ExecuteTab} task=${task} runs=${runs} busy=${busy} run=${run} />` : null}
-        ${tab === 'review' ? html`<${ReviewTab} task=${task} busy=${busy} run=${run} activeRun=${activeRun} />` : null}
+        ${tab === 'review' ? html`<${ReviewTab} task=${task} busy=${busy} run=${run} live=${live} />` : null}
         ${tab === 'port' ? html`<${PortTab} task=${task} branches=${data.branches || []} busy=${busy} run=${run} />` : null}
-        ${tab === 'activity' ? html`<${ActivityTab} taskId=${task.id} />` : null}
+        ${tab === 'activity' ? html`<${ActivityTab} taskId=${task.id} store=${buffer} />` : null}
       </div>
 
       ${
-        activeRun
+        live
           ? html`
               <div class="action-bar">
                 <button class="btn danger" disabled=${busy} onClick=${() => run(() => api.taskCancel(task.id), 'Cancel requested.')}>Cancel</button>
@@ -121,21 +238,105 @@ export function TaskDetail({ id, navigate }) {
   `;
 }
 
-function PlanTab({ task, busy, run, activeRun, lastRun }) {
+// The plan, and the two things that can change underneath it while it is on screen: a
+// planner running - the first plan or a refine - and a revision that landed. Both are
+// read from the server's `live` and from the revision the task carries, never from a
+// local flag, so a reload mid-refine and a second tab see the same thing this one does.
+function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAcknowledge, lastRun }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.plan || '');
   const [refining, setRefining] = useState(false);
   const [feedback, setFeedback] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+  const [view, setView] = useState('plan');
+  const [staleDraft, setStaleDraft] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const [action, setAction] = useState(null);
+  // The plan the draft was seeded from, so a revision landing mid-edit can be told
+  // apart from the user's own typing.
+  const draftBaseRef = useRef(task.plan || '');
 
+  const planning = live?.role === 'planner';
+  const hasPlan = bodyKind(task.plan) !== 'empty';
+  const elapsed = live?.startedAt && Number.isFinite(Date.parse(live.startedAt)) ? now - Date.parse(live.startedAt) : null;
+
+  // One timer for both live numbers in this tab: how long the planner has been running
+  // and how long ago the revision landed. It is also what publishes the action line,
+  // which is read from the stream's ref rather than passed down - so a token stream
+  // re-renders this tab once a second, not once per event.
   useEffect(() => {
+    if (!planning && !revisedAt) return;
+    const tick = () => {
+      setNow(Date.now());
+      if (planning) setAction(readAction());
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [planning, revisedAt, readAction]);
+
+  // The draft is re-synced with the plan only while the editor is closed. Doing it
+  // unconditionally is what silently replaced what somebody was typing when a revision
+  // landed mid-edit, and Save then wrote the model's text back as if it were theirs.
+  useEffect(() => {
+    if (editing) {
+      if ((task.plan || '') !== draftBaseRef.current) setStaleDraft(true);
+      return;
+    }
+    draftBaseRef.current = task.plan || '';
     setDraft(task.plan || '');
-  }, [task.plan]);
+    setStaleDraft(false);
+  }, [task.plan, editing]);
+
+  // One of the two things that clears the revision marker, and the one the dot is
+  // pointing at. Reading the diff is the review the notice asked for.
+  function showChanges() {
+    setView('changes');
+    onAcknowledge();
+  }
+
+  // The blocked POST rejects with this once the run is cancelled, which is the outcome
+  // that was asked for - so it is not routed through run(), which would toast it as an
+  // error. The panel stays open with the feedback intact, so resubmitting is one click.
+  async function submitFeedback() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.taskRefine(task.id, feedback);
+      setFeedback('');
+      setRefining(false);
+      showToast('Refine requested.', 'success');
+    } catch (e) {
+      if (!/Cancelled by user/.test(e.message)) {
+        // A refusal can name every provider that was tried and why none was left, and
+        // a toast truncates it. So it is rendered in the tab as well as toasted.
+        setError(e.message);
+        showToast(e.message, 'error');
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const liveBlock = !planning
+    ? null
+    : html`
+        <div class="card plan-live">
+          <div class="row">
+            <span class="spinner"></span>
+            <b>Refining plan…</b>
+            ${elapsed != null ? html`<span class="muted">${formatDuration(elapsed)}</span>` : null}
+          </div>
+          ${action ? html`<div class="plan-action muted">${describeEvent(action)?.text || ''}</div>` : null}
+        </div>
+      `;
 
   // PLANNING is both "a planner is running" and "ready for a planner to run". Only the
-  // first is a spinner; the second needs a way out, or a failed or cancelled plan
-  // strands the task behind a loading indicator forever.
-  if (task.state === 'PLANNING') {
-    if (activeRun || busy) return html`<${Spinner} message="Planning in progress..." />`;
+  // second is this branch; the first is the live block above, which a refine needs
+  // just as much and which the state alone cannot tell you about. Without the branch a
+  // failed or cancelled plan strands the task behind a loading indicator forever.
+  if (task.state === 'PLANNING' && !planning) {
     return html`
       <div class="stack">
         ${
@@ -152,18 +353,76 @@ function PlanTab({ task, busy, run, activeRun, lastRun }) {
 
   return html`
     <div class="stack">
+      ${liveBlock}
+
+      ${
+        // Not while editing: the editor has its own banner for the same event, and it
+        // is the one that knows what to do about it. This one's button would also
+        // switch the body out from under the editor, which the editor then wins.
+        revisedAt && !editing && task.state === 'AWAITING_APPROVAL'
+          ? html`
+              <div class="plan-notice">
+                <span>Revised ${formatDuration(now - revisedAt)} ago — review the changes.</span>
+                <button class="link-btn" onClick=${showChanges}>See what changed</button>
+              </div>
+            `
+          : null
+      }
+
+      ${
+        hasPlan
+          ? html`
+              <div class="diff-modes">
+                <button class="btn secondary ${view === 'plan' ? 'on' : ''}" onClick=${() => setView('plan')}>Plan</button>
+                <button class="btn secondary ${view === 'changes' ? 'on' : ''}" disabled=${!revision?.hasPrev} onClick=${showChanges}>Changes vs previous</button>
+              </div>
+            `
+          : null
+      }
+
       ${
         editing
           ? html`
+              ${
+                staleDraft
+                  ? html`
+                      <div class="plan-notice">
+                        <span>A new revision arrived while you were editing.</span>
+                        <button
+                          class="link-btn"
+                          onClick=${() => {
+                            draftBaseRef.current = task.plan || '';
+                            setDraft(task.plan || '');
+                            setStaleDraft(false);
+                          }}
+                        >
+                          Load the revision
+                        </button>
+                        <button
+                          class="link-btn"
+                          onClick=${() => {
+                            draftBaseRef.current = task.plan || '';
+                            setStaleDraft(false);
+                          }}
+                        >
+                          Keep mine
+                        </button>
+                      </div>
+                    `
+                  : null
+              }
               <${TextArea} value=${draft} onInput=${setDraft} rows=${16} loading=${busy} />
               <div class="row">
                 <button
                   class="btn"
                   disabled=${busy}
-                  onClick=${() => run(async () => {
-                    await api.updatePlan(task.id, draft);
-                    setEditing(false);
-                  }, 'Plan saved.')}
+                  onClick=${() => {
+                    onAcknowledge();
+                    run(async () => {
+                      await api.updatePlan(task.id, draft);
+                      setEditing(false);
+                    }, 'Plan saved.');
+                  }}
                 >
                   Save
                 </button>
@@ -178,29 +437,30 @@ function PlanTab({ task, busy, run, activeRun, lastRun }) {
                 </button>
               </div>
             `
-          : bodyKind(task.plan) === 'empty'
-            ? html`<pre class="code-block">No plan yet.</pre>`
-            : html`<${Markdown} text=${task.plan} />`
+          : view === 'changes'
+            ? revision?.changed
+              ? html`<${DiffViewer} diff=${revision.diff} />`
+              : html`<p class="muted">${revision?.hasPrev ? 'Identical to the previous revision.' : 'No previous revision yet.'}</p>`
+            : hasPlan
+              ? html`<${Markdown} text=${task.plan} />`
+              : html`<pre class="code-block">No plan yet.</pre>`
       }
 
       ${
         refining
           ? html`
               <div class="card">
-                <${TextArea} label="Feedback" value=${feedback} onInput=${setFeedback} rows=${4} placeholder="What should change?" loading=${busy} />
+                <${TextArea} label="Feedback" value=${feedback} onInput=${setFeedback} rows=${4} placeholder="What should change?" loading=${submitting} />
+                ${error ? html`<p class="error-text">${error}</p>` : null}
                 <div class="row">
-                  <button
-                    class="btn"
-                    disabled=${busy || !feedback.trim()}
-                    onClick=${() => run(async () => {
-                      await api.taskRefine(task.id, feedback);
-                      setFeedback('');
-                      setRefining(false);
-                    }, 'Refine requested.')}
-                  >
-                    Submit feedback
-                  </button>
-                  <button class="btn secondary" onClick=${() => setRefining(false)}>Cancel</button>
+                  <button class="btn" disabled=${busy || submitting || planning || !feedback.trim()} onClick=${submitFeedback}>Submit feedback</button>
+                  ${
+                    planning
+                      ? html`<button class="btn danger" disabled=${busy} onClick=${() => run(() => api.taskCancel(task.id), 'Cancel requested.')}>
+                          Cancel refine
+                        </button>`
+                      : html`<button class="btn secondary" onClick=${() => setRefining(false)}>Cancel</button>`
+                  }
                 </div>
               </div>
             `
@@ -211,10 +471,10 @@ function PlanTab({ task, busy, run, activeRun, lastRun }) {
         !editing && task.state === 'AWAITING_APPROVAL'
           ? html`
               <div class="row">
-                <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskApprove(task.id), 'Plan approved.')}>Approve</button>
-                <button class="btn danger" disabled=${busy} onClick=${() => run(() => api.taskReject(task.id), 'Plan rejected.')}>Reject</button>
-                <button class="btn secondary" disabled=${busy} onClick=${() => setRefining((r) => !r)}>Refine</button>
-                <button class="btn secondary" disabled=${busy} onClick=${() => setEditing(true)}>Edit</button>
+                <button class="btn" disabled=${busy || planning} onClick=${() => { onAcknowledge(); run(() => api.taskApprove(task.id), 'Plan approved.'); }}>Approve</button>
+                <button class="btn danger" disabled=${busy || planning} onClick=${() => { onAcknowledge(); run(() => api.taskReject(task.id), 'Plan rejected.'); }}>Reject</button>
+                <button class="btn secondary" disabled=${busy || planning} onClick=${() => { onAcknowledge(); setRefining((r) => !r); }}>Refine</button>
+                <button class="btn secondary" disabled=${busy || planning} onClick=${() => { onAcknowledge(); setEditing(true); }}>Edit</button>
               </div>
             `
           : null
@@ -515,9 +775,9 @@ function row(label, value) {
   </div>`;
 }
 
-function ReviewTab({ task, busy, run, activeRun }) {
+function ReviewTab({ task, busy, run, live }) {
   if (task.state === 'REVIEWING') {
-    if (activeRun || busy) return html`<${Spinner} message="Review in progress..." />`;
+    if (live || busy) return html`<${Spinner} message="Review in progress..." />`;
     return html`
       <div class="stack">
         <p class="muted">This task is in review, but no reviewer is running.</p>
@@ -559,76 +819,90 @@ function ReviewTab({ task, busy, run, activeRun }) {
 const MAX_EVENTS = 500;
 const FLUSH_MS = 16;
 
-function ActivityTab({ taskId }) {
-  const [events, setEvents] = useState([]);
+// The event buffer the stream in TaskDetail writes into. Held here rather than in the
+// page's render state because two consumers read it at two very different rates: the
+// activity list redraws per batch, and the plan tab wants one line from it once a
+// second. Page state would make every batch re-render the plan markdown and the diff
+// beside it, which is what a live tab stuttering looks like.
+//
+// A subscriber list rather than preact state is not a preference: an event that lands
+// while the activity tab is closed still has to be in the buffer when it opens, so the
+// buffer cannot belong to the tab, and it must not redraw the page to say so.
+function createEventBuffer() {
+  const subs = new Set();
+  let events = [];
+  let meta = null;
+  let pending = [];
+  let timer = 0;
+
+  // Each frame committed on its own would redraw the whole list per event - at tens of
+  // thousands of events that blocks the main thread outright. Commit once per tick
+  // instead. setTimeout rather than rAF so the buffer still drains in a background tab.
+  function flush() {
+    timer = 0;
+    const batch = pending;
+    if (!batch.length) return;
+    pending = [];
+    const next = events.concat(batch);
+    events = next.length > MAX_EVENTS ? next.slice(next.length - MAX_EVENTS) : next;
+    for (const fn of subs) fn();
+  }
+
+  return {
+    get events() {
+      return events;
+    },
+    get meta() {
+      return meta;
+    },
+    setMeta(m) {
+      meta = m;
+      for (const fn of subs) fn();
+    },
+    push(ev) {
+      pending.push(ev);
+      if (!timer) timer = setTimeout(flush, FLUSH_MS);
+    },
+    on(fn) {
+      subs.add(fn);
+      return () => subs.delete(fn);
+    },
+    reset() {
+      events = [];
+      meta = null;
+      pending = [];
+      if (timer) clearTimeout(timer);
+      timer = 0;
+      for (const fn of subs) fn();
+    },
+    stop() {
+      if (timer) clearTimeout(timer);
+      timer = 0;
+    },
+  };
+}
+
+function ActivityTab({ taskId, store }) {
+  const [events, setEvents] = useState(store.events);
+  const [meta, setMeta] = useState(store.meta);
   const [older, setOlder] = useState([]);
-  const [meta, setMeta] = useState(null);
   const [allLoaded, setAllLoaded] = useState(false);
   const [olderBusy, setOlderBusy] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
-  const pendingRef = useRef([]);
-  const flushRef = useRef(0);
   const endRef = useRef(null);
   const boxRef = useRef(null);
 
   useEffect(() => {
-    setEvents([]);
-    setOlder([]);
-    setMeta(null);
-    setAllLoaded(false);
-    pendingRef.current = [];
-    let es = null;
-
-    // Each frame committed on its own would re-render the entire list per event —
-    // at tens of thousands of events that blocks the main thread outright. Buffer
-    // the frames and commit once per tick instead. setTimeout rather than rAF so the
-    // buffer still drains in a background tab.
-    function flush() {
-      flushRef.current = 0;
-      const batch = pendingRef.current;
-      if (!batch.length) return;
-      pendingRef.current = [];
-      setEvents((list) => {
-        const next = list.concat(batch);
-        return next.length > MAX_EVENTS ? next.slice(next.length - MAX_EVENTS) : next;
-      });
-    }
-    function schedule() {
-      if (!flushRef.current) flushRef.current = setTimeout(flush, FLUSH_MS);
-    }
-
-    try {
-      es = new EventSource(taskStreamUrl(taskId));
-      es.addEventListener('meta', (e) => {
-        try {
-          const parsed = JSON.parse(e.data);
-          // How many events this task has in total, versus how many the server sent
-          // us. Drives the truncation notice.
-          if (parsed && Number.isFinite(parsed.total)) setMeta(parsed);
-        } catch (err) {
-          /* ignore malformed frame */
-        }
-      });
-      es.addEventListener('event', (e) => {
-        try {
-          pendingRef.current.push(JSON.parse(e.data));
-          schedule();
-        } catch (err) {
-          /* ignore malformed event */
-        }
-      });
-      es.addEventListener('error', () => {
-        /* EventSource retries automatically; nothing to surface here */
-      });
-    } catch (err) {
-      showToast('Could not open activity stream.', 'error');
-    }
-    return () => {
-      if (es) es.close();
-      if (flushRef.current) clearTimeout(flushRef.current);
-      flushRef.current = 0;
+    const sync = () => {
+      setEvents(store.events);
+      setMeta(store.meta);
     };
-  }, [taskId]);
+    setOlder([]);
+    setAllLoaded(false);
+    setAutoScroll(true);
+    sync();
+    return store.on(sync);
+  }, [store]);
 
   useEffect(() => {
     if (autoScroll && endRef.current) {
