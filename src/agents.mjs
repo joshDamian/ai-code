@@ -65,6 +65,13 @@ export async function* runMock(input) {
   for (let i = 0; i < (input.mockToolCalls || 0); i++) {
     yield { type: 'message', data: { message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: `file-${i}.mjs` } }] } } };
   }
+  // A subagent's calls arrive on the parent's stream carrying the id of the spawn
+  // that owns them, which is what separates them from the parent's own. Emitted on
+  // demand for the same reason as the loop above: the rule that the budget does not
+  // count them is only worth having if a test can show both halves at once.
+  for (let i = 0; i < (input.mockSubagentToolCalls || 0); i++) {
+    yield { type: 'message', data: { parent_tool_use_id: 'call_mock_subagent', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: `sub-${i}.mjs` } }] } } };
+  }
   // Which files the run looked at. The execution gate compares the dirty set
   // against exactly this, so a test that cannot name these would be testing the
   // context ranker rather than the gate.
@@ -381,6 +388,7 @@ export async function* runAgent(provider, model, input) {
       mockCode: provider.config.failCode,
       mockSessionId: provider.config.sessionId,
       mockToolCalls: provider.config.toolCalls || 0,
+      mockSubagentToolCalls: provider.config.subagentToolCalls || 0,
       mockReadPaths: provider.config.readPaths || [],
       mockWrites: provider.config.writes || [],
       mockUsage: provider.config.usage || null,

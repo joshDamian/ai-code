@@ -59,6 +59,11 @@ export function readPaths(events, contextFiles, root) {
   return out;
 }
 
+// Unlike countToolCalls, this one takes the subagent's reads too: what the dirty
+// baseline is asking is which files the plan rested on, and a file an Explore
+// opened is evidence the planner was handed whether or not the planner opened it.
+// The split is deliberate - the budget bounds the loop a role drives, this bounds
+// the tree a plan depends on - so the two filters should not be made to match.
 function toolPaths(events) {
   const out = [];
   for (const e of events) {
@@ -349,7 +354,20 @@ export const PLANNER_PROMPT =
 
 // One assistant message can carry several tool calls at once, so the content
 // blocks are counted rather than the messages that contain them.
+// The calls made inside a subagent are not the calling agent's calls, and a frame
+// from a subagent says so with the id of the spawn that owns it. On 2026-09-23 the
+// planner of task bb9ac058 made three top-level calls - three Explore spawns - and
+// was killed at 41 for the 38 its subagents made, with none of the three reports
+// delivered: it was stopped for work it had delegated and could not bound, since a
+// subagent's calls stream in after it is already running.
+//
+// Delegation is still bounded, by the run's cost. A subagent's frames carry usage
+// and usageFrom reads them, so maxRunCost sees every token spent below the parent -
+// 88% of that planner's input tokens were its subagents'. That ceiling was written
+// for exactly this case (AUDIT-PLANNER-SPIRAL.md, Fix 4) and could never fire while
+// the tool-call budget counted the same work first.
 function countToolCalls(event) {
+  if (event.data?.parent_tool_use_id) return 0;
   const content = event.data?.message?.content;
   const blocks = Array.isArray(content) ? content.filter((c) => c?.type === 'tool_use').length : 0;
   return blocks + (event.type === 'tool_use' ? 1 : 0);

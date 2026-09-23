@@ -2067,6 +2067,29 @@ test('a run that exceeds its tool-call budget is stopped',async()=>{
   assert.equal(s.task(t.id).state,'FAILED','the task needs re-scoping, not a silent retry');
 });
 
+test('a subagent\'s tool calls are not charged to the agent that spawned it',async()=>{
+  // The planner of bb9ac058 made three top-level calls and was killed at 41, because
+  // the other 38 were its Explore subagents'. It could not have avoided that: a
+  // subagent's calls arrive after it is already running, so the parent has no moment
+  // at which it could bound them, and no view of the running total to adapt to. The
+  // budget bounds the loop the role drives; delegation is bounded by the cost
+  // ceiling, which sees subagent usage because those frames carry it.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'subbie',name:'Subbie',kind:'mock',enabled:true,config:{routable:true,subagentToolCalls:50}});
+  s.addModel({id:'subbie-m',providerId:'subbie',name:'subbie',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:2000000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,maxToolCalls:3}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const planned=await s.plan(t.id);
+  assert.equal(planned.state,'AWAITING_APPROVAL','50 subagent calls do not stop a planner budgeted at 3 of its own');
+  // The other half of the rule, and the reason this is a separation rather than an
+  // exemption: the same 50 calls, made by the agent itself, still stop it.
+  const t2=s.createTask(p.id,'y');s.prepare(t2.id);
+  s.updateProvider('subbie',{config:{routable:true,toolCalls:50}});
+  await assert.rejects(()=>s.plan(t2.id),(e)=>e.code==='TOOL_CALL_LIMIT');
+});
 test('a run that exceeds its cost ceiling is stopped',async()=>{
   const root=repo();const s=new Service(root,{allowMock:true});
   const p=s.initProject('p',root);
