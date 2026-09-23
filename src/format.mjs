@@ -78,8 +78,9 @@ function toolOutput(block) {
 }
 
 // The final result frame. Its `result` field holds the run's closing message, which
-// for a planner or reviewer is the answer, so the metadata rides along rather than
-// replacing it.
+// for a planner is the plan, so the metadata rides along rather than replacing it.
+// A reviewer's answer is a structured verdict instead, and its prose is read from
+// there.
 function describeResult(data) {
   const ms = Number.isFinite(data.duration_ms)
     ? data.duration_ms
@@ -96,7 +97,12 @@ function describeResult(data) {
   ]
     .filter(Boolean)
     .join(' · ');
-  const body = isText(data.result) ? firstLine(data.result, 140) : '';
+  // A reviewer's closing frame carries its answer twice over: `result` is the JSON
+  // envelope that --json-schema produces, and the words a person wants are in
+  // `structured_output.review`. Preferring the field is what keeps a truncated
+  // `{"verdict":"PASS",…` off the activity feed.
+  const said = isText(data.structured_output?.review) ? data.structured_output.review : data.result;
+  const body = isText(said) ? firstLine(said, 140) : '';
   const kind = data.is_error ? 'error' : 'done';
   if (!body) return { kind, text: meta || 'result' };
   return { kind, text: meta ? `${meta} — ${body}` : body };

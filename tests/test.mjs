@@ -2,7 +2,53 @@ import test from 'node:test';import assert from 'node:assert/strict';import fs f
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
-test('prose FAIL verdict is caught',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);s.updateProvider('mock',{enabled:false});s.addProvider({id:'review-mock',name:'Review Mock',kind:'mock',enabled:true,config:{reviewText:'The implementation fails to meet item 3 of the approved plan.'}});s.store.addModel({id:'review-mock-m',providerId:'review-mock',name:'review-mock',capabilities:['planning','coding','review','repair'],speed:10,cost:0,quality:10,contextLength:100000});const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'REPAIRING');assert.ok(done.review.includes('The implementation fails to meet item 3 of the approved plan.'))});
+test('a FAIL verdict sends the task to repair',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);s.updateProvider('mock',{enabled:false});s.addProvider({id:'review-mock',name:'Review Mock',kind:'mock',enabled:true,config:{reviewText:'The implementation fails to meet item 3 of the approved plan.',reviewVerdict:'FAIL'}});s.store.addModel({id:'review-mock-m',providerId:'review-mock',name:'review-mock',capabilities:['planning','coding','review','repair'],speed:10,cost:0,quality:10,contextLength:100000});const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'REPAIRING');assert.equal(done.review,'The implementation fails to meet item 3 of the approved plan.')});
+
+test('a PASS verdict is not overturned by the prose around it',async()=>{
+  // The incident, as one string. Two reviewers passed task 663391d8 and it went to
+  // repair twice, because the verdict was read as a word in the reply: the body says
+  // "no test failures" and names the FAILED state, so \bfail matched, and the escape
+  // hatch required PASS to start a line, which "## Verdict: PASS" and
+  // "**Verdict: PASS**" both fail to do. The verdict field says PASS, so the task is
+  // complete and the prose is stored exactly as written.
+  const prose = '## Verdict: PASS\n\nI independently ran the full test suite: 139/139 passing. No discrepancies found between the diff and the approved plan; no test failures. The FAILED state is untested.';
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'review-mock',name:'Review Mock',kind:'mock',enabled:true,config:{reviewText:prose}});
+  s.store.addModel({id:'review-mock-m',providerId:'review-mock',name:'review-mock',capabilities:['planning','coding','review','repair'],speed:10,cost:0,quality:10,contextLength:100000});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  const done=await s.execute(t.id);
+  assert.equal(done.state,'COMPLETE');
+  assert.equal(done.review,prose,'stored verbatim, not read for a verdict');
+});
+
+test('a verdict outside the schema leaves the task reviewable rather than repaired',async()=>{
+  // MAYBE is what a provider that ignores --json-schema produces, and it is the
+  // reason the verdict is checked against the enum rather than trusted. It may not
+  // be read as PASS, and it may not be read as FAIL either: nothing has described a
+  // fault, so REPAIRING would send an agent to fix something no one found. The task
+  // stays in REVIEWING, where one more Review click is the whole recovery.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'review-mock',name:'Review Mock',kind:'mock',enabled:true,config:{reviewText:'I looked at it.',reviewVerdict:'MAYBE'}});
+  s.store.addModel({id:'review-mock-m',providerId:'review-mock',name:'review-mock',capabilities:['planning','coding','review','repair'],speed:10,cost:0,quality:10,contextLength:100000});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  const planner=s.store.listRuns(t.id).find((r)=>r.role==='planner');
+  assert.equal(s.structuredOutput(planner.id),null,'a run with no structured output has no verdict');
+  await assert.rejects(()=>s.execute(t.id),/no structured verdict/i);
+  assert.equal(s.task(t.id).state,'REVIEWING');
+});
+
+test('only the reviewer is asked for a structured verdict',()=>{
+  const reviewer=claudeArgs({role:'reviewer',prompt:'x'});
+  const i=reviewer.indexOf('--json-schema');
+  assert.ok(i>=0,'the reviewer must be told the shape of its verdict');
+  assert.deepEqual(JSON.parse(reviewer[i+1]).properties.verdict.enum,['PASS','FAIL']);
+  for(const role of ['planner','implementer','repair'])
+    assert.equal(claudeArgs({role,prompt:'x'}).includes('--json-schema'),false,`${role} still answers in prose`);
+});
 test('worktree is isolated',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const a=s.createTask(p.id,'a');const b=s.createTask(p.id,'b');s.prepare(a.id);s.prepare(b.id);await s.plan(a.id);await s.plan(b.id);s.approve(a.id);s.approve(b.id);await s.execute(a.id);await s.execute(b.id);const ta=s.task(a.id),tb=s.task(b.id);assert.notEqual(ta.worktree,tb.worktree);assert.equal(fs.existsSync(ta.worktree),true);assert.equal(fs.existsSync(tb.worktree),true)});
 test('provider fallback',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);s.addProvider({id:'bad',name:'Bad',kind:'mock',enabled:true,config:{failRoles:['planner']}});s.addProvider({id:'good',name:'Good',kind:'mock',enabled:true,config:{}});for(const id of ['bad','good'])s.store.addModel({id:id+'-m',providerId:id,name:id,capabilities:['planning','coding','review','repair'],speed:10,cost:0,quality:id==='bad'?20:10,contextLength:100000});const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);const runs=s.store.listRuns(t.id);assert.equal(runs.filter(r=>r.status==='failed').length,1);assert.equal(runs.filter(r=>r.status==='succeeded').length,1)});
 
@@ -1016,6 +1062,17 @@ test('a tool result shows its opening line and how much more there is',()=>{
   const failure=describeEvent(result('<tool_use_error>Error: No such tool available: Bash.</tool_use_error>',{is_error:true}));
   assert.equal(failure.kind,'error');
   assert.equal(failure.text,'Error: No such tool available: Bash.','the wrapper is claude\'s, not the message');
+});
+
+test('a reviewer result frame shows its review, not the envelope around it',()=>{
+  // --json-schema puts the closing JSON in `result`, so a feed that rendered that
+  // field would show `{"verdict":"PASS","review":"…` where the verdict line was.
+  const data={type:'result',subtype:'success',is_error:false,num_turns:9,duration_ms:45000,result:'{"verdict":"PASS","review":"Matches the plan."}',structured_output:{verdict:'PASS',review:'Matches the plan.\n\nIt also covers the edge case.'}};
+  const d=describeEvent({type:'result',data});
+  assert.equal(d.kind,'done');
+  assert.equal(d.text,'success · 9 turns · 45s — Matches the plan.');
+  // A planner keeps its own reading: no structured output, so `result` is the answer.
+  assert.equal(describeEvent({type:'result',data:{type:'result',subtype:'success',result:'# Plan\n\n1. Do the thing.'}}).text,'success — # Plan');
 });
 
 test('an assistant message shows its sentence rather than its reasoning',()=>{

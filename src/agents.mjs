@@ -80,7 +80,17 @@ export async function* runMock(input) {
   if (input.role === 'planner') {
     yield { type: 'message', data: 'Proposed plan: inspect the relevant module, make the smallest change, add/update tests, run verification.' };
   } else if (input.role === 'reviewer') {
-    yield { type: 'message', data: input.mockReviewText || 'Review complete: compare implementation against the approved plan and test results.' };
+    const text = input.mockReviewText || 'Review complete: compare implementation against the approved plan and test results.';
+    yield { type: 'message', data: text };
+    // The verdict rides on a result frame, which is where --json-schema puts it
+    // for a real provider. A test therefore drives the decision through the same
+    // field a run does, and can hand the reviewer prose that contradicts it to
+    // prove the prose is not what decides. `result` is deliberately left unset so
+    // finalText still resolves to the prose rather than to this frame.
+    yield {
+      type: 'result',
+      data: { structured_output: { verdict: input.mockReviewVerdict || 'PASS', review: text } },
+    };
   } else {
     yield { type: 'message', data: `${input.role} completed.` };
   }
@@ -108,6 +118,33 @@ export async function* runMock(input) {
 const READ_ONLY_NOTICE =
   'No tool that writes a file exists in this session. Do not attempt Write, Edit, or any other file-creating tool, and do not search for one. Do not attempt to write a plan file. The deliverable is the text of your reply.';
 
+// The reviewer's verdict as a shape the harness validates, rather than a word
+// found in prose. Reading prose for it failed in both directions on one task:
+// the word "failures" in the sentence "no test failures" was read as a finding,
+// and the PASS escape hatch missed a verdict written as "## Verdict: PASS"
+// because that hatch required the word to start a line. Two reviewers passed
+// that task and it went to repair twice.
+//
+// The verdict is an enum, so a provider that ignores the schema cannot
+// introduce a third answer, and the review body is a field rather than the
+// reply, so it is stored exactly as written.
+export const REVIEWER_SCHEMA = {
+  type: 'object',
+  properties: {
+    verdict: {
+      type: 'string',
+      enum: ['PASS', 'FAIL'],
+      description: 'PASS only if the implementation satisfies the approved plan and no finding is left open. FAIL if any finding remains.',
+    },
+    review: {
+      type: 'string',
+      description: 'The full review for a human reader: findings mapped to the approved plan, each with the test evidence for it.',
+    },
+  },
+  required: ['verdict', 'review'],
+  additionalProperties: false,
+};
+
 // The permission flags are the whole safety story: a planner or reviewer may not
 // write, and only an implementation role may run commands without prompting.
 // Built here rather than inside runClaude so the argv is a value a test can read
@@ -122,6 +159,11 @@ export function claudeArgs(input) {
   } else if (input.role === 'reviewer') {
     args.push('--permission-mode', 'plan', '--disallowedTools', 'Edit', 'Write');
     args.push('--append-system-prompt', READ_ONLY_NOTICE);
+    // The verdict is read from the validated output, never from the reply text.
+    // Verified to work through both provider kinds, including the DeepSeek
+    // Anthropic-compatible endpoint, which is the same binary with a different
+    // base URL.
+    args.push('--json-schema', JSON.stringify(REVIEWER_SCHEMA));
   } else {
     args.push('--dangerously-skip-permissions');
   }
@@ -305,6 +347,7 @@ export async function* runAgent(provider, model, input) {
       mockWrites: provider.config.writes || [],
       mockUsage: provider.config.usage || null,
       mockReviewText: provider.config.reviewText || null,
+      mockReviewVerdict: provider.config.reviewVerdict || null,
       mockFailure: provider.config.failRoles?.includes(input.role) ? 'SIMULATED_FAILURE' : null,
     });
     return;
