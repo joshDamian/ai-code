@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { git } from './git.mjs';
 
 // Directories that are never worth spending prompt tokens on. `.ai-code` holds the
@@ -42,15 +43,48 @@ export const CONTEXT_DEFAULTS = {
   // Character caps for the two generated documents.
   architecture: 8000,
   conventions: 4000,
+  // §5.3 step 2: the tokenizer's minimum length. 3 is the pre-phase-5 value; 2 is
+  // the design's. It ships at 2 only because `dfHalf` ships above it: with the
+  // weight off, dropping the floor measured 0.8181 macro against 0.8551, and with
+  // it on the two settings are identical to six decimals and rank 22 of 22 harness
+  // runs the same. See the note in §5.3 - the two are one change.
+  floor: 2,
+  // §5.3 step 3: the shape of the token weight, `half/(half + df)`. `half = 1` is
+  // the design's exact `1/(1+df)`. 0 disables the weighting, which is the
+  // pre-phase-5 behaviour.
+  dfHalf: 1,
+  // §5.3 step 3, the amplitude. The doc's formula is relative to `df = 0`, but a
+  // token that appears in a path has `df >= 1` by construction, so the design's
+  // shape puts the *strongest possible* path hit at half its phase-4 value (0.5 at
+  // `half = 1`) while the priors - entry point, config, recency - keep theirs.
+  //
+  // Swept as its own axis, against `edge` and `define`, and left at 1. Raising it
+  // raises the headline: `gain` 5 to 8 reads as 0.8805 macro against 0.8435. That
+  // headline is over the nine runs whose gold does not exceed the window; the five
+  // runs the window *does* bind - 16 to 27 gold, 89 of the corpus's unoffered
+  // files - get worse at every one of those gains (18% to 9% recall on one of
+  // them), and MRR and nDCG, which take every run, both fall. `gain` 9 and above
+  // collapses outright, the same way phase 4's undivided fan-out did when one
+  // signal was allowed to dominate. 1 keeps the doc's formula as written.
+  gain: 1,
   // §5.2's edge rule: how hard a file that already won a slot pulls on the files
   // it imports and is imported by. 0 turns the graph off, which is how the
   // harness measures it rather than asserting it - see the note on the value.
-  edge: 3,
+  // Phase 4 shipped 3 against path hits of 10. `dfHalf` rescales those, so the
+  // value was re-swept with it: at the old 3 the pull is too strong for the smaller
+  // lexical scores it now competes with, and 2 beats it on micro recall (0.7636 to
+  // 0.7273), nDCG (0.6454 to 0.6038) and unoffered (13 to 15) while losing macro
+  // (0.8435 to 0.8551). Macro is the one metric a single 3-file run swings a third
+  // of a point, and that run is the only one 3 wins.
+  edge: 2,
   // §5.1's def rule: how hard a task term pulls on the files that declare a name
   // containing it. 0 turns symbol retrieval off, same reason as `edge`. Measured
   // flat from 6 to 20 with the cliff at 25; 12 is the middle of that. See the note
   // on the rejected undivided variant in `declaredBy`.
   define: 12,
+  // §5.10's record. Off by default: it is a few KB per run and nothing in the
+  // prompt path reads it.
+  debug: false,
 };
 
 export function contextConfig(configured) {
@@ -257,12 +291,12 @@ const CONFIG_FILE = /^(package\.json|pyproject\.toml|go\.mod|Cargo\.toml|tsconfi
 // earn the full basename weight of a real term. The floor and the inverse
 // document-frequency weighting are one change because of this, and this half is
 // the half that cannot ship alone; see the design note on tokenizer defects.
-function tokenize(text) {
+function tokenize(text, min = 3) {
   return String(text || '')
     .split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/)
     .flatMap((t) => t.split(/(?<=[a-z])(?=[0-9])/))
     .map((t) => t.toLowerCase())
-    .filter((t) => t.length >= 3);
+    .filter((t) => t.length >= min);
 }
 
 // The files git touched most recently, most recent first. One call for the whole
@@ -275,20 +309,107 @@ function recentFiles(root) {
   }
 }
 
-function scoreFile(file, tokens, recentRank) {
+// How many paths contain each token, which is §5.3's df over the path list
+// `inspect(root)` already returns. One tokenize per path, so the whole table costs
+// one pass over the tree.
+function pathDocFreq(files, floor) {
+  const df = new Map();
+  for (const file of files) {
+    for (const t of new Set(tokenize(file, floor))) df.set(t, (df.get(t) || 0) + 1);
+  }
+  return df;
+}
+
+// Lucene's strictly-positive IDF over the same path document frequency. Strictly
+// positive matters (§5.3 step 4): an IDF that turns negative past `df = N/2` would
+// need flooring and would invert the weight of a common token, which is worse than
+// merely damping it.
+function idf(df, n) {
+  return Math.log(1 + (n - df + 0.5) / (df + 0.5));
+}
+
+// §5.7's attainable-score ceiling, restricted to the in-vocabulary terms. The
+// restriction is load-bearing and §5.7 says why: an out-of-vocabulary term scores
+// the *largest* idf in the collection under this formula, so counting the absent
+// terms would crush every score by more than the present ones contribute. Terms
+// with `df = 0` over the paths are exactly the terms this repository cannot answer.
+function ceilQuery(tokens, df, n) {
+  let ceil = 0;
+  let coverage = 0;
+  for (const t of [...tokens].sort()) {
+    const d = df.get(t) || 0;
+    if (d > 0) {
+      ceil += idf(d, n);
+      coverage += 1;
+    }
+  }
+  return { ceil, coverage };
+}
+
+// §5.7's dispersion predictor. `k = 100` is the paper's value and the doc's; this
+// corpus has fewer than 100 candidates, so `k` is effectively "all of them" here
+// and the constant is kept for the larger repos the formula is for.
+function nqc(scores, k = 100) {
+  const top = scores.slice(0, k);
+  if (!top.length || !top[0]) return 0;
+  const mean = top.reduce((a, b) => a + b, 0) / top.length;
+  const variance = top.reduce((a, b) => a + (b - mean) ** 2, 0) / top.length;
+  return Math.sqrt(variance) / top[0];
+}
+
+// §5.7's `QUERY_IDF_FLOOR` is a percentile of the per-term idf distribution rather
+// than a constant, because the same floor is wrong at every corpus size. The doc
+// names the shape - "the idf of a term with `df = 0.3N`" - and this is that value
+// computed from the actual `N`, so it travels with the repository.
+function idfFloor(n) {
+  return idf(Math.max(1, Math.round(0.3 * n)), n);
+}
+
+// A short, stable digest for the debug record. `JSON.stringify` over an object with
+// insertion-ordered keys is deterministic in V8 for string keys, and the config is
+// spread from `CONTEXT_DEFAULTS` in a fixed order, so this is stable across runs on
+// one machine - which is what it is for.
+function digest(value) {
+  return createHash('sha1').update(JSON.stringify(value)).digest('hex').slice(0, 12);
+}
+
+// Returns the score and, when `parts` is asked for, the per-signal breakdown the
+// debug record (§5.10) persists. The breakdown is built unconditionally - it is
+// four numbers - and only the assembling of it is skipped, so a normal run pays a
+// couple of object literals per file rather than a second scoring pass.
+function scoreFile(file, tokens, recentRank, ctx = {}) {
   const base = path.basename(file);
   const stem = base.replace(/\.[^.]+$/, '');
   const dir = path.dirname(file);
+  const { df, half = 0, gain = 1, floor = 3, parts = false } = ctx;
+  const w = (t) => (half > 0 && df ? gain * (half / (half + (df.get(t) || 0))) : 1);
+  // The priors - entry point, config, recency - are deliberately left at their
+  // absolute values rather than scaled with the token hits, and that was measured
+  // rather than assumed: scaling them to the weight of a single-path token costs
+  // macro recall (0.8435 to 0.8361), micro (0.7636 to 0.7455), nDCG (0.6454 to
+  // 0.6218) and one unoffered file. So the priors are strong against the new token
+  // scale and the harness prefers it that way. The cost is a small tree where the
+  // recency bucket (~5) rivals a basename hit (~5), which the tie test in
+  // tests/test.mjs pins; on this repo recency coverage is 100%, so that bucket is
+  // ordering rather than signal. §9 records it as unresolved.
   let score = 0;
   // A basename hit is the strongest signal available without reading the file: the
   // task named the thing, and this file is called that.
-  for (const t of tokenize(stem)) if (tokens.has(t)) score += 10;
-  for (const t of tokenize(dir)) if (tokens.has(t)) score += 4;
-  if (ENTRY_POINT.test(base)) score += 3;
-  if (CONFIG_FILE.test(base)) score += 1;
+  let stemHit = 0;
+  for (const t of tokenize(stem, floor)) if (tokens.has(t)) stemHit += 10 * w(t);
+  let dirHit = 0;
+  for (const t of tokenize(dir, floor)) if (tokens.has(t)) dirHit += 4 * w(t);
+  score += stemHit + dirHit;
+  let entry = 0;
+  if (ENTRY_POINT.test(base)) entry = 3;
+  let config = 0;
+  if (CONFIG_FILE.test(base)) config = 1;
+  score += entry + config;
+  let recent = 0;
   const rank = recentRank.get(file);
-  if (rank !== undefined) score += rank < 20 ? 5 : rank < 60 ? 3 : 1;
-  return score;
+  if (rank !== undefined) recent = rank < 20 ? 5 : rank < 60 ? 3 : 1;
+  score += recent;
+  return parts ? { score, parts: { stem: stemHit, dir: dirHit, entry, config, recent } } : { score, parts: null };
 }
 
 // Paths whose stem matches a selected source's stem - the test for a file that was
@@ -567,7 +688,7 @@ export function relevantFiles(project, task, options = {}) {
   const root = options.cwd || project.path;
   const limit = options.limit ?? cfg.files;
   const files = inspect(root).files;
-  const tokens = new Set(tokenize(`${task.title || ''} ${task.description || ''} ${task.plan || ''}`));
+  const tokens = new Set(tokenize(`${task.title || ''} ${task.description || ''} ${task.plan || ''}`, cfg.floor));
   const recent = options.recent ?? recentFiles(root);
   const recentRank = new Map(recent.map((p, i) => [p, i]));
 
@@ -575,7 +696,17 @@ export function relevantFiles(project, task, options = {}) {
   // rather than at the walk so the tree still lists them.
   const rankable = files.filter((f) => !NOISE_FILE.test(f));
 
-  const scored = rankable.map((file) => ({ path: file, score: scoreFile(file, tokens, recentRank) })).filter((f) => f.score > 0);
+  // §5.7's ceiling needs a df whether or not the weight is on, so the table is
+  // built for the debug record even where `dfHalf` leaves the score unweighted.
+  const trace = cfg.debug ? {} : null;
+  const t0 = trace ? performance.now() : 0;
+  const df = cfg.dfHalf > 0 || cfg.debug ? pathDocFreq(rankable, cfg.floor) : null;
+  const tDf = trace ? performance.now() : 0;
+  const scored = rankable.map((file) => {
+    const s = scoreFile(file, tokens, recentRank, { df, half: cfg.dfHalf, gain: cfg.gain, floor: cfg.floor, parts: !!trace });
+    return trace ? { path: file, score: s.score, parts: s.parts } : { path: file, score: s.score };
+  }).filter((f) => f.score > 0);
+  const tScore = trace ? performance.now() : 0;
   // Ties break on the raw code-point order of the path, not `localeCompare`. The
   // locale-aware comparison is ICU-dependent: it orders `_`, `-` and case
   // differently under different locales, so the same repo produced different
@@ -590,6 +721,7 @@ export function relevantFiles(project, task, options = {}) {
   // could reach but had no seed for is reachable now, because this pass supplies
   // the seed. The defining file enters the list above the edge pass, so it is
   // within `seeds` and its own imports are followed.
+  const tDefine = trace ? performance.now() : 0;
   if (cfg.define > 0) {
     const entry = new Map(scored.map((f) => [f.path, f]));
     const defines = declarations(root, rankable);
@@ -597,9 +729,12 @@ export function relevantFiles(project, task, options = {}) {
       const hit = entry.get(p);
       // `define` marks a score that came from a declaration rather than from the
       // path, for the same reason `graph` does: it is the first thing a reader of
-      // this list will ask about.
-      if (hit) hit.score += add;
-      else scored.push({ path: p, score: add, define: true });
+      // this list will ask about. The magnitude is kept alongside the flag so the
+      // debug record can say *how much* of a file's score the fan-out accounts for
+      // - a flag alone cannot distinguish a marginal boost from a file that is only
+      // in the list at all because of it.
+      if (hit) { hit.score += add; hit.define = (hit.define || 0) + add; }
+      else scored.push({ path: p, score: add, define: add });
     }
     scored.sort(byPath);
   }
@@ -610,6 +745,7 @@ export function relevantFiles(project, task, options = {}) {
   // that already won a slot. A file the frontier introduces starts from 0 and is
   // carried entirely by the pull, which is the point: it has no lexical evidence
   // to be ranked on.
+  const tEdge = trace ? performance.now() : 0;
   if (cfg.edge > 0 && scored.length) {
     const entry = new Map(scored.map((f) => [f.path, f]));
     const strength = new Map(scored.map((f) => [f.path, f.score]));
@@ -621,8 +757,8 @@ export function relevantFiles(project, task, options = {}) {
       // pull on top; one the lexical pass never scored enters on the pull alone.
       // `graph` marks which, because a score that appears from nowhere is the
       // first thing a reader of this output will ask about.
-      if (hit) hit.score += add;
-      else scored.push({ path: p, score: add, graph: true });
+      if (hit) { hit.score += add; hit.graph = (hit.graph || 0) + add; }
+      else scored.push({ path: p, score: add, graph: add });
     }
     scored.sort(byPath);
   }
@@ -639,7 +775,69 @@ export function relevantFiles(project, task, options = {}) {
     const text = readForPrompt(root, file, cfg.fileChars);
     if (text !== null) contents.push({ path: file, text, tokens: estimateTokens(text) });
   }
-  return { paths: selected, contents, scores: scored };
+  const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, marks: { t0, tDf, tScore, tDefine, tEdge } }) : null;
+  return { paths: selected, contents, scores: scored, debug };
+}
+
+// §5.10's debug record. Everything §5.7 needs to calibrate against, from the one
+// run that produced the ranking: the candidate list with its score decompositions,
+// the query's ceiling and coverage, the dispersion, and the hashes that say whether
+// two records are comparable at all.
+//
+// `normScore` divides our additive score by §5.7's idf ceiling. Those are two
+// different scales - the numerator weights a path token `W/(W+df)` and the
+// denominator weights it `log(1 + (N-df+0.5)/(df+0.5))` - so the quotient is not
+// the `[0,1)` quantity §5.7 defines for BM25, and it is not a floor that can be
+// tuned against: measured over the harness it separates gold from non-gold at the
+// median (0.974 against 0.520) and then holds precision flat at 35.7% for every
+// floor from 0.10 to 0.50. It is recorded because §5.7 asks for it and because the
+// measurement that says it does not work is the useful part; §5.10 and §9 carry it.
+const DEBUG_CANDIDATES = 200;
+function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, marks }) {
+  const n = rankable.length;
+  const { ceil, coverage } = ceilQuery(tokens, df, n);
+  const accepted = new Map(selected.map((p, i) => [p, i]));
+  const candidates = scored.slice(0, DEBUG_CANDIDATES).map((f) => ({
+    path: f.path,
+    score: round(f.score),
+    normScore: ceil > 0 ? round(f.score / ceil) : null,
+    // A file the path pass never scored has no parts, but it does have a reason to
+    // be here, and that reason is the whole content of its component record.
+    components: f.parts || f.define || f.graph
+      ? { ...Object.fromEntries(Object.entries(f.parts || {}).map(([k, v]) => [k, round(v)])), ...(f.define ? { define: round(f.define) } : {}), ...(f.graph ? { graph: round(f.graph) } : {}) }
+      : null,
+    accepted: accepted.has(f.path),
+    // The three ways a candidate fails to be accepted are the three things a
+    // reader of this record asks about first: it lost on score, or it was only
+    // ever in the list because of the fan-out, or a source file's test came with
+    // it. `sibling` is the one acceptance that is not the ranking's own decision.
+    reason: !accepted.has(f.path)
+      ? !f.parts && f.define ? 'define-only, below cut' : !f.parts && f.graph ? 'graph-only, below cut' : 'below cut'
+      : accepted.get(f.path) < limit ? 'scored' : 'test-sibling',
+  }));
+  const scores = scored.map((f) => f.score);
+  return {
+    task: { id: task.id, title: task.title || '' },
+    corpus: { n, candidates: scored.length },
+    ceil: round(ceil),
+    coverage,
+    terms: [...tokens].sort(),
+    idfFloor: round(idfFloor(n)),
+    nqc: round(nqc(scores)),
+    branch: scored.length === 0 ? 'EMPTY' : coverage === 0 ? 'NO_RESULTS' : 'FULL',
+    config: cfg,
+    configHash: digest(cfg),
+    treeHash: digest([...files].sort()),
+    timings: marks ? { df: round(marks.tDf - marks.t0), score: round(marks.tScore - marks.tDf), define: round(marks.tEdge - marks.tDefine), edge: round(performance.now() - marks.tEdge) } : null,
+    candidates,
+    truncated: scored.length > DEBUG_CANDIDATES,
+  };
+}
+
+// Three decimals is the resolution the weights are calibrated to; keeping full
+// float noise in the record triples its size for digits nobody reads.
+function round(v) {
+  return typeof v === 'number' ? Number(v.toFixed(3)) : v;
 }
 
 // -- assembly ---------------------------------------------------------------
@@ -778,6 +976,20 @@ export function buildTaskContext(project, task, options = {}) {
     // degradation is invisible to every consumer downstream.
     ...(unreadable.length ? { unreadable } : {}),
   };
+
+  // §5.10's sink. Written here rather than by the caller because this is the last
+  // point that holds both the record and the project path, and written to disk
+  // rather than into the return value because the return value is `JSON.stringify`d
+  // into every prompt - a few KB of candidate scores in the context would be paid
+  // for by the agent on every run. A failed write is not worth failing a run over
+  // (§5.8): the record is diagnostic, and the run is not.
+  if (picked.debug) {
+    try {
+      const dir = path.join(project.path, '.ai-code', 'context');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'ranker-debug.json'), JSON.stringify(picked.debug, null, 2));
+    } catch { /* diagnostic only */ }
+  }
 
   return {
     project: { id: project.id, name: project.name, path: root, language: project.language, framework: project.framework, commands: project.commands },

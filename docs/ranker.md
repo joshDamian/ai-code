@@ -328,6 +328,27 @@ is their agreement, rather than either one's number, that says the flattening is
 doing the work. Shipped at 12, the middle of a plateau that runs 6 to 20 with the
 cliff at 25.
 
+**Built and measured — phase 5.** The aggregate moved on the two metrics that take
+all 14 runs, and the capped runs — the ones every earlier phase's headline number
+excluded — improved as a group for the first time:
+
+| | phase 4 | phase 5 |
+|---|---|---|
+| unoffered, all 14 runs | 103 | **89** |
+| unoffered, the 9 uncapped | 15 | **13** |
+| MRR (all runs) | 0.6577 | **0.6786** |
+| nDCG@15 (all runs) | 0.5853 | **0.6454** |
+| micro recall (uncapped) | 0.7273 | **0.7636** |
+| macro recall (uncapped) | **0.8551** | 0.8435 |
+
+Every capped run improves — 21 → 18, 15 → 12, 18 → 15, 17 → 15, 17 → 16 — and one
+uncapped three-file run regresses (0 → 1 unoffered), which is the whole of the
+macro loss. Note what that means for reading the table above it: **phase 4's own
+numbers were quoted over the 9 uncapped runs**, so its "15 unoffered" is not the
+same population as the 103. Both are now reported, because the uncapped subset was
+where every earlier phase measured and the subset is exactly where the margin of
+error is largest.
+
 ### 2.5 The tokenizer discards the tokens that discriminate
 
 `tokenize()` at `src/context.mjs:200`. Run on identifiers, before and after the
@@ -459,14 +480,14 @@ time, and §2.4 does.
 | R8 | Bounded memory and I/O | `walk()` materialises every path, twice |
 | R9 | Never throws | **Violated** — EACCES in `walk()` propagates out of the run (§4) |
 | R10 | Total generality | Any language, no git, no manifest, 10 files or 500k |
-| R11 | Reconstructible selection | Nothing persisted beyond counts |
+| R11 | Reconstructible selection | ~~Nothing persisted beyond counts~~ **Phase 5** — `context.debug` writes `ranker-debug.json`: every candidate's path, score, per-signal decomposition, acceptance and reason, plus `ceil`, `NQC`, the branch, and config and tree hashes |
 | R12 | Named degradation states with a recovery path | Silent best-effort |
 | R13 | Reject structurally-irrelevant files before scoring | ~~No file-type gate~~ **Phase 1** — `NOISE_FILE` excludes lockfiles, minified bundles and sourcemaps from scoring; they stay in the tree |
-| R14 | Scores comparable across queries | Raw sums; `normScore = score / Σ idf` is the fix (§5.13) |
+| R14 | Scores comparable across queries | ~~Raw sums~~ **Phase 5 records** `normScore = score / Σ idf` — but it is not the comparable quantity §5.7 assumes: the numerator is `W/(W+df)` and the denominator `idf_L`, and the measured range runs to 4.9 rather than `[0,1)`. §5.10 |
 | R15 | Never serve a stale index | No cache |
-| R16 | Every signal self-normalising | Recency is 93% coverage and 5 of the top 10's points |
-| R17 | Tokenise identifiers the way the language does | Acronym runs collapse, then the <3 floor deletes the halves (§2.5) |
-| R18 | Filler terms carry no weight | `the`, `add`, `new` score `+10` per basename hit |
+| R16 | Every signal self-normalising | ~~Recency is 93% coverage~~ **Phase 5 normalises the path tokens** (`1/(1+df)`), and recency is now measured at **100%** coverage on this tree — all 69 paths in the last 200 commits — while the priors keep their absolute weight. Unresolved; §5.3, §9 |
+| R17 | Tokenise identifiers the way the language does | ~~Acronym runs collapse, then the <3 floor deletes the halves~~ **Phases 1 and 5** — split in phase 1, floor lowered to 2 in phase 5 beside the weight that makes it safe. `IOError` → `["error","io"]`, `base64` → `["64","base"]` |
+| R18 | Filler terms carry no weight | ~~`the`, `add`, `new` score `+10` per basename hit~~ **Phase 5** — no stoplist; the df weight damps them (`the` is in most paths, so it is worth a fraction of a rare token). They still *tokenise*, which is the design (§5.3 step 4) |
 
 ---
 
@@ -480,9 +501,9 @@ Verified against source unless noted.
 | **One file exceeds the budget** | Emit path only | ~~**Sends over-budget context** — ladder exits at `files.length === 1`~~ **Fixed in phase 1** — unconditional rungs reduce content to paths, then the tree |
 | Empty repo | Return empty, marked | `paths: []`, unlabelled |
 | No git history | Recency contributes nothing | Handled — `recentFiles()` catches |
-| Task text with no usable tokens | Widen, mark weak | `tokenize()` drops <3-char tokens; `ui`, `db`, `os`, `js`, `id` vanish silently (§2.5) |
-| Acronym run in a task token | Correct split | ~~`HTTPServer` → `httpserver`~~ **Fixed in phase 1** — → `["http","server"]`. `base64` → `["base"]` remains: that half is the floor, not the split (§2.5) |
-| Task token is filler (`the`, `add`, `new`) | Weighted to ~0 | `+10` per basename hit, same as a rare token |
+| Task text with no usable tokens | Widen, mark weak | ~~`tokenize()` drops <3-char tokens; `ui`, `db`, `os`, `js`, `id` vanish silently~~ **Phase 5** — the floor is 2, so all five survive; the df weight is what keeps `to`, `of`, `in`, `is` from riding in with them |
+| Acronym run in a task token | Correct split | ~~`HTTPServer` → `httpserver`~~ **Fixed in phase 1** — → `["http","server"]`. ~~`base64` → `["base"]`~~ **closed in phase 5** by the floor: → `["64","base"]` |
+| Task token is filler (`the`, `add`, `new`) | Weighted to ~0 | ~~`+10` per basename hit, same as a rare token~~ **Phase 5** — damped by df, not deleted; §5.3 step 4 keeps them tokenisable because `in`, `is`, `to`, `id` are real signal inside identifiers |
 | Zero files score > 0 | Labelled default | `ENTRY_POINT`/`CONFIG_FILE` usually prevent literal zero, so the degenerate case is *entry points only*, unlabelled |
 | All candidates tie | Deterministic order | `localeCompare` — locale-sensitive |
 | Binary / >2 MB file | Path only | Handled, silently |
@@ -649,6 +670,66 @@ weight is what damps `the`. Applying the floor first at `< 3` needs a hand-writt
 list of every two-letter identifier a project might use; lowering it and letting
 `df` do the work does not.
 
+**Built and measured — phase 5.** `pathDocFreq()`, the `w()` weight inside
+`scoreFile()`, and the `floor` / `dfHalf` / `gain` config values in
+`src/context.mjs`. Steps 2 and 3 shipped together, as the design requires.
+
+The pairing is the headline and it is measurable. Floor 2 against floor 3, with the
+weight on, produces **identical scores on all four metrics and identical rankings on
+22 of 22 harness runs** — a complete no-op on this repository, which holds no
+two-letter path token. With the weight *off*, lowering the floor costs 0.0373 macro
+recall (0.8551 → 0.8181) and one unoffered file:
+
+| floor | `dfHalf` | macro | micro | nDCG | MRR | unoffered |
+|---|---|---|---|---|---|---|
+| 3 | 0 | 0.8551 | 0.7273 | 0.5853 | 0.6577 | 15 |
+| 2 | 0 | 0.8181 | 0.7091 | 0.5769 | 0.6577 | 16 |
+| 3 | 1 | 0.8551 | 0.7273 | 0.6038 | 0.6815 | 15 |
+| 2 | 1 | 0.8551 | 0.7273 | 0.6038 | 0.6815 | 15 |
+
+So the floor is free *because* the weight is there, which is what the design claims
+and what the ordering constraint predicts. It ships at 2 on that argument, not on a
+measurement — the corpus cannot measure it.
+
+The weight itself is the phase's win, and it is on the two metrics that take every
+run rather than the nine the window does not bind:
+
+| | phase 4 | phase 5 |
+|---|---|---|
+| nDCG (all runs) | 0.5853 | **0.6454** |
+| MRR (all runs) | 0.6577 | **0.6786** |
+| micro recall (uncapped) | 0.7273 | **0.7636** |
+| unoffered, uncapped | 15 | **13** |
+| unoffered, **all runs** | 103 | **89** |
+| macro recall (uncapped) | **0.8551** | 0.8435 |
+
+Fourteen fewer gold files go unoffered across the whole corpus, and every one of the
+five runs whose answer set exceeds the window improves (21 → 18, 15 → 12, 18 → 15,
+17 → 15, 17 → 16). Macro is the one regression and it is one three-file run.
+
+**Two amplitudes were swept and rejected.** The design's formula is relative to
+`df = 0`, but a token that appears in a path has `df ≥ 1` by construction, so
+`1/(1+df)` puts the *strongest possible* path hit at half its phase-4 value while
+the priors — entry point, config, recency — keep theirs. Both corrections were
+tried and both measured worse:
+
+- **Scale the priors to match** (multiply entry/config/recency by `half/(half+1)`):
+  0.8361 macro, 0.7455 micro, 0.6218 nDCG, 14 unoffered. Every metric falls.
+- **Raise the token gain** (`gain`, the amplitude axis, swept 1–1000). Gain 5–8
+  reads as **0.8805 macro against 0.8435** — and that headline is over the nine runs
+  the window does not bind. The five runs it does bind, holding 89 of the corpus's
+  unoffered files, get worse at every one of those gains, MRR and nDCG both fall,
+  and gain 9 and above collapses outright (0.5713 macro at 1000). This is phase 4's
+  undivided-fan-out failure again: the ranker is fragile when one signal is allowed
+  to dominate. `gain` ships at 1, the formula as written.
+
+The cost of that choice is visible on a small tree. With a df=1 basename hit worth
+5 and the maximum recency bonus worth 5, a **committed `package.json` outranks a
+file the task named** in a fixture whose source files are uncommitted. On this
+repository recency coverage is **100%** — all 69 paths appear in the last 200
+commits — so the prior is pure ordering with no coverage signal behind it, which is
+exactly the shape §5.3 opens by warning about. Left unresolved; §9 carries it.
+
 ### 5.4 Rank hierarchically
 
 Agentless localises file → function → line, each stage narrowing; its file-level
@@ -763,10 +844,52 @@ The EACCES crash in §4 is the counter-example, and it is live.
 
 Persist a debug record behind a config flag: per candidate
 `{path, score, normScore, components, accepted, reason}`, plus `ceil(q)`, `NQC`,
-the branch that ran, the config hash, tree hash, and timings. A few KB per run.
-`normScore` and `ceil(q)` are the calibration inputs §5.7 needs; without them the
-floor cannot be tuned. Without any of it the next regression is diagnosed the way
+the branch that ran, the config hash, tree hash, and timings. 20 KB per run on
+this repository's 68 candidates, capped at 200 candidates so it stays bounded on a
+large tree. `normScore` and `ceil(q)` are the calibration inputs §5.7 needs;
+without them the floor cannot be tuned. Without any of it the next regression is diagnosed the way
 this one was — by reading a transcript.
+
+**Built and measured — phase 5.** `debugRecord()` in `src/context.mjs`, behind
+`context.debug`, default off. It carries every field above. `components` records the
+**magnitude** of each signal, not a boolean flag: the score of the file the task
+named on a 32-token query decomposes to `{stem: 5, dir: 0, entry: 0, config: 0,
+recent: 5, define: 30.7, graph: 5.7}`, which says in one line what a reader would
+otherwise read a transcript to learn — the fan-out, not the path, is why it is
+first.
+
+`buildTaskContext` writes the record to `.ai-code/context/ranker-debug.json` when
+the flag is set. It does not go into the return value, because that value is
+serialised into every prompt and 20 KB of candidate scores would be paid for by
+the agent on every run. A failed write is swallowed (§5.8): the record is
+diagnostic, the run is not. A test asserts both halves.
+
+**The calibration it was built for does not yet produce a floor.** Measured over
+the harness's 14 scored runs, 155 gold candidates against 797 non-gold:
+
+| `normScore` | gold | non-gold |
+|---|---|---|
+| p10 | 0.179 | 0.179 |
+| median | 0.974 | 0.520 |
+| p90 | 4.920 | 2.085 |
+
+Gold sits at twice the non-gold median, so the signal is real — but the range runs
+to 4.9, not the `[0,1)` §5.7 defines, because the numerator is our `W/(W+df)` score
+and the denominator is an `idf_L` sum. They are different scales that happen to
+share a monotone direction in `df`. The consequence is measurable: precision on the
+offered set is **35.7% at every floor from 0.10 to 0.50**, moving only at 0.70
+(36.4%) and 1.00 (37.2%) — and 1.00 costs recall, 75 offered gold down to 61. The
+doc's "start at 0.25, expect 0.2–0.4" has nothing to bite on here.
+
+Coverage fails as a predictor too, and in the opposite direction: the three runs
+with the *best* recall have 1 in-vocabulary term out of 19, and the three worst
+have 5 of 32. `QUERY_IDF_FLOOR` as a percentile of per-term idf is 1.214 for this
+corpus against `ceil` values of 3.3 to 35.1, so it would never fire.
+
+The gate therefore stays unshipped, which is the correct outcome: the record now
+answers the question the last regression was diagnosed by reading a transcript to
+answer, and the floor it was built to tune has been shown to have no signal to
+tune against on this corpus. §9 carries the caveat.
 
 ### 5.11 Determinism
 
@@ -1163,6 +1286,34 @@ adversarial orders blow it up.
    **debug record** (§5.10), moved here from phase 2: `normScore` and `ceil(q)`
    are the inputs these weights are calibrated against, so record and calibration
    belong in one change.
+
+   **Landed — `pathDocFreq()`, `w()` and `debugRecord()` in `src/context.mjs`.**
+   The pair shipped together and the design's claim about them is confirmed
+   exactly: floor 2 against floor 3 is a complete no-op *with* the weight on
+   (identical rankings on 22 of 22 runs) and costs 0.0373 macro *without* it. The
+   weight is the phase's win on every metric that takes all 14 runs — 103 unoffered
+   gold files down to 89, nDCG 0.5853 → 0.6454, MRR 0.6577 → 0.6786 — and macro,
+   the one regression, is a single three-file run.
+
+   Two amplitude corrections were swept and rejected: scaling the priors to match
+   the new token scale, and raising the token gain. The second is the more
+   instructive, because gain 5–8 *raises the headline* to 0.8805 macro and does it
+   by worsening all five runs whose answer set exceeds the window. §5.3 carries
+   both tables.
+
+   Reversible by construction: `dfHalf: 0, floor: 3, edge: 3` is the phase-4 ranking
+   exactly, to six decimals on all four metrics, and a test asserts it.
+
+   **The debug record's own calibration came back empty, and that is the result.**
+   `normScore` separates gold from non-gold at the median (0.974 against 0.520) but
+   not in a range where a floor can bite: precision is flat at 35.7% across every
+   floor from 0.10 to 0.50. Coverage fails in the opposite direction — the
+   best-recalling runs have the *fewest* in-vocabulary terms. §5.7's gate stays
+   unshipped rather than shipping a guessed constant, and §5.10 carries the numbers.
+
+   `edge` was re-swept in the same change and moved 3 → 2, because the token weight
+   rescales everything the pull competes with. That is a phase-3 constant changed by
+   a phase-5 measurement, which is the cost of calibrating coupled weights together.
 6. **Window-derived budget, total shrink ladder, named degradation states** (§5.6, §5.9).
 7. **Hierarchical render and content tier** (§5.4–5.5, §5.13), then the content
    index of §6.3 — and a *persistent* index only past the §6.1 threshold.
@@ -1211,7 +1362,31 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   in this repository.
 - §5.3 step 3 assumes `df` is computable over the path list alone. If it is
   computed over file *contents* instead, the optimum shifts and the ~30-word
-  stoplist in step 4 may become unnecessary — untested.
+  stoplist in step 4 may become unnecessary — untested. Phase 5 measured the path
+  version and shipped it; §5.3's table is the path version's.
+- **The floor ships at 2 and this corpus cannot test it.** Floor 2 and floor 3
+  produce identical rankings on all 22 harness runs, because no path in this
+  repository holds a two-letter token. It ships on §5.3's ordering argument and on
+  the measured fact that the pairing is what makes it safe, not on a measurement of
+  the floor itself. A repository with `ui/`, `db/` or `io/` directories is the test,
+  and none has been run.
+- **`normScore` is not the quantity §5.7 defines.** §5.7's `∈ [0,1)` holds for a
+  BM25 numerator over an idf ceiling; ours divides a `W/(W+df)` score by an `idf_L`
+  sum, and the measured range runs to 4.9. The two share a monotone direction in
+  `df` and nothing else. §5.10 records the consequence — a precision curve flat
+  from floor 0.10 to 0.50 — and the §5.7 gate stays unshipped rather than shipping a
+  constant with nothing behind it. Any future floor needs the numerator and the
+  denominator on one scale, which is a change to the scorer, not to the threshold.
+- **The priors are unnormalised and it shows on small trees.** With a df=1 basename
+  hit at 5 and the top recency bucket at 5, a committed `package.json` outranks a
+  file the task named in a fixture whose sources are uncommitted. Both corrections
+  were measured and both cost more than they fixed (§5.3). On this repository
+  recency coverage is 100% — all 69 paths are in the last 200 commits — so the term
+  is ordering with no coverage signal under it, which is the failure §5.3 opens by
+  naming. Unresolved; §5.3's `1 − coverage` rule for recency is not implemented.
+- `edge` moved from 3 to 2 in phase 5, in a change about token weights. The
+  re-sweep was required because the two compete on one score, but it means §5.2's
+  recorded 3 was calibrated against a path scale that no longer exists.
 - The §6.1 `~200 MB` threshold is extrapolated from ripgrep's measured throughput,
   not measured against a repository that size.
 - The §6.3 build-time estimate (0.3–1.5 s for ~6 M tokens in Node) is arithmetic,

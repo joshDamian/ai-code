@@ -709,6 +709,122 @@ test('the assembled context respects the budget and reports what it cost',()=>{
   assert.ok(built.manifest.files.length<10,'the file cap is respected');
 });
 
+test('a path token the whole tree carries is worth less than one that is rare',()=>{
+  // §5.3 step 3, the rule itself. `widget` is in every filename and `zebra` in one,
+  // and the task names both. Unweighted the two hits are worth the same, which is
+  // what puts `the` on a level with a real identifier; weighted, the rare one wins.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  const names=['common0','common1','common2','common3','common4','common5'];
+  for(const n of names) fs.writeFileSync(path.join(root,'src',`${n}-widget.mjs`),'export const x=1;\n');
+  fs.writeFileSync(path.join(root,'src','rare-zebra.mjs'),'export const y=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const task={id:'t',title:'zebra widget',description:'',plan:null};
+  const off=relevantFiles(p,task,{cwd:root,config:{dfHalf:0,edge:0,define:0}});
+  const on=relevantFiles(p,task,{cwd:root,config:{edge:0,define:0}});
+  const at=(r,f)=>r.scores.find(s=>s.path===f).score;
+  // Unweighted every file that carries either token scores identically; the
+  // ranking below the tie is then path order and nothing else.
+  assert.equal(at(off,'src/common0-widget.mjs'),at(off,'src/rare-zebra.mjs'),'with the weight off the two are worth the same');
+  assert.ok(at(on,'src/rare-zebra.mjs')>at(on,'src/common0-widget.mjs'),'with it on the rare token wins');
+  // The damping is monotone in df: the same token in six paths is worth a sixth of
+  // its df=1 value, and the ratio is exactly the divisor.
+  // `w(df) = half/(half+df)`, so the ratio between a df=1 hit and a df=6 one is
+  // `(half+6)/(half+1)` - the same curve the harness swept, asserted here.
+  const df=6, half=1;
+  const ratio=at(on,'src/rare-zebra.mjs')/at(on,'src/common0-widget.mjs');
+  assert.ok(Math.abs(ratio-(half+df)/(half+1))<1e-9,`the ratio is ${(half+df)/(half+1)}, measured ${ratio}`);
+});
+
+test('lowering the floor to 2 changes nothing until the weight is there to damp it',()=>{
+  // §5.3's ordering constraint, as an assertion rather than a comment: the floor is
+  // what lets `ui` and `db` through, and the df weight is what stops `to` and `of`
+  // riding in with them. Measured on the harness, floor 2 against floor 3 was
+  // 0.8181 macro with the weight off and identical to six decimals with it on.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  // A two-letter token in every path, which is the shape the floor exists for.
+  for(let i=0;i<8;i++) fs.writeFileSync(path.join(root,'src',`io-handler${i}.mjs`),'export const h=1;\n');
+  fs.writeFileSync(path.join(root,'src','mapper.mjs'),'export const m=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const task={id:'t',title:'io mapper',description:'',plan:null};
+  const weighted=relevantFiles(p,task,{cwd:root,config:{edge:0,define:0}});
+  const loose=relevantFiles(p,task,{cwd:root,config:{edge:0,define:0,floor:2}});
+  assert.deepEqual(weighted.debug?.terms??[...weighted.paths],loose.debug?.terms??[...loose.paths]);
+  // With the weight off and the floor at 2, the eight `io` files outrank the file
+  // the task actually named; with the weight on they do not. That is the whole
+  // claim of shipping the two together.
+  const off=relevantFiles(p,task,{cwd:root,config:{edge:0,define:0,floor:2,dfHalf:0}});
+  assert.equal(off.paths[0],'src/io-handler0.mjs','unweighted, the two-letter token floods the top');
+  assert.equal(weighted.paths[0],'src/mapper.mjs','weighted, the file the task named leads');
+});
+
+test('the debug record says why every candidate did or did not make the window',()=>{
+  // §5.10. The record is the diagnostic the next regression is read from, so what
+  // it has to carry is the decomposition, not just the total: a score with no
+  // parts cannot say whether a file is in the window for its path, its imports or
+  // its recency.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','hub.mjs'),"import {d} from './deep.mjs';\nexport const h=1;\n");
+  fs.writeFileSync(path.join(root,'src','deep.mjs'),'export const d=1;\n');
+  const p={id:'p',name:'p',path:root};
+  // `edge: 1` rather than the default 2, so the pull on `deep.mjs` is half the seed's
+  // own score rather than equal to it. At the default the two tie and the tie-break
+  // decides the window - which is true, but it is the tie-break being tested then.
+  const picked=relevantFiles(p,{id:'t',title:'hub',description:'',plan:null},{cwd:root,limit:1,config:{debug:true,define:0,edge:1}});
+  const d=picked.debug;
+  assert.ok(d,'the record is returned when the flag is on');
+  assert.equal(d.branch,'FULL','the branch that ran is named');
+  assert.ok(Number.isFinite(d.ceil)&&d.ceil>0,'the attainable ceiling is recorded');
+  assert.ok(Number.isFinite(d.nqc),'and the dispersion');
+  assert.ok(d.configHash&&d.treeHash,'with the hashes that say two records are comparable');
+  assert.ok(d.timings&&Number.isFinite(d.timings.score),'and the timings');
+  const deep=d.candidates.find(c=>c.path==='src/deep.mjs');
+  const hub=d.candidates.find(c=>c.path==='src/hub.mjs');
+  // The window is one file, so the graph-only file is in the record and out of the
+  // window - which is exactly the question a reader asks of a record.
+  assert.equal(hub.accepted,true);
+  assert.equal(hub.reason,'scored');
+  assert.equal(deep.accepted,false);
+  assert.match(deep.reason,/graph-only/);
+  assert.equal(deep.score,deep.components.graph,'its score is the pull and nothing else');
+  assert.ok(hub.components.stem>0,'and a path hit is decomposed into the field that earned it');
+});
+
+test('the debug record stays out of the prompt and off the disk unless it is asked for',()=>{
+  // The record is a few KB. `buildTaskContext`'s return value is serialised
+  // straight into the prompt, so the record must reach a file and not the agent.
+  const root=repo();
+  const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  const task={id:'t',title:'fix the package',plan:null};
+  const plain=buildTaskContext(p,task,{role:'planner'});
+  assert.ok(!('debug' in plain),'nothing is carried by default');
+  assert.ok(!fs.existsSync(path.join(root,'.ai-code','context','ranker-debug.json')),'and nothing is written');
+  const traced=buildTaskContext(p,task,{role:'planner',config:contextConfig({debug:true})});
+  assert.ok(!('debug' in traced),'the record is not in the value the prompt is built from');
+  const written=JSON.parse(fs.readFileSync(path.join(root,'.ai-code','context','ranker-debug.json'),'utf8'));
+  assert.equal(written.branch,'FULL');
+  assert.ok(written.candidates.length,'and the file carries the candidates');
+});
+
+test('the query ceiling counts only the terms this repository can answer',()=>{
+  // §5.7's `V` restriction. Under Lucene's IDF an absent term scores the largest
+  // value in the collection, so a ceiling that counted the terms no path contains
+  // would be dominated by the words the task used that the repo has never heard of.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','widget.mjs'),'export const w=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const one=relevantFiles(p,{id:'t',title:'widget',description:'',plan:null},{cwd:root,config:{debug:true}});
+  const many=relevantFiles(p,{id:'t',title:'widget zzzznotathing qqqqalsonot',description:'',plan:null},{cwd:root,config:{debug:true}});
+  assert.equal(one.debug.coverage,1,'one term, and the repository has it');
+  assert.equal(many.debug.coverage,1,'three terms, and it still has one');
+  assert.equal(one.debug.ceil,many.debug.ceil,'so the two ceilings are the same number');
+  assert.ok(many.debug.terms.length>one.debug.terms.length,'even though the query is longer');
+});
+
 test('an acronym run splits off the word that follows it',()=>{
   const root=repo();
   fs.mkdirSync(path.join(root,'src'),{recursive:true});
@@ -717,7 +833,10 @@ test('an acronym run splits off the word that follows it',()=>{
   fs.writeFileSync(path.join(root,'src','unrelated.mjs'),'export const u=1;\n');
   const s=new Service(root,{allowMock:true});
   const p=s.initProject('p',root);
-  const picked=relevantFiles(p,{title:'fix HTTPServer',description:'',plan:null},{cwd:root});
+  // `dfHalf: 0` pins the weight off, so the two scores below are the raw path
+  // constants and this test measures tokenisation alone. With the weight on a
+  // df=1 token scores half of 10, and the number would drift with `dfHalf`.
+  const picked=relevantFiles(p,{title:'fix HTTPServer',description:'',plan:null},{cwd:root,config:{dfHalf:0}});
   // Without the acronym rule the identifier is one token, `httpserver`, which
   // matches neither file: the task names the thing and the ranking cannot see it.
   assert.ok(picked.paths.includes('src/http.mjs'),'`http` was recovered from the acronym run');
@@ -736,7 +855,10 @@ test('ties break on code point, not on the ICU locale',()=>{
   fs.writeFileSync(path.join(root,'src','apple.mjs'),'export const a=1;\n');
   const s=new Service(root,{allowMock:true});
   const p=s.initProject('p',root);
-  const picked=relevantFiles(p,{title:'zebra apple',description:'',plan:null},{cwd:root});
+  // The weight off, for the same reason as the acronym test: the claim here is
+  // about the tie-break, and `dfHalf` would move the tie group's absolute score
+  // without touching the order it exists to check.
+  const picked=relevantFiles(p,{title:'zebra apple',description:'',plan:null},{cwd:root,config:{dfHalf:0}});
   // Both files match their own word and nothing distinguishes them, which is the
   // normal case here: on the measured repo 59 files tied on one score. A locale
   // sort puts `apple` first; a code-point sort puts `Zebra` first, because `Z` is
@@ -819,7 +941,11 @@ test('a file the task never names is offered for the file it is imported by',()=
   const on=relevantFiles(p,task,{cwd:root});
   assert.ok(!off.paths.includes('src/deep.mjs'),'with the graph off the file is invisible to the task');
   assert.ok(on.paths.includes('src/deep.mjs'),'one hop of the import graph reaches it');
-  assert.equal(on.scores.find(f=>f.path==='src/deep.mjs').graph,true,'and it is marked as entering by the graph, not by a score it does not have');
+  // The marker carries the *magnitude* the pull contributed, not a boolean, so the
+  // assertion is that the file's whole score came from the graph - which is the
+  // claim: it has no lexical evidence of its own.
+  const deep=on.scores.find(f=>f.path==='src/deep.mjs');
+  assert.equal(deep.score,deep.graph,'and its whole score is the graph pull, not a score it does not have');
   assert.ok(on.paths.includes('src/hub.mjs'),'the seed that pull came from keeps its own slot');
 });
 
@@ -901,7 +1027,8 @@ test('a file the task never names is offered for the name it declares',()=>{
   const on=relevantFiles(p,task,{cwd:root,config:{edge:0}});
   assert.ok(!off.paths.includes('src/form.mjs'),'with the def pass off the file is invisible to the task');
   assert.ok(on.paths.includes('src/form.mjs'),'the file that declares the name the task uses is offered');
-  assert.equal(on.scores.find(f=>f.path==='src/form.mjs').define,true,'and it is marked as entering on a declaration rather than on its path');
+  const form=on.scores.find(f=>f.path==='src/form.mjs');
+  assert.equal(form.score,form.define,'and its whole score is the declaration, not a path it does not match');
 });
 
 test('a name one file declares speaks louder than a name the whole tree declares',()=>{
@@ -966,7 +1093,10 @@ test('an oversized single file is reduced to its path rather than sent over budg
   // anyway. It is now reduced to a path, which is what `readForPrompt` already
   // does for a binary or an unreadable file.
   const budget=Math.max(60,Math.floor(built.manifest.tokens/4));
-  const tight=buildTaskContext(p,{id:'t',title:'fix gigantic',plan:null},{role:'planner',config:contextConfig({budget})});
+  // `dfHalf: 0` again: the subject is the budget ladder, and the ladder pops files
+  // in rank order, so leaving the weight on would make this fixture's outcome a
+  // fact about the path weights rather than about the budget.
+  const tight=buildTaskContext(p,{id:'t',title:'fix gigantic',plan:null},{role:'planner',config:contextConfig({budget,dfHalf:0})});
   assert.ok(tight.manifest.tokens<=budget,`${tight.manifest.tokens} tokens fits the ${budget} budget`);
   const big=tight.files.find(f=>f.path==='src/gigantic.mjs');
   assert.ok(big,'the file the task named is still named');
