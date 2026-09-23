@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,inspect,importGraph,declarations} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -823,6 +823,142 @@ test('the query ceiling counts only the terms this repository can answer',()=>{
   assert.equal(many.debug.coverage,1,'three terms, and it still has one');
   assert.equal(one.debug.ceil,many.debug.ceil,'so the two ceilings are the same number');
   assert.ok(many.debug.terms.length>one.debug.terms.length,'even though the query is longer');
+});
+
+test('the budget is derived from the window, and the ladder that spends it is total',()=>{
+  // §5.6. Three regimes, and the sweep below covers all of them: the cap is the
+  // ceiling when the window is roomy, the share is what binds in the middle, and
+  // the floor is what keeps a 4k window from producing a context of zero.
+  assert.equal(windowBudget(400000,0),50000,'a huge window still cannot exceed the cap');
+  assert.equal(windowBudget(40000,3000),31000,'the share binds in the middle');
+  assert.equal(windowBudget(4000,3000),400,'the fixed sections come off the top');
+  assert.equal(windowBudget(2000,3000),200,'and the floor is what stops a negative budget');
+  assert.equal(windowBudget(null,0),50000,'no window known: the cap, as every non-model caller wants');
+  // Totality, which is the property the old ladder did not have. The empty skeleton
+  // is the fixed point: once the tree and the files are both empty, what remains is
+  // a constant, so the question is whether the floor clears it.
+  // A repository with enough in it that the ladder has to run: 120 files, one of
+  // them the task's own, and every file big enough that the budget cannot hold many.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  const body='export const thing = 1;\n'.repeat(60);
+  for(let i=0;i<120;i++) fs.writeFileSync(path.join(root,'src',`mod${String(i).padStart(3,'0')}.mjs`),body);
+  fs.writeFileSync(path.join(root,'src','widget.mjs'),body);
+  const p={id:'p',name:'ai-code',path:root,language:'js',framework:'none',commands:{}};
+  const task={id:'t',title:'make the widget report why it degraded instead of shrinking silently',plan:'Plan: the ladder in buildTaskContext.'};
+  for(const w of [null,400000,32000,9000,4000,900,400,64]){
+    for(const f of [0,3000,20000]){
+      const ctx=buildTaskContext(p,task,{role:'implementer',window:w,fixed:f,config:contextConfig({})});
+      assert.ok(ctx.manifest.tokens<=ctx.manifest.budget,`${ctx.manifest.tokens} tokens fitted ${ctx.manifest.budget} at window ${w}, fixed ${f}`);
+    }
+  }
+  // The floor is under the skeleton, not merely asserted to be: at the smallest
+  // legal budget the ladder gives up the bodies, then the listing, and still fits.
+  const floor=buildTaskContext(p,task,{role:'implementer',window:64,fixed:20000,config:contextConfig({})});
+  assert.equal(floor.manifest.budget,200);
+  assert.ok(floor.manifest.files.every(f=>!('text' in f)),'nothing survives a 200-token budget with its body');
+  assert.ok(floor.manifest.tokens<200,'and the skeleton that is left is smaller than that');
+  assert.ok(floor.manifest.trimmed.some(t=>t.endsWith('→ path only')),'and the file it ranked is still named, without its body');
+  assert.ok(floor.manifest.trimmed.length>=2,'which took more than one rung');
+  // The last rung, on its own: a budget under the skeleton's own size is still
+  // satisfied, because by then the only thing left to drop is the file list itself.
+  const bare=buildTaskContext(p,task,{role:'implementer',window:64,fixed:20000,config:contextConfig({budget:40,minBudget:0})});
+  assert.deepEqual(bare.files,[],'the file list is the last thing to go');
+  assert.ok(bare.manifest.tokens<=40);
+});
+
+test('a ranking that fails is labelled rather than fatal',()=>{
+  // §5.8. The fallback is a shape, and it is exported so this test does not have to
+  // provoke a real exception inside a live service to see one.
+  const root=repo();
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','widget.mjs'),'export const w=1;\n');
+  const failed=treeOnlyContext(root,new Error('boom'));
+  assert.equal(failed.manifest.state,'FAILED');
+  assert.match(failed.manifest.note,/boom/,'the error itself is in the prompt, not only in a log');
+  assert.ok(failed.tree.some(f=>f==='src/widget.mjs'),'the tree is a listing, so it is still useful');
+  assert.deepEqual(failed.manifest.files,[],'and no file body claims to have been ranked');
+  const nowhere=treeOnlyContext(null,new Error('gone'));
+  assert.deepEqual(nowhere.tree,[],'an unresolvable root degrades to an empty listing, not a throw');
+  assert.equal(nowhere.manifest.state,'FAILED');
+});
+
+test('a failed ranking reaches the run and the prompt instead of ending it',async()=>{
+  // The end-to-end half of §5.8: the same failure with a provider attached. Before
+  // phase 6 the exception left `runRole` and took the run with it.
+  const root=repo();
+  const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'package');
+  s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  // The provocation is the lookup the assembler's own argument is built from, fired
+  // once so that the catch's second attempt - the one that resolves the root for the
+  // fallback listing - is exercised too.
+  const real=s.project.bind(s);
+  const realRun=s.runRole.bind(s);
+  let armed=false;
+  s.runRole=(...a)=>{armed=true;return realRun(...a).finally(()=>{armed=false})};
+  s.project=(id)=>{if(armed){armed=false;throw new Error('the project row is gone')}return real(id)};
+  const done=await s.execute(t.id);
+  assert.equal(done.state,'COMPLETE','the run finished');
+  const runs=s.store.listRuns(t.id);
+  const failed=runs.filter(r=>r.context_state==='FAILED');
+  assert.ok(failed.length,'and every run says why its context was a listing');
+  assert.equal(runs.filter(r=>!r.context_state).length,0);
+  assert.ok(failed[0].context_tokens>0,'a listing is still a context, and still measured');
+});
+
+test('the degradation state rides the manifest onto the run',async()=>{
+  // The label has to survive to the two places that can act on it: the prompt,
+  // which is the model's only warning, and the run row, which is where a human
+  // finds out after the fact.
+  const root=repo();
+  const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'package');
+  s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  await s.execute(t.id);
+  const states=s.store.listRuns(t.id).map(r=>r.context_state);
+  assert.deepEqual([...new Set(states)],['FULL'],'a repository with the task in it ranks fully');
+  // And the label is in the prompt, not only on the row: `manifest` is inside the
+  // JSON the agent is handed, so a state nobody serialises is a state nobody reads.
+  const ctx=buildTaskContext(s.project(p.id),s.task(t.id),{role:'planner'});
+  assert.equal(ctx.manifest.state,'FULL');
+  assert.ok('state' in JSON.parse(JSON.stringify(ctx)).manifest);
+});
+
+test('a walk that cannot read a directory says so, and says it over the ranking',()=>{
+  // §5.9's PARTIAL. It is the one state the ranking cannot decide for itself: a
+  // perfect ranking of half a tree is still missing half the tree, so this wins
+  // over whatever the ranker concluded about the half it saw.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  fs.mkdirSync(path.join(root,'src'),{recursive:true});
+  fs.writeFileSync(path.join(root,'src','widget.mjs'),'export const w=1;\n');
+  const p={id:'p',name:'p',path:root};
+  const task={id:'t',title:'widget',description:'',plan:null};
+  const whole=buildTaskContext(p,task,{role:'planner'});
+  assert.equal(whole.manifest.state,'FULL');
+  fs.mkdirSync(path.join(root,'closed'));
+  fs.writeFileSync(path.join(root,'closed','hidden.mjs'),'export const h=1;\n');
+  fs.chmodSync(path.join(root,'closed'),0o000);
+  try {
+    const partial=buildTaskContext(p,task,{role:'planner'});
+    assert.equal(partial.manifest.state,'PARTIAL','the incomplete walk is what the agent is told about');
+    assert.match(partial.manifest.note,/could not read/);
+  } finally { fs.chmodSync(path.join(root,'closed'),0o755); }
+});
+
+test('an empty repository is labelled EMPTY rather than looking like a bad ranking',()=>{
+  // §5.9's EMPTY. The distinction that matters downstream: `files: []` from a
+  // repository with nothing to rank is not the same fact as `files: []` from a
+  // ranking that failed, and without the label the prompt says the same thing.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));
+  const p={id:'p',name:'p',path:root};
+  const ctx=buildTaskContext(p,{id:'t',title:'widget',description:'',plan:null},{role:'planner'});
+  assert.equal(ctx.manifest.state,'EMPTY');
+  assert.match(ctx.manifest.note,/Nothing in this repository scored/);
+  const no=buildTaskContext(p,{id:'t',title:'qqqq zzzz',description:'',plan:null},{role:'planner'});
+  assert.equal(no.manifest.state,'EMPTY','nothing scored is EMPTY whether or not the terms exist');
 });
 
 test('an acronym run splits off the word that follows it',()=>{

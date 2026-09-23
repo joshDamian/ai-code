@@ -95,6 +95,12 @@ export class Store {
         ['context_tokens', 'INTEGER DEFAULT 0'],
         ['relevant_files', 'INTEGER DEFAULT 0'],
         ['context_budget', 'INTEGER DEFAULT 0'],
+        // §5.9's label, persisted so a degraded context is visible in `runs`
+        // without reading the prompt back out of the transcript. NULL on rows
+        // written before the column existed, which is exactly why the default is
+        // not 'FULL': an unrecorded run did not observe a state, and saying it did
+        // would invent a measurement.
+        ['context_state', 'TEXT'],
       ],
     })) {
       for (const [column, type] of columns) this.ensureColumn(table, column, type);
@@ -403,15 +409,15 @@ export class Store {
       .prepare(
         `INSERT INTO runs(id,task_id,role,provider_id,model_id,status,started_at,ended_at,error,fallback_from,
            tokens,cost,duration_ms,session_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,
-           cost_basis,context_tokens,relevant_files,context_budget)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+           cost_basis,context_tokens,relevant_files,context_budget,context_state)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       )
       .run(
         r.id, r.taskId ?? null, r.role, r.providerId, r.modelId, r.status, r.startedAt,
         null, null, r.fallbackFrom ?? null,
         0, 0, 0, null, 0, 0, 0, 0,
         null,
-        r.contextTokens ?? 0, r.relevantFiles ?? 0, r.contextBudget ?? 0
+        r.contextTokens ?? 0, r.relevantFiles ?? 0, r.contextBudget ?? 0, r.contextState ?? null
       );
     return r;
   }
@@ -429,13 +435,13 @@ export class Store {
       .prepare(
         `UPDATE runs SET status=?,ended_at=?,error=?,fallback_from=?,tokens=?,cost=?,duration_ms=?,session_id=?,
            input_tokens=?,output_tokens=?,cache_read_tokens=?,cache_write_tokens=?,cost_basis=?,
-           context_tokens=?,relevant_files=?,context_budget=? WHERE id=?`
+           context_tokens=?,relevant_files=?,context_budget=?,context_state=? WHERE id=?`
       )
       .run(
         n.status, n.ended_at ?? null, n.error ?? null, n.fallback_from ?? null, n.tokens ?? 0, n.cost ?? 0,
         n.duration_ms ?? 0, n.session_id ?? null, n.input_tokens ?? 0, n.output_tokens ?? 0,
         n.cache_read_tokens ?? 0, n.cache_write_tokens ?? 0, n.cost_basis ?? null,
-        n.context_tokens ?? 0, n.relevant_files ?? 0, n.context_budget ?? 0,
+        n.context_tokens ?? 0, n.relevant_files ?? 0, n.context_budget ?? 0, n.context_state ?? null,
         id
       );
     return n;

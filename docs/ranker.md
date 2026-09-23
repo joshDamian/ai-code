@@ -5,7 +5,7 @@ must do, measures what it does, and specifies the replacement.
 
 Everything in §1 and §2 was measured against the live database
 (`.ai-code/ai-code.db`) and the working tree on 2026-09-23. Claims sourced from
-other systems are marked with the source; anything unverified is called out in §8.
+other systems are marked with the source; anything unverified is called out in §9.
 
 ---
 
@@ -409,7 +409,10 @@ recorded as unreproducible rather than quietly replaced with a number that is.
 
 The cause is structural rather than an arithmetic slip: `evaluate()` re-ranks
 against **the tree on disk**, so every figure here is a property of *(ranker,
-tree)* and not of the ranker. Adding one file to the repository moves the baseline.
+tree)* and not of the ranker. Adding one file to the repository moves the baseline
+— and §5.12 item 5 measures the same effect at one *identifier*'s scale, where
+naming a new function in an existing file is enough to move macro recall 3.7
+points. Neither the file list nor the contents are held out of the measurement.
 
 22 planner runs, 14 with a recoverable gold set, in two tree states. Both columns
 are the ranker as it was before phase 3:
@@ -481,7 +484,7 @@ time, and §2.4 does.
 | R9 | Never throws | **Violated** — EACCES in `walk()` propagates out of the run (§4) |
 | R10 | Total generality | Any language, no git, no manifest, 10 files or 500k |
 | R11 | Reconstructible selection | ~~Nothing persisted beyond counts~~ **Phase 5** — `context.debug` writes `ranker-debug.json`: every candidate's path, score, per-signal decomposition, acceptance and reason, plus `ceil`, `NQC`, the branch, and config and tree hashes |
-| R12 | Named degradation states with a recovery path | Silent best-effort |
+| R12 | Named degradation states with a recovery path | **Phase 6** — `FULL`, `EMPTY`, `NO_RESULTS`, `PARTIAL`, `FAILED` ship, on `manifest.state` and on the run. `WEAK` and `DEGRADED` are withheld: `WEAK` needs §5.7's unshipped floor and `DEGRADED` needs a fallback branch that does not exist. The *recovery path* half is still short — `NO_RESULTS` does not yet relax and retry; §5.9, §9 |
 | R13 | Reject structurally-irrelevant files before scoring | ~~No file-type gate~~ **Phase 1** — `NOISE_FILE` excludes lockfiles, minified bundles and sourcemaps from scoring; they stay in the tree |
 | R14 | Scores comparable across queries | ~~Raw sums~~ **Phase 5 records** `normScore = score / Σ idf` — but it is not the comparable quantity §5.7 assumes: the numerator is `W/(W+df)` and the denominator `idf_L`, and the measured range runs to 4.9 rather than `[0,1)`. §5.10 |
 | R15 | Never serve a stale index | No cache |
@@ -497,22 +500,23 @@ Verified against source unless noted.
 
 | Condition | Required | Today |
 |---|---|---|
-| **Unreadable subdirectory (EACCES)** | Skip, continue | ~~**Throws out of `inspect()` → out of the run.** Verified: `THREW: EACCES ... scandir '/tmp/walktest/locked'`. `walk()` at `src/context.mjs:38` has no try/catch~~ **Fixed in phase 1** — the walk records the directory in `manifest.unreadable` and continues |
+| **Unreadable subdirectory (EACCES)** | Skip, continue | ~~**Throws out of `inspect()` → out of the run.** Verified: `THREW: EACCES ... scandir '/tmp/walktest/locked'`. `walk()` at `src/context.mjs:38` has no try/catch~~ **Fixed in phase 1** — the walk records the directory in `manifest.unreadable` and continues. **Phase 6** raises it to `state: 'PARTIAL'`, which overrides the ranking's own verdict |
 | **One file exceeds the budget** | Emit path only | ~~**Sends over-budget context** — ladder exits at `files.length === 1`~~ **Fixed in phase 1** — unconditional rungs reduce content to paths, then the tree |
-| Empty repo | Return empty, marked | `paths: []`, unlabelled |
+| Empty repo | Return empty, marked | **Phase 6** — `state: 'EMPTY'` with a note saying the tree below is all of it |
 | No git history | Recency contributes nothing | Handled — `recentFiles()` catches |
 | Task text with no usable tokens | Widen, mark weak | ~~`tokenize()` drops <3-char tokens; `ui`, `db`, `os`, `js`, `id` vanish silently~~ **Phase 5** — the floor is 2, so all five survive; the df weight is what keeps `to`, `of`, `in`, `is` from riding in with them |
 | Acronym run in a task token | Correct split | ~~`HTTPServer` → `httpserver`~~ **Fixed in phase 1** — → `["http","server"]`. ~~`base64` → `["base"]`~~ **closed in phase 5** by the floor: → `["64","base"]` |
 | Task token is filler (`the`, `add`, `new`) | Weighted to ~0 | ~~`+10` per basename hit, same as a rare token~~ **Phase 5** — damped by df, not deleted; §5.3 step 4 keeps them tokenisable because `in`, `is`, `to`, `id` are real signal inside identifiers |
-| Zero files score > 0 | Labelled default | `ENTRY_POINT`/`CONFIG_FILE` usually prevent literal zero, so the degenerate case is *entry points only*, unlabelled |
+| Zero files score > 0 | Labelled default | **Phase 6** — `EMPTY` when nothing scored and `NO_RESULTS` when files scored on priors but no task term appears in any path, each with the terms that matched nothing. What is still missing is §5.7's relaxation retry: the label fires on the first query, not after the OR |
 | All candidates tie | Deterministic order | `localeCompare` — locale-sensitive |
+| Ranker throws | Degrade, never throw | **Phase 6** — `FAILED`: `Service#ranked()` catches on both call sites (`prepare()` was unwrapped), returns a tree-only context with the error in `manifest.note`, and the run continues. Persisted as `runs.context_state` |
 | Binary / >2 MB file | Path only | Handled, silently |
 | Symlinked directory | Follow or report | `Dirent.isDirectory()` is false for a symlink → pushed as a file, never recursed |
 | Filename containing a newline | Correct parsing | `git log --name-only` split on `\n` yields garbage entries |
 | Monorepo, 200k files | Bounded work | Full sync walk ×2; `tree: 400` is an alphabetical prefix, so anything past the 400th path is undiscoverable |
 | Task vocabulary ∌ code vocabulary | Mark low confidence | Returns entry points + configs + recent as though it had matched — this is §2.2 |
-| Model window < ~59k | Shrink, or reroute to a wider window | Hard `CONTEXT_TOO_LARGE`; the next candidate likely shares the window |
-| `contextLength` absent | Assume a safe floor | Guard skipped entirely |
+| Model window < ~59k | Shrink, or reroute to a wider window | **Phase 6** — the budget is derived from the routed model's window (`floor(window × 0.85) − fixed`), so the assembler shrinks instead of the guard refusing: the `CONTEXT_TOO_LARGE` throw is unreachable in the normal path, because the two use the same 0.85. Below `minBudget` the floor wins and the model is still over — that case still throws, and still reroutes |
+| `contextLength` absent | Assume a safe floor | **Phase 6** — `windowBudget(null)` returns the cap, so an unregistered window assembles against `budget: 50000` rather than against nothing. The guard is still skipped, which is now the *only* unchecked path |
 | Vendored / generated / lockfiles | Never spend a slot | ~~`ignored` has 12 names~~ **Fixed in phase 1** — 28 directory names, plus `NOISE_FILE` for lockfiles, `*.min.{js,cjs,mjs,css}` and `*.map`, which leave the *scoring* pass but stay in the tree |
 | Planner at root, implementer in worktree | Stated invariant | Both re-rank different trees; the gate uses the planner's set. Divergence is by design but undocumented |
 | Import specifier is an alias, a glob or built at runtime | Resolve, or draw no edge | **Phase 3** — only relative and Python-dotted specifiers resolve; `@/lib/x` and a computed path draw nothing and contribute no frontier. Degrades to the pre-phase-3 ranking rather than throwing |
@@ -756,6 +760,41 @@ The shrink ladder must be **total** — content → conventions → architecture
 files-to-paths-only → unconditional clamp — so that over-budget is
 unrepresentable. Today the ladder has a floor at one file and no clamp.
 
+**Built and measured — phase 6.** The formula ships without the
+`reserve_output` term, because the share already leaves the output room: `0.85` is
+the number the service's post-assembly guard already refuses a request over, and
+two terms for one reserve would double it. That guard is now unreachable in the
+normal path rather than merely unlikely — the assembler targets `floor(window ×
+0.85) − fixed`, and the size the guard measures is `fixed + context`, so the two
+cannot disagree. §9 records the departure from the formula as written.
+
+`fixed` is measured in `runRole` from the exact strings that reach the prompt
+(`estimateTokens` of the preamble, task, plan and role prompt), not passed as a
+constant and not estimated inside the assembler, which knows nothing about the
+service's prompt shape. Summing two `ceil` estimates can only overshoot the
+estimate of the sum, so the derivation stays conservative.
+
+| window | fixed | budget | what binds |
+|---|---|---|---|
+| 400000 | 0 | 50000 | the cap |
+| 40000 | 3000 | 31000 | the share |
+| 4000 | 3000 | 400 | the subtraction |
+| 2000 | 3000 | 200 | the floor |
+
+A sweep of 24 window/fixed pairs — every combination of 8 windows (including
+`null`, `0`, and windows below `fixed`) and 3 fixed sizes — leaves no context above
+its budget. The floor under the ladder is the empty skeleton
+`{tree:[],architecture:null,…,files:[]}`, 108 tokens on this repository, which is
+what makes 200 the smallest safe `minBudget` rather than a round number.
+
+**The ladder's last rung is the one that makes the claim true.** The geometric
+tree clamp bottoms out at an empty tree, but `files` still names every path the
+ranking picked, and a path is worth tokens: at a small enough budget the assembler
+was still over. The new rung pops `files` unconditionally — no `files.length > 1`
+guard and no "keep the selected paths", because a guard is what left the ladder a
+rung short. On a 121-file repository at a 200-token budget the rungs run in order:
+the listing shrinks, the file body becomes a path, then the path goes.
+
 ### 5.7 Two decisions, not one threshold: no-results and weak-results
 
 Two independent measurements say a ranker that always returns top-k is worse than
@@ -839,6 +878,36 @@ The EACCES crash in §4 is the counter-example, and it is live.
 | `NO_RESULTS` | Coverage zero after one relaxation | tree only, plus the terms that matched nothing |
 | `EMPTY` | Nothing scored at all | tree only |
 | `FAILED` | Ranker threw | tree only, error recorded on the run |
+
+**Built and measured — phase 6.** Five of the seven ship. The states are decided
+where the fact lives, not in one function: `EMPTY` and `NO_RESULTS` come from the
+ranker, which is the only thing that knows what scored. `NO_RESULTS` is §5.7's
+coverage test — zero in-vocabulary terms — which §5.10's record already computed
+for the ceiling, so it costs nothing to read. The **relaxation retry is not
+built**, though: this fires on coverage-zero for the first query rather than after
+the OR §5.7 specifies, so it is the state that is right and the second chance that
+is missing, and the second chance belongs with §5.7's floor. `PARTIAL` comes from
+the walk, and
+overrides the ranking's own verdict, because a perfect ranking of half a tree is
+still missing half the tree; `FAILED` comes from the service's catch. The label and
+its note ride on `manifest.state` and `manifest.note`, which are inside the JSON
+the prompt already carries, and are persisted as `runs.context_state` so a degraded
+context is visible in `ai-code runs` without reading a transcript. Old rows are
+NULL, not `FULL`: an unrecorded run did not observe a state.
+
+**Trimming is not a state.** A context cut to one path is still `FULL`, because
+the state grades the *ranking* and `manifest.trimmed` grades the fit. Ten rungs
+say more than a label would, and the two facts are independently true. There is no
+`SHRUNK`.
+
+**`WEAK` and `DEGRADED` are withheld rather than faked.** `WEAK`'s condition is
+"`NQC ≈ 0` or top `normScore` below the floor", and §5.7's floor is unshipped
+because §5.10 measured it as having nothing to calibrate against — precision flat
+at 35.7% across every candidate floor. `DEGRADED`'s condition is "heuristic floor
+only (entry points + configs + recent)", and no such fallback path exists: the
+ranker's priors are *additive to* lexical evidence rather than a fallback from its
+absence, so there is no branch that reaches entry points alone. Shipping the two
+labels would mean shipping two `case` arms no input can reach. §9 records both.
 
 ### 5.10 Observability
 
@@ -940,6 +1009,22 @@ is what surfaced them:
    the ranking is. Five of the fourteen usable runs here are in that state. They
    are reported and held out of the recall mean rather than averaged in as if the
    shortfall were the ranker's.
+5. **Gold is mined from this repository's own tasks, and the corpus is this
+   repository's tree**, so the benchmark can be moved by editing the thing it is
+   measuring. Phase 6 found the smallest version of this: adding `rankingState` to
+   `src/context.mjs` gains it a declaration hit for the gold case *"ai-code task
+   list ignores its project argument and cannot filter by state"* — camelCase
+   splits the identifier, and `state` is one of its tokens. Renaming the function
+   and changing nothing else moves macro recall from 0.880 to 0.843 on the same
+   tree, which is one run picking up one of its three gold files. The tree effect
+   §2.6 measures at 16 points was produced by adding and removing *files*; this is
+   the same effect at one identifier's scale, through the `define` index rather
+   than the file list. Any figure quoted across a commit boundary is therefore a
+   property of the pair, and the phase-6 number cannot be compared to phase 5's.
+   A sweep that holds the tree fixed and varies `config` — every weight in §5.2
+   and §5.3 — is unaffected, which is why those comparisons stand.
+6. **The harness reads the working tree, not HEAD.** A dirty checkout is the
+   corpus. `git stash` before an `eval` that is meant to be recorded.
 
 Two more things the paragraph above did not anticipate. Recall has two defensible
 definitions that differ by nine points on this corpus, so both are reported:
@@ -1315,6 +1400,40 @@ adversarial orders blow it up.
    rescales everything the pull competes with. That is a phase-3 constant changed by
    a phase-5 measurement, which is the cost of calibrating coupled weights together.
 6. **Window-derived budget, total shrink ladder, named degradation states** (§5.6, §5.9).
+
+   **Landed — `windowBudget()`, `treeOnlyContext()` and the ladder's last rung in
+   `src/context.mjs`; `Service#ranked()` and the `fixed` measurement in
+   `src/service.mjs`.** The budget is derived per attempt from the routed model's
+   window, and `fixed` is measured in `runRole` from the exact strings that reach
+   the prompt rather than guessed inside the assembler. The ladder is total: a
+   sweep of 24 window/fixed pairs — including windows smaller than the fixed
+   sections, where the formula goes negative and the floor catches it — leaves no
+   context over its budget, and a 121-file repository at a 200-token budget still
+   fits, by giving up the file bodies, then the listing, then the names.
+
+   §5.8's catch is on both call sites now, not one. `prepare()`'s manifest — the
+   one a human reads before approving a plan — was going through the assembler
+   unwrapped, so the ranker's only guarded caller was the one that runs *after*
+   approval.
+
+   **Five of §5.9's seven states ship; two are withheld.** `FULL`, `EMPTY`,
+   `NO_RESULTS`, `PARTIAL` and `FAILED` are produced and carried on
+   `manifest.state`, which rides into the prompt with the rest of the manifest and
+   onto the run as `context_state`. `WEAK` needs §5.7's floor, which §5.10 measured
+   as having nothing to calibrate against; `DEGRADED` needs a heuristic-fallback
+   path that has never been written. §9 carries both, rather than shipping two
+   labels that no code path can produce.
+
+   **The phase's eval number is not comparable to phase 5's, and that is the
+   finding.** The run reports 0.8805 macro / 0.7818 micro / 12 unoffered against
+   phase 5's 0.8435 / 0.7636 / 13 — with a scoring path that did not change. The
+   cause is the harness, not the ranker: renaming one new function
+   (`rankingState` → `qzxN`) on the *same* working tree reproduces phase 5's five
+   metrics to the digit. The identifier's camelCase token `state` matches the gold
+   case *"ai-code task list ignores its project argument and cannot filter by
+   state"*, so `src/context.mjs` earns a declaration hit and takes one of that
+   run's three gold files — one run, one file, 0.33 recall on a nine-run mean, and
+   the whole 3.7-point macro move. §2.4 records it as a harness property.
 7. **Hierarchical render and content tier** (§5.4–5.5, §5.13), then the content
    index of §6.3 — and a *persistent* index only past the §6.1 threshold.
 
@@ -1341,7 +1460,40 @@ a fraction of §5.13's complexity — the content tier is a complement, not the 
   now reports two tree states measured directly instead.
 - Every `ai-code eval` figure is a property of (ranker, tree). §2.6 measures the
   tree effect at 16 points of macro recall, so any comparison spanning a commit
-  is confounded. Same-process, same-tree only.
+  is confounded. Same-process, same-tree only. §5.12 item 5 sharpens it: the
+  effect does not need a new *file*. Phase 6's only scoring-neutral change — a new
+  function in `src/context.mjs` — moved macro recall 3.7 points through the
+  `define` index, because the function's name contained a token one gold case's
+  task mentions. Phase 6's own eval number is therefore recorded as unmeasurable
+  against phase 5's, not as a change.
+- **§5.9's `WEAK` and `DEGRADED` are unshipped, and the reason is not effort.**
+  `WEAK`'s trigger is a `normScore` or NQC floor, and §5.10's calibration came back
+  flat — precision 35.7% at every candidate floor from 0.10 to 0.50 — so there is
+  no constant to ship that a measurement supports. `DEGRADED`'s trigger is a
+  heuristic-fallback branch, and the ranker has none: entry points, configs and
+  recency are *added to* every score rather than substituted when nothing matches,
+  so "entry points only" is not a state the code can be in. Both are withheld
+  rather than emitted by arms no input reaches.
+- **§5.7's relaxation retry is not built, and as the state is defined it cannot
+  help.** `NO_RESULTS` fires when `Σ_{t∈q∩V} idf(t) = 0` — no task term is in the
+  corpus's vocabulary at all — so dropping a term or OR-ing the rest changes no
+  token's presence in `V` and the reload returns the same empty set. FTS5's retry
+  works because its trigger is a *zero-result* query, which here would be files
+  scored but none matched; those are `EMPTY`'s and the priors' territory, not this
+  state's. Building the retry therefore means deciding again which condition
+  triggers `NO_RESULTS`, and that decision belongs with §5.7's floor.
+- **The `reserve_output` term in §5.6's formula was dropped, not fitted.** The
+  shipped budget is `floor(window × 0.85) − fixed`, where the doc writes
+  `floor(window × 0.85) − reserve_output − measured_fixed_sections`. The share and
+  the reserve are the same quantity counted twice: 0.85 is already the line the
+  service's own guard draws, so subtracting an output reserve as well would leave
+  the request at roughly 0.7 of the window. If a model's output were ever to exceed
+  15% of its window, the share is the number to lower.
+- **§5.6's ladder is total against the budget, not against the window.** The
+  guarantee is `tokens ≤ budget` and `budget = floor(window × 0.85) − fixed`; the
+  service then checks `fixed + context ≤ window × 0.85` using the same 0.85 and the
+  same `ceil` estimates, so it holds — but the two are separate arithmetic, and a
+  future caller that derives its own budget would have to keep them in step.
 - §5.2's measured weights come from 14 gold-bearing runs over 6 tasks, with 5 runs
   capped and two tasks carrying 8 of the 14. The *direction* of the two findings
   is well supported — the sweeps are monotone across a wide range and the

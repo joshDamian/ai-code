@@ -3,7 +3,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Store } from './store.mjs';
-import { inspect, writeContext, readDependencies, relevantFiles, buildTaskContext, contextConfig } from './context.mjs';
+import { inspect, writeContext, readDependencies, relevantFiles, buildTaskContext, contextConfig, estimateTokens, treeOnlyContext } from './context.mjs';
 import {
   ensureGit, status, createWorktree, diffAgainst, statusPaths, untracked, dirtyPaths, head, changedBetween, protectAiCode,
   currentBranch, revParse, isAncestor, mergeBase, findCommit, branches, checkedOut, mergeTree, commitTree, setBranch, commitAll, removeWorktree, commitDiff,
@@ -497,8 +497,10 @@ export class Service {
     // before anything runs. A manifest rather than the context itself: paths and
     // token counts are what make the decision reviewable, and the file bodies
     // would be a snapshot that goes stale the moment the branch moves.
-    const project = this.project(this.task(id).project_id);
-    const built = buildTaskContext(project, this.task(id), { role: 'planner', config: contextConfig(this.policies.context) });
+    // Through `#ranked`, like the model calls: this manifest is the one a human
+    // reads before approving a plan, and a ranking that failed has to arrive
+    // labelled rather than as an exception out of `prepare`.
+    const built = this.#ranked(this.task(id), { role: 'planner', config: contextConfig(this.policies.context) });
     this.store.updateTask(id, { context: JSON.stringify(built.manifest) });
     return this.transition(id, 'PLANNING');
   }
@@ -506,6 +508,27 @@ export class Service {
   // The prompt budget for this install, merged over the defaults.
   contextConfig() {
     return contextConfig(this.policies.context);
+  }
+
+  // §5.8. A ranker is an optimisation on top of a working agent, so an exception
+  // from it must not be fatal - and it must not be silent either: the caller cannot
+  // tell "the ranking failed" from "this repository is genuinely empty", so the
+  // state says which. The fallback is a plain tree, the same shape the ladder
+  // bottoms out at, which is why it is assembled from `inspect` rather than
+  // reimplemented here. `inspect` can itself fail (the EACCES case in §4), and a
+  // second failure has to stay inside this method or the guard would be a
+  // relocation of the crash rather than a fix for it.
+  #ranked(task, options) {
+    try {
+      return buildTaskContext(this.project(task.project_id), task, options);
+    } catch (err) {
+      // The root is resolved a second time rather than hoisted, because the throw
+      // may have come from this very lookup - a project row deleted mid-run - and a
+      // fallback that re-throws is not a fallback.
+      let root = options.cwd || null;
+      if (!root) { try { root = this.project(task.project_id).path; } catch { root = null; } }
+      return treeOnlyContext(root, err);
+    }
   }
 
   // -- planning -------------------------------------------------------------
@@ -1679,9 +1702,18 @@ export class Service {
         // worktree for implementer, reviewer and repair, and the project root for
         // the planner. Reading the project root for a worktree run would hand the
         // agent a file list that does not match its own checkout.
-        const context = buildTaskContext(this.project(task.project_id), task, { role, cwd, store: this.store, config: this.contextConfig() });
         const taskText = task.description || task.title;
-        const full = `You are the ${role} agent in AI Code. The harness owns workflow state. Never claim a state transition occurred unless the harness performs it.\n\nTASK:\n${taskText}\n\nAPPROVED PLAN:\n${task.plan || '(planning stage)'}\n\nPROJECT CONTEXT:\n${JSON.stringify(context)}\n\nINSTRUCTIONS:\n${prompt}`;
+        const planned = task.plan || '(planning stage)';
+        // §5.6. `fixed` is every part of the request the assembler does not own: the
+        // harness preamble, the task, the approved plan and the role prompt. It is
+        // measured from the very strings that reach `full`, and measured here rather
+        // than inside the assembler, which knows nothing about the service's prompt
+        // shape. Summing the two estimates can only overshoot the estimate of the
+        // sum, so the derived budget stays conservative.
+        const fixed = estimateTokens(`You are the ${role} agent in AI Code. The harness owns workflow state. Never claim a state transition occurred unless the harness performs it.\n\nTASK:\n${taskText}\n\nAPPROVED PLAN:\n${planned}\n\nPROJECT CONTEXT:\n`)
+          + estimateTokens(`\n\nINSTRUCTIONS:\n${prompt}`);
+        const context = this.#ranked(task, { role, cwd, store: this.store, window: m.contextLength, fixed, config: this.contextConfig() });
+        const full = `You are the ${role} agent in AI Code. The harness owns workflow state. Never claim a state transition occurred unless the harness performs it.\n\nTASK:\n${taskText}\n\nAPPROVED PLAN:\n${planned}\n\nPROJECT CONTEXT:\n${JSON.stringify(context)}\n\nINSTRUCTIONS:\n${prompt}`;
 
         // The context-length check lives here rather than in select(), because
         // this is the first point at which the real size is known: a pre-filter
@@ -1698,6 +1730,7 @@ export class Service {
           context_tokens: needTokens,
           relevant_files: context.manifest.files.length,
           context_budget: context.manifest.budget,
+          context_state: context.manifest.state || null,
         });
 
         let dots = 0;

@@ -85,10 +85,37 @@ export const CONTEXT_DEFAULTS = {
   // §5.10's record. Off by default: it is a few KB per run and nothing in the
   // prompt path reads it.
   debug: false,
+  // §5.6: the share of the routed model's window a request may occupy. The
+  // remainder is the model's own output, which is why the number is not 1 - the
+  // same 0.85 the service's post-assembly guard uses, so the budget and the guard
+  // cannot disagree about where the line is.
+  windowShare: 0.85,
+  // The floor under the derived budget. Without it a small window can make the
+  // formula negative, and the ladder below would then be asked to fit a context
+  // into less than nothing. 200 tokens is the smallest number that still holds the
+  // empty skeleton the last rung reduces to.
+  minBudget: 200,
 };
 
 export function contextConfig(configured) {
   return { ...CONTEXT_DEFAULTS, ...(configured || {}) };
+}
+
+// §5.6's budget derivation. The window is the routed model's context length and
+// `fixed` is everything the request carries outside the context JSON - the role
+// prompt, the task text, the approved plan, the harness preamble. Those are
+// measured by the caller because only it knows them, and measured rather than
+// guessed because they are not small: the planner prompt alone is a couple of
+// thousand tokens.
+//
+// The doc writes the formula with a separate `reserve_output` term as well as the
+// 0.85. That is a double count - the share already leaves the output room - so the
+// share is the output reserve and there is no second term. §9 records the
+// departure.
+export function windowBudget(window, fixed, cfg = CONTEXT_DEFAULTS) {
+  if (!window || !Number.isFinite(window)) return cfg.budget;
+  const usable = Math.floor(window * cfg.windowShare) - Math.max(0, Math.floor(fixed || 0));
+  return Math.max(cfg.minBudget, Math.min(cfg.budget, usable));
 }
 
 // The same four-characters-per-token estimate the run accounting uses, so the
@@ -696,11 +723,13 @@ export function relevantFiles(project, task, options = {}) {
   // rather than at the walk so the tree still lists them.
   const rankable = files.filter((f) => !NOISE_FILE.test(f));
 
-  // §5.7's ceiling needs a df whether or not the weight is on, so the table is
-  // built for the debug record even where `dfHalf` leaves the score unweighted.
+  // §5.7's ceiling needs a df whether or not the weight is on, and §5.9's `NO_RESULTS`
+  // needs the coverage it yields, so the table is built unconditionally - one
+  // `tokenize` per path, measured at 0.23 ms for this repository's 68. `dfHalf: 0`
+  // leaves the score unweighted; it no longer leaves the table unbuilt.
   const trace = cfg.debug ? {} : null;
   const t0 = trace ? performance.now() : 0;
-  const df = cfg.dfHalf > 0 || cfg.debug ? pathDocFreq(rankable, cfg.floor) : null;
+  const df = pathDocFreq(rankable, cfg.floor);
   const tDf = trace ? performance.now() : 0;
   const scored = rankable.map((file) => {
     const s = scoreFile(file, tokens, recentRank, { df, half: cfg.dfHalf, gain: cfg.gain, floor: cfg.floor, parts: !!trace });
@@ -775,8 +804,35 @@ export function relevantFiles(project, task, options = {}) {
     const text = readForPrompt(root, file, cfg.fileChars);
     if (text !== null) contents.push({ path: file, text, tokens: estimateTokens(text) });
   }
-  const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, marks: { t0, tDf, tScore, tDefine, tEdge } }) : null;
-  return { paths: selected, contents, scores: scored, debug };
+  const rankState = rankingState(scored, tokens, df, rankable.length);
+  const debug = trace ? debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state: rankState.state, marks: { t0, tDf, tScore, tDefine, tEdge } }) : null;
+  return { paths: selected, contents, scores: scored, debug, ...rankState };
+}
+
+// §5.9's states, as far as the ranker alone can decide them. `PARTIAL` is not here
+// because it is a fact about the walk rather than the ranking, and the walk is
+// `buildTaskContext`'s to report; `WEAK` and `DEGRADED` are not here because
+// neither exists yet - the first needs §5.7's floor, which §5.10 measured as having
+// nothing to calibrate against, and the second needs a heuristic-fallback path that
+// has never been written. §9 carries both.
+//
+// The order is the order of the claims: nothing scored at all is the strongest
+// statement, then nothing matched the query, then the ordinary case.
+function rankingState(scored, tokens, df, n) {
+  if (!scored.length) return { state: 'EMPTY', note: 'Nothing in this repository scored against the task; the file tree below is all of it. Search for what you need.' };
+  const { coverage } = ceilQuery(tokens, df, n);
+  if (coverage === 0) {
+    // Capped, because this note is inside the context JSON and so counts against
+    // the budget the ladder is trying to fit: a task text long enough to have
+    // hundreds of unmatched tokens would otherwise push the file list out to make
+    // room for a list of the words that found nothing, which is the trade the note
+    // exists to avoid.
+    const all = [...tokens].sort();
+    const shown = all.slice(0, 12).map((t) => `\`${t}\``).join(', ');
+    const rest = all.length > 12 ? `, and ${all.length - 12} more` : '';
+    return { state: 'NO_RESULTS', note: `No task term appears in any path in this repository. The tree below is a starting point. Terms that matched nothing: ${shown}${rest}.` };
+  }
+  return { state: 'FULL', note: null };
 }
 
 // §5.10's debug record. Everything §5.7 needs to calibrate against, from the one
@@ -793,7 +849,7 @@ export function relevantFiles(project, task, options = {}) {
 // floor from 0.10 to 0.50. It is recorded because §5.7 asks for it and because the
 // measurement that says it does not work is the useful part; §5.10 and §9 carry it.
 const DEBUG_CANDIDATES = 200;
-function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, marks }) {
+function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected, limit, state, marks }) {
   const n = rankable.length;
   const { ceil, coverage } = ceilQuery(tokens, df, n);
   const accepted = new Map(selected.map((p, i) => [p, i]));
@@ -824,7 +880,7 @@ function debugRecord({ task, cfg, rankable, files, tokens, df, scored, selected,
     terms: [...tokens].sort(),
     idfFloor: round(idfFloor(n)),
     nqc: round(nqc(scores)),
-    branch: scored.length === 0 ? 'EMPTY' : coverage === 0 ? 'NO_RESULTS' : 'FULL',
+    branch: state,
     config: cfg,
     configHash: digest(cfg),
     treeHash: digest([...files].sort()),
@@ -871,6 +927,14 @@ export function buildTaskContext(project, task, options = {}) {
   const cfg = contextConfig(options.config);
   const role = options.role || 'planner';
   const root = options.cwd || project.path;
+  // §5.6. `options.window` is the routed model's context length and `options.fixed`
+  // is what the request carries outside this context, both supplied by the caller
+  // because neither is knowable here. Absent a window the cap stands, which is what
+  // every caller that is not a model call - the eval harness, `context show` -
+  // wants. The derived value replaces `cfg.budget` before `relevantFiles` sees it,
+  // so the debug record's config hash covers it: two runs with different windows
+  // are not comparable and the hash has to say so.
+  cfg.budget = windowBudget(options.window, options.fixed, cfg);
 
   const picked = relevantFiles(project, task, { ...options, cwd: root, config: cfg });
 
@@ -918,11 +982,10 @@ export function buildTaskContext(project, task, options = {}) {
     trimmed.push(`tree → ${tree.length} files`);
     total = size();
   }
-  // Past this point every rung is unconditional, because the ladder above has two
-  // floors it cannot pass: it never pops the last file, and the tree always keeps
-  // the paths the ranking picked. So a context with one enormous file - or one
-  // enormous review - left the assembler over budget and sent it anyway, which is
-  // the single outcome a budget exists to prevent. A budget that can be exceeded
+  // Past this point every rung is unconditional. The ladder above has a floor it
+  // cannot pass - it never pops the last file - so a context with one enormous file
+  // or one enormous review left the assembler over budget and sent it anyway, which
+  // is the single outcome a budget exists to prevent. A budget that can be exceeded
   // is not a budget.
   //
   // The prior attempt goes first: it is a retry signal, not the work. The review
@@ -960,6 +1023,18 @@ export function buildTaskContext(project, task, options = {}) {
     }
     trimmed.push(`tree → ${tree.length} files`);
   }
+  // The rung that makes over-budget unrepresentable, which is §5.6's actual
+  // requirement. Every rung above can stop one notch short: the geometric clamp
+  // empties the tree, but `files` still names every path the ranking picked, and a
+  // path is worth tokens. So this one has no guard - no `files.length > 1`, no
+  // "keep the selected paths" - because a guard is exactly what left the old ladder
+  // a rung short. After it, what remains is the fixed skeleton
+  // `{tree:[],architecture:null,...,files:[]}`, whose size is a constant and which
+  // is why the derived budget has a floor under it.
+  while (total > cfg.budget && files.length) {
+    trimmed.push(files.pop().path);
+    total = size();
+  }
 
   const manifest = {
     files: files.map((f) => ({ path: f.path, tokens: f.tokens })),
@@ -970,6 +1045,12 @@ export function buildTaskContext(project, task, options = {}) {
     budget: cfg.budget,
     trimmed,
     cwd: root,
+    // §5.9. The ranker's own verdict, raised to `PARTIAL` when the walk could not
+    // see the whole tree - a partial walk is a fact about the input, so it
+    // overrides the ranking's own reading rather than the other way round. The
+    // note is what the prompt carries: a list that arrives unlabelled is the
+    // failure mode the table exists to prevent.
+    ...degraded(unreadable, picked),
     // Present only when the walk was blocked somewhere, so the common case stays
     // byte-identical to what it was: a ranking that saw less than the whole
     // repository has to be distinguishable from a small repository, or the
@@ -1001,6 +1082,43 @@ export function buildTaskContext(project, task, options = {}) {
     review,
     previous,
     manifest,
+  };
+}
+
+// §5.9's `PARTIAL`, and the label that goes with every non-`FULL` state. Kept
+// beside the manifest rather than inside `relevantFiles` because the walk is
+// measured here and the ranking there, and the two disagree about which fact
+// matters when both are true.
+function degraded(unreadable, picked) {
+  if (unreadable.length) {
+    return { state: 'PARTIAL', note: `The file walk could not read ${unreadable.length} director${unreadable.length === 1 ? 'y' : 'ies'} (${unreadable.join(', ')}), so this listing is incomplete. Search for what is missing.` };
+  }
+  return picked.note ? { state: picked.state, note: picked.note } : { state: picked.state };
+}
+
+// §5.8's fallback. Exported rather than inlined into the service's catch, so the
+// state a ranking failure lands in can be tested without provoking a real exception
+// inside a live run - and so the shape it produces is the same shape the ladder
+// bottoms out at, which is the property that makes it a degradation rather than a
+// second, unrelated context format. `root` may be null: the ranking may have failed
+// on the lookup that resolves the root in the first place.
+export function treeOnlyContext(root, err) {
+  let tree = [];
+  try {
+    if (root) tree = inspect(root).files.slice(0, 200);
+  } catch { /* an empty listing is still a labelled one */ }
+  const note = `The context ranker failed, so this is a plain file listing rather than a ranking (${err && err.message ? err.message : String(err)}). Search for the files you need rather than assuming the important ones are here.`;
+  return {
+    tree,
+    architecture: null,
+    conventions: null,
+    files: [],
+    review: null,
+    previous: null,
+    manifest: {
+      files: [], tree: tree.length, sections: [], tokens: estimateTokens(JSON.stringify(tree)),
+      budget: 0, trimmed: [], cwd: root || null, state: 'FAILED', note,
+    },
   };
 }
 
