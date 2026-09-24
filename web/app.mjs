@@ -3,6 +3,7 @@ import { html, render, Fragment, useState, useEffect, useRef, useCallback } from
 import { Layout } from './components/layout.mjs';
 import { ShortcutLegend } from './components/kbd.mjs';
 import { CommandPalette } from './components/command-palette.mjs';
+import { requestPermission, notifyRunEnd } from './components/notify.mjs';
 import { Overview } from './views/overview.mjs';
 import { Projects } from './views/projects.mjs';
 import { Tasks } from './views/tasks.mjs';
@@ -189,6 +190,25 @@ function App() {
       window.removeEventListener('keydown', onKeyDown);
       clearTimeout(pendingTimer);
     };
+  }, []);
+
+  // Global run-completion watcher. An SSE stream from the server pushes a
+  // frame when any run finishes, so the browser can fire a notification
+  // without polling.
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
+  useEffect(() => {
+    requestPermission();
+    const es = new EventSource('/api/notifications');
+    es.addEventListener('run-end', (e) => {
+      try {
+        const { run, task } = JSON.parse(e.data);
+        notifyRunEnd(run, task, (h) => navigateRef.current(h));
+      } catch {
+        // Malformed frame; ignore.
+      }
+    });
+    return () => es.close();
   }, []);
 
   let view;

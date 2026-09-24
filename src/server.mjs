@@ -213,6 +213,32 @@ function chatStream(req, res, id) {
   req.on('close', () => clearInterval(timer));
 }
 
+// Global notification stream. Watches for runs that transition out of 'running'
+// and emits one frame per completion, so the browser can fire a notification
+// without polling.
+function notificationStream(req, res) {
+  sse(res);
+  const known = new Map();
+  for (const r of svc.store.listRuns()) known.set(r.id, r.status);
+  const timer = setInterval(() => {
+    try {
+      const runs = svc.store.listRuns();
+      for (const r of runs) {
+        const prev = known.get(r.id);
+        known.set(r.id, r.status);
+        if (!prev) continue;
+        if (prev === 'running' && r.status !== 'running') {
+          const task = r.task_id ? svc.store.getTask(r.task_id) : null;
+          res.write(`event: run-end\ndata: ${JSON.stringify({ run: r, task: task ? { id: task.id, title: task.title } : null })}\n\n`);
+        }
+      }
+    } catch {
+      // Store read failed; skip this tick.
+    }
+  }, 1000);
+  req.on('close', () => clearInterval(timer));
+}
+
 const webDir = new URL('../web/', import.meta.url).pathname;
 // The dashboard and the CLI share one set of formatters. The one file is
 // published to the browser rather than copied into the web bundle, where it would
@@ -246,6 +272,10 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'content-type': (mimeTypes[ext] || 'application/octet-stream') + '; charset=utf-8', 'access-control-allow-origin': '*' });
         return res.end(fs.readFileSync(staticPath));
       }
+    }
+
+    if (u.pathname === '/api/notifications') {
+      return notificationStream(req, res);
     }
 
     if (u.pathname === '/api/overview') {
