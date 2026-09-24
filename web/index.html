@@ -469,24 +469,66 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .test-result.good{background:rgba(111,224,161,.08);color:var(--good);border:1px solid #2c5c46}
 .test-result.bad{background:rgba(255,133,133,.08);color:var(--bad);border:1px solid #5c2c2c}
 
-/* ---- chat ---- */
+/* ---- chat ----
+   Laid out the way the chat UIs everyone already reads are: one centered column
+   of prose, turns asymmetric by role - the user's own words in a bubble on the
+   right, the assistant's reply as plain flowing text on the left - and a composer
+   that is a single rounded shell with its send affordance inside it. */
 .chat-list,.chat-conversation{display:flex;flex-direction:column;gap:var(--space-5)}
 .chat-list .card{display:flex;flex-direction:column;gap:var(--space-4);max-width:600px}
-.chat-card{display:flex;flex-direction:column;gap:0;height:100%;max-height:calc(100vh - 140px)}
-.chat-transcript{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:var(--space-3);padding:var(--space-4);border-bottom:1px solid var(--line)}
-.chat-turn{display:flex;align-items:flex-end;gap:var(--space-3)}
-.chat-turn[data-role="user"]{justify-content:flex-end}
-.chat-turn[data-role="user"] .chat-bubble{background:var(--accent-dim);color:var(--text)}
-.chat-turn[data-role="assistant"] .chat-bubble{background:var(--panel2);color:var(--text)}
-.chat-bubble{max-width:75%;border-radius:var(--radius-md);padding:var(--space-3);word-wrap:break-word}
-.chat-turn[data-role="user"] .chat-bubble{border-radius:var(--radius-md) 4px var(--radius-md) var(--radius-md)}
-.chat-turn[data-role="assistant"] .chat-bubble{border-radius:4px var(--radius-md) var(--radius-md) var(--radius-md)}
-.user-message{font-size:14px;line-height:1.5}
-.chat-bubble .md{max-height:none}
-.chat-bubble .md pre{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-3);overflow-x:auto;font-size:12px}
-.chat-composer{display:flex;gap:var(--space-3);padding:var(--space-4);background:var(--panel);border-top:1px solid var(--line)}
-.chat-composer textarea{flex:1;min-height:80px;resize:none}
-.chat-composer button{flex:0 0 auto;padding:var(--space-3) var(--space-4)}
+/* The conversation is prose, and prose read across a 1550px dashboard is a line
+   the eye cannot track back to its own start. */
+.chat-conversation{max-width:720px;margin:0 auto;width:100%}
+/* The card's own padding is zeroed: the header, the scrolling transcript and the
+   composer each own their inset, and a padded card around a padded transcript
+   was the doubled margin that read as cramped. */
+.chat-card{display:flex;flex-direction:column;gap:0;padding:0;overflow:hidden;height:100%;max-height:calc(100vh - 140px)}
+.chat-card .card-header{padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--line)}
+/* min-height:0 is what lets the transcript shrink and scroll: without it a flex
+   child refuses to go below the height of its own content. */
+.chat-transcript{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;padding:var(--space-6) var(--space-4) var(--space-4)}
+/* Turns are separated by air rather than by a rule or a box that repeats. */
+.chat-turn{display:flex;flex-direction:column;word-wrap:break-word}
+.chat-turn+.chat-turn{margin-top:var(--space-6)}
+/* A small name above the reply, the way the reference UIs do it - with no box
+   around the answer, it is the only thing that says who is talking. */
+.chat-role{font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:var(--space-2)}
+/* The user's own words: a bubble, hard right, capped at 75% so the indent reads
+   as a reply rather than as a second column of text. */
+.chat-turn[data-role="user"]{align-items:flex-end}
+.chat-turn[data-role="user"] .chat-bubble{max-width:75%;background:var(--accent-dim);color:var(--text);border-radius:var(--radius) var(--radius) var(--space-1) var(--radius);padding:var(--space-3) var(--space-4)}
+/* pre-wrap because a question written with Shift+Enter is written in lines, and
+   collapsing them throws away the shape the person typed. */
+.user-message{font-size:14px;line-height:1.5;white-space:pre-wrap}
+/* The assistant's reply: no box at all, the markdown flowing straight down the
+   column. Boxing both turns is what made the two look like the same thing - and
+   the box is not the bubble's, it is `.md`'s own: that one is drawn for a plan
+   in a panel, and an answer in a conversation is prose, not a panel. */
+.chat-turn[data-role="assistant"] .chat-bubble{max-width:100%;padding:0}
+.chat-turn[data-role="assistant"] .md{background:none;border:0;border-radius:0;padding:0;max-height:none;overflow:visible}
+/* The inset is the bubble's own padding, so the markdown's outer paragraph
+   margins must not add to it - they protruded past the first and last line. */
+.chat-turn .md>:first-child{margin-top:0}
+.chat-turn .md>:last-child{margin-bottom:0}
+.chat-bubble .md pre{background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-3);overflow-x:auto;font-size:12px}
+/* The composer is the shell. Its border, radius and surface are the input's
+   chrome, and the textarea inside it is borderless: one shape, not a box sat
+   beside a button. */
+.chat-composer{display:flex;align-items:flex-end;gap:var(--space-2);margin:0 var(--space-4) var(--space-2);padding:var(--space-2) var(--space-2) var(--space-2) var(--space-4);background:var(--panel2);border:1px solid var(--line);border-radius:20px}
+.chat-composer:focus-within{border-color:var(--accent-dim)}
+/* TextArea renders a <label class="field"> around the textarea, so the label is
+   the flex item that has to grow. The `textarea{flex:1}` that used to be here
+   targeted a descendant and never fired, which is what left the field sitting at
+   content width with the button stretched to full height beside it. */
+.chat-composer .field{flex:1;min-width:0;gap:0}
+.chat-composer textarea{flex:1;min-height:24px;max-height:200px;padding:var(--space-1) 0;border:none;background:transparent;font-family:inherit;font-size:14px;line-height:1.5;resize:none;overflow-y:auto}
+/* A small circle in the corner, not a rectangle stretched to the pill's height -
+   the single biggest visual tell of the layouts this is modelled on. */
+.chat-composer button{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border-radius:50%;font-size:16px;line-height:1}
+.chat-composer button:disabled{opacity:.4;cursor:default}
+/* The keybinding hint lives under the composer rather than in the placeholder,
+   which is gone the moment somebody starts typing - the one moment it matters. */
+.chat-hint{margin:0 var(--space-4) var(--space-4);font-size:11.5px;color:var(--muted);text-align:center}
 .sessions-list{display:grid;gap:var(--space-2)}
 .session-item{padding:var(--space-3);background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);cursor:pointer;transition:all 200ms}
 .session-item:hover{background:var(--panel);border-color:var(--accent-dim)}
@@ -495,7 +537,12 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .card-header{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3)}
 .card-header h1{margin:0}
 .back-btn{padding:var(--space-2) var(--space-3);font-size:14px}
-.chat-turn.answering{justify-content:flex-start}
+/* The live turn is a row: a spinner and a phrase, sat where the answer will
+   land. There is no bubble to anchor to, so the two are aligned to each other.
+   The spinner's own wrapper pads itself for the full-page loading blocks, which
+   is the one place that padding is not wanted. */
+.chat-turn.answering{flex-direction:row;align-items:center;gap:var(--space-2)}
+.chat-turn.answering .spinner-wrap{padding:0}
 .chat-live{color:var(--muted);font-size:12px;font-style:italic}
 .chat-error{color:var(--bad);font-size:13px;padding:var(--space-2) var(--space-3);background:rgba(255,133,133,.08);border:1px solid #5c2c2c;border-radius:var(--radius-sm);margin:var(--space-2) 0}
 
@@ -553,6 +600,11 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
      page sideways. Chart cards are excluded on purpose: a scroll container on
      one axis forces the other to auto, which would clip the chart tooltip. */
   .card:not(:has(.chart-figure)){overflow-x:auto;overscroll-behavior-x:contain}
+  /* The chat card is a fixed shell whose transcript is already the scroll
+     container, so neither the narrow-screen card padding nor the wide-content
+     scroll rule above applies to it. Written after that rule and at its
+     specificity, because both would otherwise win on source order. */
+  .card.chat-card{padding:0;overflow:hidden}
 }
 /* Narrow phones: a two-up metric row leaves too little room for the value. */
 @media(max-width:400px){

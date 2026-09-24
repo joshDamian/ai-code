@@ -10,6 +10,10 @@ import { Markdown } from '../components/markdown.mjs';
 // flag, so a reload and a second tab see the same thing this one does.
 const IN_FLIGHT = new Set(['queued', 'running']);
 
+// Where the composer stops growing and starts scrolling instead. The same number
+// the stylesheet caps the textarea at, because the two have to agree.
+const COMPOSER_MAX_PX = 200;
+
 // A turn that ended without an answer is the one failure the transcript cannot
 // show: the question is there and nothing follows it. The job row is what says the
 // turn is over and why, so it is the only thing that can report it.
@@ -31,16 +35,40 @@ export function Chat({ id, navigate, onTitle }) {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState(null);
   const streamRef = useRef(null);
-  const messagesEndRef = useRef(null);
+  const transcriptRef = useRef(null);
+  const composerRef = useRef(null);
   // The stream's handlers are bound once per connection, so they read the transcript
   // through a ref rather than through the closure they were created in.
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
-  // Auto-scroll to bottom when messages change.
+  // Pin the transcript to the newest turn. The scroll is done on the transcript
+  // itself rather than with scrollIntoView on a sentinel at its end: scrollIntoView
+  // moves every scrollable ancestor, so the page scrolled under the reader too.
+  //
+  // Opening a conversation jumps; only a message arriving while it is open animates.
+  // A smooth scroll from the top of a long transcript is a page that appears to be
+  // scrolling itself while the reader waits for it.
+  const jumpedRef = useRef(false);
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    jumpedRef.current = false;
+  }, [id]);
+  useEffect(() => {
+    const el = transcriptRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: jumpedRef.current ? 'smooth' : 'auto' });
+    jumpedRef.current = true;
+  }, [messages, streaming]);
+
+  // The composer grows with what has been typed, up to the point where it scrolls
+  // instead. TextArea is a generic field and renders its own <label>, so the height
+  // is set on the textarea the chat shell owns rather than by the component.
+  useEffect(() => {
+    const ta = composerRef.current && composerRef.current.querySelector('textarea');
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.min(ta.scrollHeight, COMPOSER_MAX_PX)}px`;
+  }, [input]);
 
   // A conversation belongs to a project, and a session cannot be created without
   // one - so the projects are loaded here rather than handed in from the route.
@@ -86,8 +114,17 @@ export function Chat({ id, navigate, onTitle }) {
       // having to ask again. The unanswered question is the other half of the test:
       // the job row settles a moment after the answer is stored, and a stream opened
       // in that gap would be one watching a turn that is already over.
+      //
+      // Both directions of the answer are authoritative. The component instance
+      // survives a navigation between the two chat routes, so `streaming` outlives
+      // the conversation it was set for: leaving a turn mid-answer and opening
+      // another one used to leave that composer disabled and reading "Answering…"
+      // until the page was reloaded. Only a job that is genuinely in flight, with
+      // its question still unanswered, may hold it.
       const last = (d.messages || [])[(d.messages || []).length - 1];
-      if (d.job && IN_FLIGHT.has(d.job.state) && last?.role === 'user') openStreamRef.current?.();
+      const inFlight = d.job && IN_FLIGHT.has(d.job.state) && last?.role === 'user';
+      if (inFlight) openStreamRef.current?.();
+      else setStreaming(false);
     } catch (e) {
       setError(e.message);
     }
@@ -175,6 +212,10 @@ export function Chat({ id, navigate, onTitle }) {
       setSession(null);
       setMessages([]);
       setError(null);
+      // The stream is closed on the way out of a conversation, but nothing else
+      // clears the flag it was running under - so Back mid-answer used to leave the
+      // list's composer disabled behind it.
+      setStreaming(false);
       onTitle?.(null);
     }
   }, [id, onTitle]);
@@ -282,10 +323,11 @@ export function Chat({ id, navigate, onTitle }) {
           <button class="btn secondary" onclick=${() => navigate('#/chat')}>Back</button>
         </div>
 
-        <div class="chat-transcript">
+        <div class="chat-transcript" ref=${transcriptRef}>
           ${messages.map(
             (msg) => html`
               <div class="chat-turn" data-role=${msg.role}>
+                ${msg.role === 'assistant' ? html`<div class="chat-role">Assistant</div>` : null}
                 <div class="chat-bubble">
                   ${msg.role === 'assistant'
                     ? html`<${Markdown} text=${msg.content} />`
@@ -294,24 +336,28 @@ export function Chat({ id, navigate, onTitle }) {
               </div>
             `
           )}
-          ${streaming ? html`<div class="chat-turn answering"><div class="chat-bubble"><${Spinner} /> <span class="chat-live">reading the project…</span></div></div>` : ''}
+          ${streaming ? html`<div class="chat-turn answering"><${Spinner} /> <span class="chat-live">reading the project…</span></div>` : ''}
           ${error ? html`<div class="chat-error">${error}</div>` : ''}
-          <div ref=${messagesEndRef} />
         </div>
 
-        <div class="chat-composer">
+        <div class="chat-composer" ref=${composerRef}>
           <${TextArea}
             value=${input}
             onInput=${setInput}
             onKeyDown=${onKeyDown}
-            placeholder="Ask a question about this project…  (Enter to send, Shift+Enter for a new line)"
-            rows=${3}
+            placeholder="Ask a question about this project…"
+            rows=${1}
             ?disabled=${busy || streaming}
           />
-          <button class="btn" onclick=${sendMessage} ?disabled=${!input.trim() || busy || streaming}>
-            ${streaming ? 'Answering…' : busy ? 'Sending…' : 'Send'}
-          </button>
+          <button
+            class="btn"
+            onclick=${sendMessage}
+            ?disabled=${!input.trim() || busy || streaming}
+            title=${streaming ? 'Answering…' : 'Send'}
+            aria-label=${streaming ? 'Answering…' : 'Send'}
+          >↑</button>
         </div>
+        <div class="chat-hint">Enter to send · Shift+Enter for a new line</div>
       </div>
     </div>
   `;
