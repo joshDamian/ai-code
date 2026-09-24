@@ -373,6 +373,24 @@ function countToolCalls(event) {
   return blocks + (event.type === 'tool_use' ? 1 : 0);
 }
 
+// Whether a frame opens or closes a subagent's lifetime, for the same reason the
+// calls above are the parent's only: what a subagent spends is its own, and the
+// parent is charged for neither. Two frames say so - the CLI opens a Task spawn
+// with `task_started` and closes it with a `task_updated` carrying a terminal
+// status - and they are the whole lifetime rather than a sample of it, which is
+// what makes them usable as a clock. `parent_tool_use_id` is not: it marks only
+// the frames a subagent writes, so an interval opened on one would never close.
+//
+// A negative answer is only ever taken to close an interval that was opened, so a
+// task frame for something this run did not open cannot run the count below zero.
+function subagentLifetime(event) {
+  if (event.type !== 'system') return 0;
+  const { subtype, patch } = event.data || {};
+  if (subtype === 'task_started') return 1;
+  if (subtype === 'task_updated' && patch?.status && patch.status !== 'running') return -1;
+  return 0;
+}
+
 // A budget that is absent, unparseable or zero means no limit, so a routing.json
 // written before the field existed behaves exactly as it did.
 function budgetOf(value) {
@@ -1815,11 +1833,62 @@ export class Service {
           this.#pollLease(run.id, task.id, controller);
         }, this.options.tickMs ?? TICK_MS);
 
-        const timeoutId = setTimeout(() => {
-          const err = new Error(`${role} timed out after ${policy.timeout || 600}s`);
+        // The wall clock a run is held to, over work it is answerable for. Time
+        // spent inside a subagent is not that: the spawn is the agent's own
+        // decision, but the lifetime behind it belongs to another agent, and the
+        // parent can neither see it nor cut it short. So the clock stops while one
+        // is open, and it stops for at most subagentWait seconds in total - a run
+        // may not hand back its whole budget book, or a chain of short subagents
+        // would hold a run open without end.
+        //
+        // What is measured is the charged time - how long the run has been running
+        // with its subagents' lifetimes taken out - and it is recomputed from the
+        // clock rather than accumulated frame by frame, because the interesting
+        // subagent is the one that has gone quiet: a wait that only counted up on
+        // frames would credit nothing for exactly the case it exists for.
+        const capMs = Math.max(0, (policy.subagentWait || 0) * 1000);
+        let openWaits = 0;
+        let openSince = 0;
+        let bankedMs = 0;
+        let armedCredit = -1;
+        let timeoutId = null;
+        // The wait credited so far: what earlier subagents banked plus the one in
+        // progress, capped - so overlapping spawns are one wait and not one each.
+        const creditAt = (now) => Math.min(bankedMs + (openWaits > 0 ? now - openSince : 0), capMs);
+        const armTimeout = () => {
+          const now = Date.now();
+          armedCredit = creditAt(now);
+          clearTimeout(timeoutId);
+          timeoutId = setTimeout(fire, Math.max(1, timeoutMs - (now - started - armedCredit)));
+        };
+        // An exemption that expires, the cap being what makes it expirable.
+        const fire = () => {
+          const now = Date.now();
+          const credit = creditAt(now);
+          if (now - started - credit < timeoutMs) return armTimeout();
+          const waited = credit ? ` (${Math.round(credit / 1000)}s of it waiting on subagents)` : '';
+          const err = new Error(`${role} timed out after ${policy.timeout || 600}s${waited}`);
           err.code = 'TIMEOUT';
           controller.abort(err);
-        }, timeoutMs);
+        };
+        // Frames move the wait in or out of the total. Nothing to do when the
+        // credit is where it was, so a role with no exemption arms exactly once,
+        // as it did before this existed.
+        const noteWait = (event) => {
+          const n = subagentLifetime(event);
+          const now = Date.now();
+          if (n > 0) {
+            if (!openWaits) openSince = now;
+            openWaits += n;
+          } else if (n < 0 && openWaits) {
+            // Banked only when the last one closes: two spawns open together are
+            // one wait, and closing one of them does not end it.
+            if (openWaits + n === 0) bankedMs += now - openSince;
+            openWaits = Math.max(0, openWaits + n);
+          }
+          if (creditAt(now) !== armedCredit) armTimeout();
+        };
+        armTimeout();
 
         // A wall clock cannot tell a run that is thinking from one that is wedged, so
         // it fires on both and the only safe value for it is one that fits the slowest
@@ -1866,6 +1935,7 @@ export class Service {
             resumeSession,
           })) {
             this.store.addEvent({ runId: run.id, type: e.type, data: e.data });
+            noteWait(e);
             const u = this.usageFrom(e.data);
             if (u) usage = { ...usage, ...u };
             const txt = this.extractText(e.data);

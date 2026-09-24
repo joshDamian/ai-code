@@ -25,17 +25,29 @@ const ROLES = ['planner', 'implementer', 'reviewer', 'repair'];
 // elsewhere) unreachable once the response is producing anything at all. Set it to
 // 0 for a provider that batches a whole block before writing it.
 //
-// The reviewer's timeout is the one that had to move. Its prompt is the largest of
-// the four - the task, the plan and the diff - and a reasoning model spends the
-// front of the run on it: on 2026-09-23 the reviewer of task 8e900a8c spent 277s
+// subagentWait is the seconds of a run's own wall clock it may spend inside
+// subagent calls without being charged for them. The spawn is the agent's own
+// decision, but what happens inside it is another agent's work on another
+// lifetime, and the parent can neither see it nor bound it - so a planner that
+// delegates was being killed for time it did not spend. It is the same number for
+// every role, like stall: delegation is a property of the loop, not of the role.
+// Zero or absent means no exemption. It is a cap and not a discount, so a chain
+// of subagents cannot extend a run without end.
+//
+// The two timeouts that had to move. The reviewer's prompt is the largest of the
+// four - the task, the plan and the diff - and a reasoning model spends the front
+// of the run on it: on 2026-09-23 the reviewer of task 8e900a8c spent 277s
 // producing its first block against a budget of 300, and the same task's reviewer
 // on a faster provider ran out at 300 mid-review, so it failed twice for the same
-// reason. 900 fits a slow first block and a whole review behind it.
+// reason. 900 fits a slow first block and a whole review behind it. The planner
+// followed for the same reason a day later: on 2026-09-24 the planner of task
+// f70c23a7 was cut at 300 mid-thought after 95s of reasoning and 127s inside three
+// subagents, still streaming when it died.
 const defaults = {
-  planner: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.2, speed: 0.1, effort: 'high', timeout: 300, stall: 120, maxToolCalls: 40, maxRunCost: 1 },
-  implementer: { strategy: 'balanced', preferred: [], fallback: [], quality: 0.5, cost: 0.2, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5 },
-  reviewer: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.1, speed: 0.3, effort: 'high', timeout: 900, stall: 120, maxToolCalls: 40, maxRunCost: 1 },
-  repair: { strategy: 'speed', preferred: [], fallback: [], quality: 0.2, cost: 0.4, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5 },
+  planner: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.2, speed: 0.1, effort: 'high', timeout: 900, stall: 120, maxToolCalls: 40, maxRunCost: 1, subagentWait: 600 },
+  implementer: { strategy: 'balanced', preferred: [], fallback: [], quality: 0.5, cost: 0.2, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5, subagentWait: 600 },
+  reviewer: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.1, speed: 0.3, effort: 'high', timeout: 900, stall: 120, maxToolCalls: 40, maxRunCost: 1, subagentWait: 600 },
+  repair: { strategy: 'speed', preferred: [], fallback: [], quality: 0.2, cost: 0.4, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5, subagentWait: 600 },
   // Circuit-breaker thresholds. Absent means the defaults in src/health.mjs apply.
   health: {},
   // Prompt budget for the context assembler. Absent means the defaults in
@@ -74,8 +86,9 @@ export function loadPolicies(root) {
     return structuredClone(defaults);
   }
   try {
-    // Shallow merge: a saved role replaces the default role wholesale, so a
-    // partially written role keeps only the keys it actually has.
+    // Merged key by key per role (normalize, above): a saved role overrides the
+    // defaults only where it names a key, so a role written before a budget
+    // existed picks that budget up rather than silently losing it.
     return normalize({ ...defaults, ...JSON.parse(fs.readFileSync(f, 'utf8')) });
   } catch {
     // A corrupt or unreadable file falls back to defaults rather than failing the

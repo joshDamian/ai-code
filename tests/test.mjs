@@ -373,6 +373,89 @@ test('a provider that writes nothing until it is done is not read as stalled',as
   assert.equal(s.store.listRuns(t.id).filter(x=>/STALLED/.test(x.error||'')).length,0);
 });
 
+test('a run waiting on a subagent is not charged for the wait',async()=>{
+  // The planner of task f70c23a7 was cut at 300s having spent 127 of them inside
+  // three Explore spawns, with the run still streaming when it died. A subagent runs
+  // on its own lifetime, so the parent's clock covers the parent's work - the same
+  // split the tool-call budget already makes one frame at a time.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'delegating',name:'Delegating',kind:'mock',enabled:true,config:{routable:true,streamEvents:10,streamMs:100,subagentMs:2000}});
+  s.addModel({id:'delegating-m',providerId:'delegating',name:'d',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,timeout:1,subagentWait:5}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const planned=await s.plan(t.id);
+  assert.equal(planned.state,'AWAITING_APPROVAL','2s inside a subagent does not spend a 1s budget');
+});
+
+test('subagents that overlap are charged once, not once each',async()=>{
+  // Two spawns held open together are one wait: the run is blocked once, and a
+  // clock that added their lifetimes would credit it twice for the same second.
+  // Three overlapping spawns cost the planner of f70c23a7 127s, not 381.
+  //
+  // It is asserted from the far side on purpose. Credited once, the run's 1s
+  // budget and 2s of exemption are spent by a 1s wait, and the deadline it dies
+  // on is 2s in; credited twice, the exemption covers the same second twice and
+  // it would live to 3s - long enough to reach the silence the mock holds after
+  // the spawns close, which is the run's own thinking and is charged for.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'parallel',name:'Parallel',kind:'mock',enabled:true,config:{routable:true,streamEvents:10,streamMs:100,subagents:2,subagentMs:1000,stallMs:1400}});
+  s.addModel({id:'parallel-m',providerId:'parallel',name:'p',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,stall:60,timeout:1,subagentWait:2}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const started=Date.now();
+  const err=await s.plan(t.id).then(()=>null,e=>e);
+  const ms=Date.now()-started;
+  assert.equal(err?.code,'TIMEOUT');
+  assert.ok(ms<2500,`the two waits were credited as one (died at ${ms}ms, not the 3s their sum would buy)`);
+  const run=s.store.listRuns(t.id).find(x=>x.role==='planner');
+  assert.match(run.error,/1s of it waiting on subagents/,'a second of wait, not two');
+});
+
+test('the exemption is capped, so a chain of subagents cannot hold a run open',async()=>{
+  // The budget a run hands back is a number of seconds, not an amnesty: past it the
+  // clock runs again, which is what stops a run from spawning its way out of every
+  // bound that is left.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'spawner',name:'Spawner',kind:'mock',enabled:true,config:{routable:true,streamEvents:10,streamMs:100,subagentMs:2500}});
+  s.addModel({id:'spawner-m',providerId:'spawner',name:'s',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,stall:60,timeout:1,subagentWait:1}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const started=Date.now();
+  const err=await s.plan(t.id).then(()=>null,e=>e);
+  assert.equal(err?.code,'TIMEOUT');
+  const run=s.store.listRuns(t.id).find(x=>x.role==='planner');
+  assert.match(run.error,/1s of it waiting on subagents/,'the record says how much of the budget was exempt');
+  assert.ok(Date.now()-started<2500,'killed while the subagent was still open, not after it returned');
+});
+
+test('an uncharged wait does not cover a subagent that goes quiet',async()=>{
+  // The guard on all of the above. Exempting the wait must not exempt the silence
+  // inside it: a spawn that stops answering is exactly what the stall detector is
+  // for, and a run that bought time for a subagent would otherwise sit behind one
+  // that is never coming back.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'silent-sub',name:'Silent',kind:'mock',enabled:true,config:{routable:true,streamEvents:10,streamMs:100,subagentMs:30000}});
+  s.addModel({id:'silent-sub-m',providerId:'silent-sub',name:'s',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,stall:1,timeout:60,subagentWait:600}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const started=Date.now();
+  const err=await s.plan(t.id).then(()=>null,e=>e);
+  assert.equal(err?.code,'STALLED');
+  assert.ok(Date.now()-started<15000,`stopped at a second of silence, not after the 30s spawn (${Date.now()-started}ms)`);
+});
+
 test('cancel aborts the running agent and leaves the task re-executable',async()=>{
   const root=repo();const s=new Service(root,{allowMock:true});
   s.updateProvider('mock',{enabled:false});

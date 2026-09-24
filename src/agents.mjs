@@ -78,9 +78,6 @@ export async function* runMock(input) {
     yield { type: 'stream_event', data: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 1000, output_tokens: input.mockStreamEvents * 10 } } } };
     yield { type: 'stream_event', data: { type: 'stream_event', event: { type: 'message_stop' } } };
   }
-  // A run that has streamed and then goes quiet, which is the shape a stall detector
-  // has to catch and the total timeout cannot tell from a run that is merely busy.
-  if (input.mockStallMs) await sleep(input.mockStallMs, input.signal);
   // A real agent's stream is mostly tool calls, and the per-role budget counts
   // them. The mock emits them on demand so that budget is exercisable without a
   // provider, in the same shape a claude assistant message carries them.
@@ -94,6 +91,30 @@ export async function* runMock(input) {
   for (let i = 0; i < (input.mockSubagentToolCalls || 0); i++) {
     yield { type: 'message', data: { parent_tool_use_id: 'call_mock_subagent', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: `sub-${i}.mjs` } }] } } };
   }
+  // A subagent's lifetime, in the two frames the CLI writes for one: every spawn
+  // opens before the wait and closes after it. Held open for a real interval,
+  // because the thing the exemption measures is wall clock - a mock that opened and
+  // closed in one tick would leave a run charged for nothing and prove nothing.
+  // Several at once is the case worth having: they overlap, so the run is waiting
+  // once, not once per spawn.
+  if (input.mockSubagentMs) {
+    const spawns = input.mockSubagents || 1;
+    for (let i = 0; i < spawns; i++) {
+      yield { type: 'system', data: { type: 'system', subtype: 'task_started', task_id: `mock-task-${i}`, tool_use_id: `call_mock_spawn_${i}`, subagent_type: 'Explore' } };
+    }
+    await sleep(input.mockSubagentMs, input.signal);
+    for (let i = 0; i < spawns; i++) {
+      yield { type: 'system', data: { type: 'system', subtype: 'task_updated', task_id: `mock-task-${i}`, patch: { status: 'completed', end_time: Date.now() } } };
+    }
+  }
+  // A run that has streamed and then goes quiet, which is the shape a stall detector
+  // has to catch and the total timeout cannot tell from a run that is merely busy.
+  // After the spawns rather than before them, because the silence it stands for is
+  // the run's own - the thinking it does on the far side of a wait, which is where
+  // the planner of f70c23a7 was when its budget ran out. Placed before the spawns it
+  // would be a silence with the run's whole remaining life still to come, and a test
+  // that held a subagent open under it could never reach the spawn at all.
+  if (input.mockStallMs) await sleep(input.mockStallMs, input.signal);
   // Which files the run looked at. The execution gate compares the dirty set
   // against exactly this, so a test that cannot name these would be testing the
   // context ranker rather than the gate.
@@ -515,6 +536,8 @@ export async function* runAgent(provider, model, input) {
         mockSessionId: provider.config.sessionId,
         mockToolCalls: provider.config.toolCalls || 0,
         mockSubagentToolCalls: provider.config.subagentToolCalls || 0,
+        mockSubagents: provider.config.subagents || 1,
+        mockSubagentMs: provider.config.subagentMs || 0,
         mockStreamEvents: provider.config.streamEvents || 0,
         mockStreamMs: provider.config.streamMs || 0,
         mockStallMs: provider.config.stallMs || 0,
