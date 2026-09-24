@@ -179,6 +179,71 @@ test('a routing dead end names what was blocking each provider',()=>{
 
 test('production routing excludes mock',()=>{const root=repo();const s=new Service(root,{allowMock:false});const p=s.initProject('p',root);s.addProvider({id:'mock2',name:'Mock2',kind:'mock',enabled:true,config:{routable:true}});s.addModel({id:'mock2m',providerId:'mock2',name:'Mock2',capabilities:['planning'],speed:10,quality:10,cost:0});assert.throws(()=>s.select('planner'),/No available model/)});
 test('preferred model is honoured',()=>{const root=repo();const s=new Service(root);const p=s.initProject('p',root);s.addProvider({id:'a',name:'A',kind:'claude-code',enabled:true,config:{routable:true}});s.addModel({id:'slow',providerId:'a',name:'slow',capabilities:['planning'],speed:1,quality:10,cost:1});s.addModel({id:'fast',providerId:'a',name:'fast',capabilities:['planning'],speed:10,quality:8,cost:1});s.saveRouting({...s.getRouting(),planner:{...s.getRouting().planner,preferred:['a:slow']}});assert.equal(s.select('planner').m.id,'slow')});
+
+// A per-task planning-model preference, the third argument of select(). It is a
+// first pick and nothing more: it is chosen from the rows that survived every gate,
+// so naming a model the router would have refused does not put it back in.
+test('a named planning model outranks the score when it is available',()=>{
+  const root=repo();
+  const s=twoProviders(new Service(root,{allowMock:true}));
+  assert.equal(s.select('planner').m.id,'bad-m','the control: the higher-scoring model wins with nothing named');
+  assert.equal(s.select('planner',[],'good-m').m.id,'good-m','named, and chosen over the model that outranks it');
+});
+
+test('a preference for a disabled model is ignored, not resurrected',()=>{
+  const root=repo();
+  const s=twoProviders(new Service(root,{allowMock:true}));
+  s.updateModel('good-m',{enabled:false});
+  assert.equal(s.select('planner',[],'good-m').m.id,'bad-m');
+});
+
+test('a preference for a model behind an open circuit is ignored',()=>{
+  const root=repo();
+  const s=twoProviders(new Service(root,{allowMock:true}));
+  for(let i=0;i<s.healthThresholds().openAfter;i++) failRun(s,'good','AGENT_FAILURE');
+  assert.equal(s.store.getProviderHealthRow('good').state,'OPEN');
+  assert.equal(s.select('planner',[],'good-m').m.id,'bad-m','the breaker is not something a preference can override');
+});
+
+test('a preference for a model whose provider is at capacity is ignored',()=>{
+  const root=repo();
+  const s=twoProviders(new Service(root,{allowMock:true}));
+  s.runner={atCapacity:(p)=>p.id==='good',runningByProvider:()=>1,limitFor:()=>1};
+  assert.equal(s.select('planner',[],'good-m').m.id,'bad-m');
+});
+
+test('a preference never wins the pass that runs when everything is unhealthy',()=>{
+  const root=repo();
+  const s=twoProviders(new Service(root,{allowMock:true}));
+  for(const id of ['good','bad']) for(let i=0;i<s.healthThresholds().openAfter;i++) failRun(s,id,'AGENT_FAILURE');
+  // Every circuit is open, so the retry pass is what answers - and it is
+  // deliberately deaf to the preference. That pass exists to try the best of a bad
+  // lot, and pinning it would turn "try the best" into "try the named one again".
+  const pick=s.select('planner',[],'good-m');
+  assert.equal(pick.m.id,'bad-m');
+  assert.equal(pick.healthForced,true);
+});
+
+test('the planning-model preference validates the model and persists on the task',()=>{
+  const root=repo();
+  const s=twoProviders(new Service(root,{allowMock:true}));
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');
+  s.addModel({id:'off-m',providerId:'good',name:'off',capabilities:['planning'],enabled:false});
+  s.addModel({id:'code-only-m',providerId:'good',name:'code',capabilities:['coding']});
+  assert.throws(()=>s.setPlanModel(t.id,'nope'),/Unknown model nope/);
+  assert.throws(()=>s.setPlanModel(t.id,'off-m'),/off-m is disabled/);
+  assert.throws(()=>s.setPlanModel(t.id,'code-only-m'),/cannot plan/);
+  assert.equal(s.task(t.id).plan_model,null,'a refused write leaves the task exactly as it was');
+  assert.equal(s.setPlanModel(t.id,'good-m').plan_model,'good-m');
+  // Every task write goes through updateTask, whose SET list is positional and has
+  // no type to catch a slip - so an ordinary state change is the thing most likely
+  // to drop a column appended after it.
+  s.store.updateTask(t.id,{state:'AWAITING_APPROVAL'});
+  assert.equal(s.task(t.id).plan_model,'good-m','a state write keeps the preference');
+  assert.equal(s.setPlanModel(t.id,'  ').plan_model,null,'a blank clears it back to automatic');
+});
+
 test('provider model controls persist',()=>{const root=repo();const s=new Service(root);s.addProvider({id:'a',name:'A',kind:'claude-code',enabled:true,config:{routable:true}});s.addModel({id:'m',providerId:'a',name:'m',capabilities:['planning'],enabled:true});assert.equal(s.updateProvider('a',{enabled:false}).enabled,false);assert.equal(s.updateModel('m',{enabled:false}).enabled,false)});
 
 test('model registry keeps dashboard IDs separate from provider invocation IDs',()=>{
@@ -930,6 +995,73 @@ test('an oversized prompt skips the small model and picks one that can hold it',
   const health=s.providerHealthList().find(h=>h.providerId==='a-small');
   assert.equal(health.state,'HEALTHY',"an oversized prompt is not the provider's fault");
   assert.equal(health.failures,0,'and it is not in the breaker window either');
+});
+
+// A mock provider carrying two planning models. A mock is unreachable through
+// routing - the last resort loop is what answers a task here - which is exactly
+// what makes it the fixture for this: with the gates contributing nothing, the pick
+// is decided by the preference and the first-eligible fallback alone.
+function mockPlanner(s){
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'mp',name:'Mock Planner',kind:'mock',enabled:true,config:{routable:true}});
+  s.addModel({id:'a-m1',providerId:'mp',name:'a-m1',capabilities:['planning'],speed:10,quality:20,cost:0,contextLength:100000});
+  s.addModel({id:'a-m2',providerId:'mp',name:'a-m2',capabilities:['planning'],speed:1,quality:1,cost:0,contextLength:100000});
+  return s;
+}
+
+test('a planner run plans with the model the task names',async()=>{
+  const root=repo();
+  const s=mockPlanner(new Service(root,{allowMock:true,silent:true}));
+  const p=s.initProject('p',root);
+  // Two tasks: the first is planned with nothing named, so the assertion about the
+  // second is about the preference rather than about which model the fixture scores
+  // first.
+  const plain=s.createTask(p.id,'plan without a preference');s.prepare(plain.id);await s.plan(plain.id);
+  const named=s.createTask(p.id,'plan with a preference');s.prepare(named.id);
+  s.setPlanModel(named.id,'a-m2');
+  await s.plan(named.id);
+  const runs=(id)=>{const r=s.store.listRuns(id);return r[r.length-1]};
+  assert.equal(runs(plain.id).model_id,'a-m1','the fixture scores a-m1 first');
+  assert.equal(runs(named.id).model_id,'a-m2','and the named model plans this one anyway');
+});
+
+test('a preference that cannot be honoured is skipped, and the run says so',async()=>{
+  const root=repo();
+  const s=mockPlanner(new Service(root,{allowMock:true,silent:true}));
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'plan something');s.prepare(t.id);
+  s.setPlanModel(t.id,'a-m2');
+  // Disabled after it was chosen, which is what a settings change elsewhere looks
+  // like from here: the preference is still on the task and no longer routable.
+  s.updateModel('a-m2',{enabled:false});
+  await s.plan(t.id);
+  const runs=s.store.listRuns(t.id);
+  const run=runs[runs.length-1];
+  assert.equal(run.model_id,'a-m1','the run went elsewhere rather than failing');
+  assert.equal(run.status,'succeeded');
+  // Exactly one: the note belongs to the run that skipped the preference, and a
+  // fallback attempt would otherwise repeat the same sentence down the feed.
+  const notes=s.store.listEvents(run.id).filter((e)=>e.type==='note'&&/override skipped/.test(e.data?.content||''));
+  assert.equal(notes.length,1);
+  assert.match(notes[0].data.content,/a-m1/,'and names the model that did run');
+  // The row has to reach a reader or it is a note nobody sees: both UIs render it
+  // through describeEvent, which lifts a system frame's `content` into the text.
+  const seen=describeEvent(notes[0]);
+  assert.equal(seen.kind,'note');
+  assert.match(seen.text,/override skipped/);
+});
+
+test('a refine plans with the model the task names, like the first plan',async()=>{
+  const root=repo();
+  const s=mockPlanner(new Service(root,{allowMock:true,silent:true}));
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'plan something');s.prepare(t.id);
+  await s.plan(t.id);
+  assert.equal(s.store.listRuns(t.id)[0].model_id,'a-m1','the first plan followed the ordinary route');
+  s.setPlanModel(t.id,'a-m2');
+  await s.refine(t.id,'tighten it');
+  const runs=s.store.listRuns(t.id);
+  assert.equal(runs[runs.length-1].model_id,'a-m2','a refine runs the same planner and reads the same preference');
 });
 
 // -- context engine ----------------------------------------------------------

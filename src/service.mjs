@@ -874,6 +874,25 @@ export class Service {
     return this.task(id);
   }
 
+  // The task's planning-model preference. A preference, so it is not a claim about
+  // the model's health - a model that is OPEN or at capacity right now is still a
+  // legal answer, and the run says so on its own record when it goes elsewhere.
+  // Which is also why there is no state gate: this is read by the next planner run
+  // whenever that happens, and refusing a write because the task is mid-flight
+  // would lose the setting the run does not care about either way.
+  setPlanModel(id, modelId) {
+    this.task(id);
+    const value = String(modelId ?? '').trim() || null;
+    if (value) {
+      const m = this.store.getModel(value);
+      if (!m) throw new Error(`Unknown model ${value}`);
+      if (!m.enabled) throw new Error(`Model ${value} is disabled`);
+      if (!(m.capabilities || []).includes('planning')) throw new Error(`Model ${value} cannot plan`);
+    }
+    this.store.updateTask(id, { plan_model: value });
+    return this.task(id);
+  }
+
   // -- direct chat ----------------------------------------------------------
 
   createChatSession(projectId, title) {
@@ -1771,24 +1790,44 @@ export class Service {
     return { rows, rejections };
   }
 
-  select(role, excluded = []) {
+  select(role, excluded = [], preferredModelId = null) {
+    const cap = capability[role];
     const first = this.#candidates(role, excluded);
+    // A per-task preference, and only a preference: it wins the first pass by
+    // being picked from the rows that already survived every gate - enabled,
+    // routable, not in an OPEN circuit, not at capacity - so a model that would
+    // have been rejected is not resurrected by being named. Everything below
+    // this line is untouched by it.
+    if (preferredModelId) {
+      const preferred = first.rows.find((r) => r.m.id === preferredModelId);
+      if (preferred) return preferred;
+    }
     if (first.rows[0]) return first.rows[0];
     // Every provider is in an OPEN circuit. Retrying the best of them beats
     // failing with "no available model", which tells the user nothing: the run
     // records the real error, and the attempt is what re-opens a window on it.
+    // The preference is deliberately absent here: this pass is the one that runs
+    // when nothing is healthy, and pinning it would turn "try the best of a bad
+    // lot" into "try this one again".
     const forced = this.#candidates(role, excluded, { ignoreHealth: true });
     if (forced.rows[0]) return { ...forced.rows[0], healthForced: true };
     // Mock providers are excluded from routing above (a real install must never
     // route to them by accident), so they are only reachable as a last resort,
     // and only when the caller opted in.
     if (this.options.allowMock) {
+      // The same preference applies here, or a task pinned to a mock model - which
+      // is how the test suite reaches this path - would be answered by whichever
+      // mock happened to sort first.
+      let firstMock = null;
       for (const p of this.store.listProviders()) {
         if (p.kind !== 'mock' || !p.enabled || excluded.includes(p.id)) continue;
         for (const m of this.store.listModels(p.id)) {
-          if (m.enabled && !excluded.includes(m.id) && m.capabilities.includes(capability[role])) return { p, m, score: 0 };
+          if (!m.enabled || excluded.includes(m.id) || !m.capabilities.includes(cap)) continue;
+          if (m.id === preferredModelId) return { p, m, score: 0 };
+          if (!firstMock) firstMock = { p, m, score: 0 };
         }
       }
+      if (firstMock) return firstMock;
     }
     // The reasons ride on the error rather than in its text, because whether they are
     // worth showing depends on whether an earlier attempt failed, and only the caller
@@ -2016,8 +2055,12 @@ export class Service {
 
     for (let attempt = 0; attempt < 8; attempt++) {
       let p, m, healthForced;
+      // The task's own planning-model preference, honoured for the planner and
+      // nowhere else. It is read on every attempt rather than hoisted: a caller
+      // that changes it mid-run is asking for the next attempt to see it.
+      const preferred = role === 'planner' && task.plan_model ? task.plan_model : null;
       try {
-        ({ p, m, healthForced } = this.select(role, excluded));
+        ({ p, m, healthForced } = this.select(role, excluded, preferred));
       } catch (selErr) {
         // Nothing left to route to, and two facts are worth reporting: the failure
         // that emptied the chain by one, and why nothing was left after it. Only the
@@ -2055,6 +2098,19 @@ export class Service {
       if (chat) {
         if (turnRunId && turnRunId !== run.id) this.store.retargetChatQuestion(chat, turnRunId, run.id);
         turnRunId = run.id;
+      }
+      // The task asked for a planning model and this run is not on it. Saying so
+      // on the run's own record is the only place it can be read: the preference
+      // is a request, not a constraint, so nothing failed and nothing is retried
+      // - and without this line the pick looks like routing ignoring the setting.
+      // Once, on the first attempt: a fallback is a different story and a note
+      // per attempt would repeat the same sentence down the activity feed.
+      if (!chat && role === 'planner' && attempt === 0 && preferred && preferred !== m.id) {
+        this.store.addEvent({
+          runId: run.id,
+          type: 'note',
+          data: { content: `Planning model override skipped: ${preferred} unavailable or unhealthy — using ${m.displayName || m.name}.` },
+        });
       }
       const started = Date.now();
       let sessionId = null;

@@ -297,6 +297,10 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
   const [staleDraft, setStaleDraft] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [action, setAction] = useState(null);
+  // The provider registry, read once: the planning-model pick is a list of models,
+  // and the health beside it is a hint about the pick rather than the authority on
+  // it - the router re-reads health at the moment of the run.
+  const [registry, setRegistry] = useState(null);
   // The plan the draft was seeded from, so a revision landing mid-edit can be told
   // apart from the user's own typing.
   const draftBaseRef = useRef(task.plan || '');
@@ -304,6 +308,57 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
   const planning = live?.role === 'planner';
   const hasPlan = bodyKind(task.plan) !== 'empty';
   const elapsed = live?.startedAt && Number.isFinite(Date.parse(live.startedAt)) ? now - Date.parse(live.startedAt) : null;
+
+  useEffect(() => {
+    let mounted = true;
+    api
+      .providers()
+      .then((d) => {
+        if (!mounted) return;
+        const health = new Map((d.health || []).map((h) => [h.providerId, h.state]));
+        // The same filter the routing screen applies to a role's model list, so a
+        // model offered here is one the router would actually consider: enabled,
+        // not a mock (which routing never reaches), and carrying the capability.
+        const models = (d.models || []).filter((m) => m.enabled && m.provider_id !== 'mock' && (m.capabilities || []).includes('planning'));
+        setRegistry({ models, all: d.models || [], health });
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // The pick, in one place because both branches of this tab render it: the
+  // PLANNING-with-no-run branch needs it before a plan exists, and the main stack
+  // covers Refine and Replan, which read the same column.
+  const planningModelPicker = registry
+    ? (() => {
+        const label = (m) => `${m.displayName || m.name} — ${m.provider_id}`;
+        const options = [{ value: '', label: 'Automatic' }, ...registry.models.map((m) => ({ value: m.id, label: label(m) }))];
+        // A model the task names but the registry no longer offers - disabled, or
+        // its capability taken away - would leave the select showing a value with
+        // no matching option, which renders as an empty box that reads like the
+        // setting was lost. Naming it as unavailable keeps the row honest about
+        // what is stored, and picking Automatic is the way to clear it.
+        if (task.plan_model && !options.some((o) => o.value === task.plan_model)) {
+          options.push({ value: task.plan_model, label: `${task.plan_model} (unavailable)` });
+        }
+        const chosen = registry.all.find((m) => m.id === task.plan_model);
+        const open = chosen && registry.health.get(chosen.provider_id) === 'OPEN';
+        return html`
+          <div class="row">
+            <${Select}
+              label="Planning model"
+              value=${task.plan_model || ''}
+              disabled=${busy}
+              options=${options}
+              onChange=${(v) => run(() => api.taskSetPlanModel(task.id, v), 'Planning model saved.')}
+            />
+            ${open ? html`<span class="muted">provider circuit open — the router will pick another model</span>` : null}
+          </div>
+        `;
+      })()
+    : null;
 
   // One timer for both live numbers in this tab: how long the planner has been running
   // and how long ago the revision landed. It is also what publishes the action line,
@@ -391,6 +446,7 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
         <div class="row">
           <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskPlan(task.id), 'Plan ready.')}>Start Planning</button>
         </div>
+        ${planningModelPicker}
       </div>
     `;
   }
@@ -423,6 +479,8 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
             `
           : null
       }
+
+      ${planningModelPicker}
 
       ${
         editing

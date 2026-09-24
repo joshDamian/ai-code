@@ -157,6 +157,8 @@ export function createApi(baseUrl) {
     cancel: (id) => post(`/api/tasks/${id}/cancel`),
     close: (id) => post(`/api/tasks/${id}/close`),
     updatePlan: (id, plan) => patch(`/api/tasks/${id}/plan`, { plan }),
+    // The per-task planning-model preference. `null` clears it back to automatic.
+    setPlanModel: (id, modelId) => patch(`/api/tasks/${id}/plan`, { plan_model: modelId }),
 
     providers: () => get('/api/providers'),
     updateProvider: (id, body) => patch(`/api/providers/${id}`, body),

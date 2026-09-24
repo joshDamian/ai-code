@@ -25,6 +25,9 @@ function seeded(){
   s.addProvider({id:'planner',name:'Planner',kind:'mock',enabled:true,config:{routable:true}});
   s.addProvider({id:'worker',name:'Worker',kind:'mock',enabled:true,config:{routable:true,delayMs:30000}});
   s.addModel({id:'planner-m',providerId:'planner',name:'planner',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  // A second planning model, deliberately out-scored by the first so every test
+  // that only needs *a* planner keeps the one it has always had.
+  s.addModel({id:'planner-m2',providerId:'planner',name:'planner-m2',capabilities:['planning'],speed:1,quality:1,cost:0,contextLength:100000});
   s.addModel({id:'worker-m',providerId:'worker',name:'worker',capabilities:['coding','review','repair'],speed:10,quality:10,cost:0,contextLength:100000});
   const t=s.createTask(p.id,'serve the api');
   s.prepare(t.id);
@@ -219,6 +222,41 @@ test('show carries the revision of the plan, against the one it replaced',async(
     assert.equal(second.revision.hasPrev,true);
     assert.equal(second.revision.at,second.task.plan_at);
     assert.match(second.revision.diff,/\+a hand-written revision/);
+  }finally{server.stop()}
+});
+
+test('a task carries a planning-model preference, and the next planner run honours it',async()=>{
+  const {root,taskId}=seeded();
+  const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  const base=server.base;
+  const patch=(payload)=>fetch(`${base}/api/tasks/${taskId}/plan`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
+  const task=async()=>JSON.parse((await get(`${base}/api/tasks/${taskId}/show`)).body).task;
+  try{
+    const before=await task();
+    const named=await patch({plan_model:'planner-m2'});
+    const namedBody=await named.text();
+    assert.equal(named.status,200,namedBody);
+    assert.equal(JSON.parse(namedBody).plan_model,'planner-m2');
+    // The wipe this guards: updatePlan reads a body's `plan` whether or not it has
+    // one, so a request that only names a model would otherwise store undefined as
+    // the plan. Two fields on one route is what makes that reachable from the UI.
+    const after=await task();
+    assert.equal(after.plan,before.plan,'naming a model is not an edit of the plan');
+    assert.equal(after.plan_at,before.plan_at);
+
+    const unknown=await patch({plan_model:'nope'});
+    assert.equal(unknown.status,400);
+    assert.match(JSON.parse(await unknown.text()).error,/Unknown model/);
+    assert.equal((await task()).plan_model,'planner-m2','a refused write changes nothing');
+
+    assert.equal((await patch({plan_model:''})).status,200);
+    assert.equal((await task()).plan_model,null,'the empty string is Automatic');
+
+    await patch({plan_model:'planner-m2'});
+    assert.equal((await post(`${base}/api/tasks/${taskId}/plan`)).status,200);
+    const run=JSON.parse((await get(`${base}/api/tasks/${taskId}/show`)).body).runs.find((r)=>r.role==='planner');
+    assert.equal(run.model_id,'planner-m2','the preference is what the planner ran on');
+    assert.equal((await task()).plan_model,'planner-m2','and it stays on the task the run does not consume');
   }finally{server.stop()}
 });
 

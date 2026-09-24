@@ -338,7 +338,14 @@ const server = http.createServer(async (req, res) => {
     const planMatch = u.pathname.match(/^\/api\/tasks\/([^/]+)\/plan$/);
     if (planMatch && req.method === 'PATCH') {
       const b = await body(req);
-      return json(res, svc.updatePlan(planMatch[1], b.plan));
+      // Two fields, one route, and each is written only when the body names it.
+      // Testing for the key rather than the value is what keeps a request about
+      // the planning model from also being an edit of the plan: `b.plan` on a body
+      // that has no plan is `undefined`, which updatePlan would write as a wipe.
+      let r;
+      if ('plan_model' in b) r = svc.setPlanModel(planMatch[1], b.plan_model);
+      if ('plan' in b) r = svc.updatePlan(planMatch[1], b.plan);
+      return json(res, r ?? svc.task(planMatch[1]));
     }
     if (u.pathname.match(/^\/api\/tasks\/([^/]+)\/stream$/)) {
       return taskStream(req, res, u.pathname.split('/')[3]);

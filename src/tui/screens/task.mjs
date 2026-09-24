@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdin } from 'ink';
 import Spinner from 'ink-spinner';
 import TextInput from 'ink-text-input';
+import SelectInput from 'ink-select-input';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -18,6 +19,12 @@ const TABS = [
   { key: '3', id: 'review', label: 'REVIEW' },
   { key: '4', id: 'activity', label: 'ACTIVITY' },
 ];
+
+// The plan-tab states the planning-model preference is offered in: a task waiting
+// for a planner, one whose plan is on the table (Refine re-runs the planner), and
+// one whose planning failed and can be replanned. The preference is read by the
+// next planner run, so these are exactly the states that have one coming.
+const PLAN_TAB_STATES = new Set(['PLANNING', 'AWAITING_APPROVAL', 'FAILED']);
 
 
 // $EDITOR, or vi when it is unset. Split on whitespace so values like
@@ -65,6 +72,8 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
   const [editing, setEditing] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [selected, setSelected] = useState(0);
+  const [pickingModel, setPickingModel] = useState(false);
+  const [modelChoices, setModelChoices] = useState([]);
 
   const { stdin, setRawMode, isRawModeSupported } = useStdin();
   const childRef = useRef(null); // the running $EDITOR, if any
@@ -131,8 +140,8 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
   }, [taskId]);
 
   useEffect(() => {
-    setTyping?.(refining || editing);
-  }, [refining, editing]);
+    setTyping?.(refining || editing || pickingModel);
+  }, [refining, editing, pickingModel]);
 
   // Ink refcounts raw mode across every active useInput, and the App-level
   // handler never deactivates, so the count only drops to zero if this screen
@@ -244,6 +253,29 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
     setFeedback('');
   };
 
+  // The models a planner could run on, read when the picker opens rather than at
+  // mount: the registry changes when somebody edits it on another screen, and a
+  // stale list is the one thing that would offer a model the server now refuses.
+  // Automatic is first because clearing the preference is a choice like any other.
+  const openModelPicker = async () => {
+    try {
+      const d = await api.providers();
+      const models = (d.models || []).filter((m) => m.enabled && m.provider_id !== 'mock' && (m.capabilities || []).includes('planning'));
+      setModelChoices([
+        { label: 'Automatic', value: '' },
+        ...models.map((m) => ({ label: `${m.displayName || m.name} — ${m.provider_id}`, value: m.id })),
+      ]);
+    } catch (err) {
+      return onError?.(err.message);
+    }
+    setPickingModel(true);
+  };
+
+  const choosePlanModel = async (value) => {
+    setPickingModel(false);
+    await run('Planning model', () => api.setPlanModel(taskId, value));
+  };
+
   // A run row with status `running` is the only reliable sign that an agent is
   // mid-flight. The task state is not: PLANNING is both "a planner is running"
   // and "waiting for the user to start one", and states linger in the database
@@ -257,6 +289,7 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
       if (activeRun) binds.push(['c', 'cancel']);
       if (!activeRun && task.state !== 'COMPLETE' && task.state !== 'CANCELLED') binds.push(['x', 'close']);
       if (tab === 'plan') {
+        if (PLAN_TAB_STATES.has(task.state)) binds.push(['m', 'planning model']);
         if (task.state === 'PLANNING' && !activeRun) binds.push(['p', 'start planning']);
         if (task.state === 'AWAITING_APPROVAL') binds.push(['a', 'approve'], ['r', 'reject'], ['f', 'refine'], ['E', 'edit']);
         if (task.state === 'FAILED') binds.push(['p', 'replan']);
@@ -273,6 +306,13 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
         if (key.escape) setRefining(false);
         return;
       }
+      // The picker owns the keyboard while it is open, exactly as the providers
+      // screen's does: SelectInput reads stdin itself, and this screen's keys -
+      // including Esc, which is otherwise "back" - must not also fire.
+      if (pickingModel) {
+        if (key.escape) setPickingModel(false);
+        return;
+      }
       if (key.escape || key.backspace) return onBack();
       const tabMatch = TABS.find((t) => t.key === input);
       if (tabMatch) return setTab(tabMatch.id);
@@ -284,6 +324,7 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
       if (input === 'x' && !activeRun && task.state !== 'COMPLETE' && task.state !== 'CANCELLED') return run('Close', () => api.close(taskId));
 
       if (tab === 'plan') {
+        if (input === 'm' && PLAN_TAB_STATES.has(task.state)) return openModelPicker();
         if (input === 'p' && task.state === 'PLANNING' && !activeRun) return run('Planning', () => api.plan(taskId));
         if (input === 'p' && task.state === 'FAILED') return run('Replan', () => api.replan(taskId));
         if (task.state === 'AWAITING_APPROVAL') {
@@ -347,6 +388,24 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
     tab === 'execute' && renderExecute(task, runs, selected),
     tab === 'review' && renderReview(task),
     tab === 'activity' && renderActivity(events),
+    // Under the tab body rather than inside renderPlan, so it covers every state
+    // the plan tab can be in - including the ones whose body is a hint to press a
+    // key, which is where the planner a preference applies to has not run yet.
+    pickingModel
+      ? e(
+          Box,
+          { flexDirection: 'column', borderStyle: 'round', borderColor: 'blue', paddingX: 1 },
+          e(Text, { bold: true }, `Planning model — now ${task.plan_model || 'automatic'}`),
+          e(SelectInput, {
+            items: modelChoices,
+            // Opening on the current answer, so the list reads as a choice being
+            // confirmed or changed rather than a question with no visible state.
+            initialIndex: Math.max(0, modelChoices.findIndex((c) => c.value === (task.plan_model || ''))),
+            onSelect: (item) => choosePlanModel(item.value),
+          }),
+          e(Text, { color: 'gray' }, 'Enter to choose, Esc to cancel'),
+        )
+      : null,
   );
 }
 

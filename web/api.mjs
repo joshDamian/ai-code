@@ -73,6 +73,8 @@ export const api = {
   taskDiff: (id, to) => request(`/api/tasks/${id}/diff${to ? `?to=${encodeURIComponent(to)}` : ''}`),
   taskPort: (id, opts = {}) => request(`/api/tasks/${id}/port`, { method: 'POST', body: opts }),
   updatePlan: (id, plan) => request(`/api/tasks/${id}/plan`, { method: 'PATCH', body: { plan } }),
+  // The per-task planning-model preference. `null` clears it back to automatic.
+  taskSetPlanModel: (id, modelId) => request(`/api/tasks/${id}/plan`, { method: 'PATCH', body: { plan_model: modelId } }),
 
   providers: () => request('/api/providers'),
   updateProvider: (id, body) => request(`/api/providers/${id}`, { method: 'PATCH', body }),

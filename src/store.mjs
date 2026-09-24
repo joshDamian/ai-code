@@ -81,6 +81,10 @@ export class Store {
         // right shape the day someone wants to browse a history.
         ['plan_prev', 'TEXT'],
         ['plan_at', 'TEXT'],
+        // The model this task's planner should use, when it is healthy and
+        // available. NULL means route normally, which is what every task written
+        // before this column existed gets.
+        ['plan_model', 'TEXT'],
       ],
       models: [
         ['provider_model_id', 'TEXT'],
@@ -306,8 +310,8 @@ export class Store {
     const task = this.getTask(id);
     const n = { ...task, ...patch, updated_at: new Date().toISOString() };
     this.db
-      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=?,plan_prev=?,plan_at=? WHERE id=?')
-      .run(n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, n.plan_prev ?? null, n.plan_at ?? null, id);
+      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=?,plan_prev=?,plan_at=?,plan_model=? WHERE id=?')
+      .run(n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, n.plan_prev ?? null, n.plan_at ?? null, n.plan_model ?? null, id);
     return this.getTask(id);
   }
 
