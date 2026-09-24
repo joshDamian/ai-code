@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';import {spawn,execFileSync} from 'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import net from 'node:net';import {Service} from '../src/service.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';import {spawn,execFileSync} from 'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import net from 'node:net';import {Service} from '../src/service.mjs';import {WebSocket} from 'ws';import {TerminalSessions} from '../src/terminal.mjs';
 function get(url){return new Promise((res,rej)=>http.get(url,r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))}).on('error',rej))}
 function post(url,payload){return new Promise((res,rej)=>{const data=JSON.stringify(payload||{});const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)}},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.write(data);req.end()})}
 // Reads an event stream to its end. The deadline is the point of the test: a
@@ -520,4 +520,341 @@ test('a chat question is answered over HTTP, and its turn is not a task run',asy
     assert.equal(turn[0].role,'chat');
     assert.equal(turn[0].status,'succeeded');
   }finally{srv.stop()}
+});
+
+// One terminal socket. The options exist for the guard tests, which are about the
+// headers a request arrives with rather than about what the shell does.
+function terminalSocket(base,taskId,target,options={}){
+  const url=`${base.replace(/^http/,'ws')}/api/tasks/${taskId}/terminal?target=${encodeURIComponent(target)}`;
+  return new WebSocket(url,options);
+}
+
+// Everything the shell has printed, and a way to wait for a string to appear in it.
+// The assertions below are all "the shell answered", and none of them cares how many
+// frames it took to say so, so the collector keeps the text rather than parsing the
+// protocol.
+function reader(ws){
+  let out='';
+  const waiting=[];
+  ws.on('message',(d)=>{
+    out+=d.toString();
+    for(const w of [...waiting]) if(w.re.test(out)){waiting.splice(waiting.indexOf(w),1);clearTimeout(w.t);w.ok(out)}
+  });
+  return {
+    text:()=>out,
+    // Bounded: a shell that never answers has to fail the test rather than hang the
+    // suite, and the output so far is what says which line it stopped at.
+    until(re,ms=15000){
+      if(re.test(out))return Promise.resolve(out);
+      return new Promise((ok,bad)=>{const w={re,ok};w.t=setTimeout(()=>{waiting.splice(waiting.indexOf(w),1);bad(new Error(`the terminal never printed ${re}\n--- output ---\n${out.slice(-2000)}`))},ms);waiting.push(w)});
+    },
+  };
+}
+
+const typed=(ws,data)=>ws.send(JSON.stringify({type:'input',data}));
+const sized=(ws,cols,rows)=>ws.send(JSON.stringify({type:'resize',cols,rows}));
+
+// A socket that became one, which is what every accepted upgrade ends in.
+function opened(ws,ms=15000){
+  return new Promise((ok,bad)=>{
+    const t=setTimeout(()=>bad(new Error('the terminal socket never opened')),ms);
+    ws.on('open',()=>{clearTimeout(t);ok(ws)});
+    ws.on('error',(e)=>{clearTimeout(t);bad(e)});
+  });
+}
+
+// A socket that never became one. An upgrade this server refuses is answered as HTTP,
+// not as a WebSocket close - the handshake it would have closed on never happened - so
+// the client sees a failed connection and the message carries the status.
+function refused(ws,ms=15000){
+  return new Promise((ok,bad)=>{
+    const t=setTimeout(()=>{ws.close();bad(new Error('the upgrade was still pending, so it was neither accepted nor refused'))},ms);
+    ws.on('open',()=>{clearTimeout(t);ws.close();bad(new Error('the upgrade was accepted'))});
+    ws.on('error',(e)=>{clearTimeout(t);ok(e.message)});
+  });
+}
+
+const escapeRe=(s)=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+// A directory as the shell may print it. `pwd` reports the path the process was
+// started with, and on macOS /var is a symlink to /private/var - which of the two
+// comes back is the platform's business, so both are accepted.
+const anyPath=(dir)=>new RegExp(`${escapeRe(dir)}|${escapeRe(fs.realpathSync(dir))}`);
+
+test('the terminal runs a real shell in the worktree and in the parent checkout',async()=>{
+  const {root,taskId}=await worked();
+  const s=await startServer(root);
+  try{
+    const show=JSON.parse((await get(`${s.base}/api/tasks/${taskId}/show`)).body);
+    assert.equal(show.terminal.enabled,true);
+    const dir=Object.fromEntries(show.terminal.targets.map((t)=>[t.id,t.dir]));
+    // Realpath'd on the way in, which is how the project knows it: on macOS /var is a
+    // symlink, so the same directory has two spellings and only one of them is stored.
+    assert.equal(dir.parent,fs.realpathSync(root),'the parent target is the checkout the branch would land on');
+    assert.ok(dir.worktree&&dir.worktree!==root,'and the worktree is a directory of its own');
+    assert.equal(show.terminal.targets.every((t)=>t.available),true);
+
+    for(const target of ['worktree','parent']){
+      const ws=await opened(terminalSocket(s.base,taskId,target));
+      const r=reader(ws);
+      // Wide before anything is asked of it. The tty wraps what a program prints at the
+      // width it was given, and these directories are long enough that a default 80
+      // would break a path across two lines and match nothing.
+      sized(ws,200,50);
+      typed(ws,`echo HELLO-${target}\n`);
+      await r.until(new RegExp(`HELLO-${target}`));
+      // The size the browser reported is the size the kernel has: this is what a
+      // full-screen program redraws off, and a terminal that ignores it shows claude
+      // drawing to a box nobody can see.
+      typed(ws,'stty size\n');
+      await r.until(/50 200/);
+      typed(ws,'pwd\n');
+      await r.until(anyPath(dir[target]));
+      ws.close();
+    }
+  }finally{s.stop()}
+});
+
+test('a terminal session outlives the tab that opened it',async()=>{
+  // The whole reason the PTY is not per-socket. A refresh in the middle of a long run
+  // has to come back to the same shell - so the proof is a shell variable, which only
+  // the process that was told about it can answer with.
+  const {root,taskId}=await worked();
+  const s=await startServer(root);
+  try{
+    const first=await opened(terminalSocket(s.base,taskId,'worktree'));
+    const a=reader(first);
+    sized(first,200,50);
+    // The expansion is what is waited for rather than the typed line, which comes back
+    // on the echo whether or not the shell ever ran it.
+    typed(first,'export AI_CODE_SESSION=alive-1234; echo "armed:$AI_CODE_SESSION"\n');
+    await a.until(/armed:alive-1234/);
+    first.close();
+    await new Promise((r)=>setTimeout(r,200));
+
+    const second=await opened(terminalSocket(s.base,taskId,'worktree'));
+    const b=reader(second);
+    // The replay is the other half: a reattach that came back to a blank screen would
+    // be no better than a new shell.
+    await b.until(/alive-1234/);
+    typed(second,'echo "same:$AI_CODE_SESSION"\n');
+    await b.until(/same:alive-1234/);
+    second.close();
+  }finally{s.stop()}
+});
+
+test('a shell that exits ends its session, and the next reader gets a live one',async()=>{
+  const {root,taskId}=await worked();
+  const s=await startServer(root);
+  try{
+    const ws=await opened(terminalSocket(s.base,taskId,'worktree'));
+    sized(ws,120,40);
+    typed(ws,'exit\n');
+    // 1000 rather than a bare close: it is the code a client reads as "the shell ended,
+    // do not reconnect". A retry here spawns a shell every couple of seconds at a
+    // command that exits immediately.
+    const code=await new Promise((ok)=>ws.on('close',(c)=>ok(c)));
+    assert.equal(code,1000);
+
+    // And a reload after `exit` is a working terminal rather than the dead one: the
+    // session is dropped with the process, so the next connection opens a new shell.
+    const again=await opened(terminalSocket(s.base,taskId,'worktree'));
+    const r=reader(again);
+    sized(again,200,50);
+    typed(again,'echo BACK-AGAIN\n');
+    await r.until(/BACK-AGAIN/);
+    again.close();
+  }finally{s.stop()}
+});
+
+test('the terminal is localhost-only, and refuses by name',async()=>{
+  // A terminal is arbitrary command execution and this server has no auth, so the route
+  // narrows relative to the rest of it: the upgrade is refused unless it came from this
+  // machine. CORS does not cover WebSocket upgrades, so a page on any origin can open a
+  // socket to localhost - which is the case the Origin check is for - and a rebound DNS
+  // name is the case the Host check is.
+  const {root,taskId}=await worked();
+  const s=await startServer(root);
+  try{
+    // The browser on this machine: accepted, so the refusals below are the guard and
+    // not a route that never worked.
+    (await opened(terminalSocket(s.base,taskId,'parent'))).close();
+
+    assert.match(await refused(terminalSocket(s.base,taskId,'parent',{headers:{origin:'http://evil.example.com'}})),/403/);
+    assert.match(await refused(terminalSocket(s.base,taskId,'parent',{headers:{host:'evil.example.com'}})),/403/);
+    // A target that is not a directory: a bad request rather than a shell in one.
+    assert.match(await refused(terminalSocket(s.base,taskId,'everywhere')),/400/);
+    // A task that does not exist.
+    assert.match(await refused(terminalSocket(s.base,'no-such-task','parent')),/404/);
+  }finally{s.stop()}
+});
+
+test('AI_CODE_DISABLE_TERMINAL closes the route and says so before a socket is opened',async()=>{
+  const {root,taskId}=await worked();
+  const s=await startServer(root,{AI_CODE_DISABLE_TERMINAL:'1'});
+  try{
+    const show=JSON.parse((await get(`${s.base}/api/tasks/${taskId}/show`)).body);
+    assert.equal(show.terminal.enabled,false,'the tab has to know before it renders a picker that cannot work');
+    assert.match(await refused(terminalSocket(s.base,taskId,'parent')),/403/);
+  }finally{s.stop()}
+});
+
+test('a target that cannot be opened is refused, and the reason rides on show',async()=>{
+  // The tab renders "no worktree yet" from the payload without opening anything, and
+  // the socket refuses the same target rather than spawning a shell with a cwd that is
+  // not there.
+  const {root,taskId}=seeded();
+  const s=await startServer(root);
+  try{
+    const t=JSON.parse((await get(`${s.base}/api/tasks/${taskId}/show`)).body).terminal;
+    const wt=t.targets.find((x)=>x.id==='worktree');
+    assert.equal(wt.available,false);
+    assert.equal(wt.dir,null);
+    assert.match(wt.reason,/no worktree/);
+    assert.equal(t.targets.find((x)=>x.id==='parent').available,true,'the checkout the branch would land on is there whatever the task is doing');
+    // 409 rather than 404: the task exists, the directory it would open in does not.
+    assert.match(await refused(terminalSocket(s.base,taskId,'worktree')),/409/);
+  }finally{s.stop()}
+});
+
+test('the parent terminal opens in the project checkout, not where the server was started',async()=>{
+  // Two projects, two repositories, one server. `AI_CODE_ROOT` is where the process was
+  // started and where the database lives; the checkout a task's branch lands on is the
+  // project's own path, and for a project added anywhere else those are different
+  // directories. A shell opened in the wrong one is a terminal in a repository that has
+  // never heard of the task - and `git merge` there would land nothing.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-term-here-'));
+  const other=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-term-elsewhere-'));
+  for(const d of [root,other]){
+    git(d,['init','-q']);
+    fs.writeFileSync(path.join(d,'README.md'),'x');
+    git(d,['add','.']);
+    git(d,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  }
+  const svc=new Service(root,{allowMock:true,silent:true});
+  svc.initProject('here',root);
+  const p2=svc.initProject('elsewhere',other);
+  const t=svc.createTask(p2.id,'a task in the other repository');
+  const s=await startServer(root);
+  try{
+    assert.notEqual(fs.realpathSync(other),fs.realpathSync(root),'the fixture keeps the two apart, or this test proves nothing');
+    const parent=JSON.parse((await get(`${s.base}/api/tasks/${t.id}/show`)).body).terminal.targets.find((x)=>x.id==='parent');
+    assert.equal(parent.dir,fs.realpathSync(other),'the project named on the task is what it opens');
+
+    const ws=await opened(terminalSocket(s.base,t.id,'parent'));
+    const r=reader(ws);
+    sized(ws,200,50);
+    typed(ws,'pwd\n');
+    await r.until(anyPath(parent.dir));
+    typed(ws,'git --no-pager -c color.ui=false log --oneline -n 1\n');
+    await r.until(/[0-9a-f]{7,} \((HEAD|tag:)/);
+    ws.close();
+  }finally{s.stop()}
+});
+
+test('a session nobody reconnects to is reaped, and a reconnect inside the window is not',async()=>{
+  // The timer is the only thing between "a shell survives a refresh" and "a shell
+  // survives the rest of the day", and it is an option so this can assert it in
+  // milliseconds rather than by waiting out the default ten minutes.
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-reap-'));
+  const sessions=new TerminalSessions({reapMs:150});
+  // A stand-in for a socket: what is under test is which timer is running, and a real
+  // one would only add a handshake to wait on.
+  const ws={readyState:0,on(){},send(){},close(){}};
+  try{
+    const first=sessions.open({taskId:'t',target:'parent',cwd:dir});
+    sessions.attach(first,ws);
+    assert.equal(sessions.size,1);
+    sessions.detach(first,ws);
+    await new Promise((r)=>setTimeout(r,400));
+    assert.equal(sessions.size,0,'the shell was killed and the session dropped');
+
+    const second=sessions.open({taskId:'t',target:'parent',cwd:dir});
+    sessions.attach(second,ws);
+    sessions.detach(second,ws);
+    // Back before the timer is up, which is the refresh case: reload in under ten
+    // minutes and the shell is still running.
+    await new Promise((r)=>setTimeout(r,80));
+    sessions.attach(second,ws);
+    await new Promise((r)=>setTimeout(r,250));
+    assert.equal(sessions.size,1,'reconnecting cancelled the reap');
+
+    sessions.killAll();
+    assert.equal(sessions.size,0,'and shutdown takes the shells with it');
+  }finally{sessions.killAll()}
+});
+
+test('a merge typed into the terminal is what the port tab reports on the next load',async()=>{
+  // The port tab reads live git state rather than anything a port wrote, and this is
+  // the check that the terminal did not quietly change that: the merge happens in the
+  // parent checkout, typed by hand into a shell, and the tab catches up on its own
+  // with no code in between.
+  const {root,taskId}=await worked();
+  const s=await startServer(root);
+  try{
+    // Published to the task branch first, which is what a port does when the branch it
+    // would land on is checked out here, and the state a person is in when they decide
+    // to do the merge themselves.
+    const port=await post(`${s.base}/api/tasks/${taskId}/port`,{});
+    assert.equal(port.status,200);
+    const branch=JSON.parse(port.body).branch;
+    assert.ok(branch,`the port published to a branch: ${port.body}`);
+    const before=JSON.parse((await get(`${s.base}/api/tasks/${taskId}/diff`)).body);
+    assert.notEqual(before.state.key,'landed','nothing has landed yet');
+
+    const ws=await opened(terminalSocket(s.base,taskId,'parent'));
+    const r=reader(ws);
+    sized(ws,200,50);
+    // No pager and no colour: an interactive shell hands `git log` to `less`, which
+    // opens the alternate screen and waits for a keypress that nothing here is going to
+    // send. That is the right behaviour for a person and the wrong one for a reader.
+    typed(ws,'git --no-pager -c color.ui=false log --oneline\n');
+    // A hash opening a line of git's own output - `f76f79a (HEAD -> main) init` -
+    // and not the same characters inside the echoed command.
+    await r.until(/[0-9a-f]{7,} \((HEAD|tag:)/);
+    // The exit code is echoed rather than inferred from the output: `git merge` answers
+    // "Already up to date." with a zero and a conflict with something that reads like
+    // progress, and the assertion below is about the ref having moved.
+    typed(ws,`git merge ${branch}; echo MERGE-EXIT=$?\n`);
+    await r.until(/MERGE-EXIT=0/);
+    ws.close();
+
+    const after=JSON.parse((await get(`${s.base}/api/tasks/${taskId}/diff`)).body);
+    assert.equal(after.state.key,'landed','a merge the port did not perform is still its answer');
+    // The commit it names is the one now at the destination. Nothing moved main before
+    // the merge, so that is a fast-forward and the commit is the branch's own tip.
+    assert.equal(after.landedAs.sha,read(root,['rev-parse','HEAD']));
+    assert.deepEqual(after.next,[]);
+  }finally{s.stop()}
+});
+
+test('the dashboard pins the terminal emulator beside the other CDN modules',async()=>{
+  // Same class of check as the markdown pins: the tab hands PTY output to xterm, and a
+  // dropped pin or a renamed specifier breaks the tab at load rather than at render,
+  // where nothing in the unit suite can see it.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-xterm-'));
+  const s=await startServer(root);
+  try{
+    const r=await get(`${s.base}/`);
+    assert.equal(r.status,200);
+    const pins={
+      '@xterm/xterm':'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.mjs',
+      '@xterm/addon-fit':'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.mjs',
+    };
+    for(const [name,url] of Object.entries(pins)){
+      const re=new RegExp(`"${name}"\\s*:\\s*"${url.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}"`);
+      assert.match(r.body,re,`the import map should pin ${name}`);
+    }
+    // The emulator's own stylesheet. Without it the terminal is an unstyled column of
+    // text on a transparent box.
+    assert.match(r.body,/@xterm\/xterm@6\.0\.0\/css\/xterm\.css/);
+
+    const pane=await get(`${s.base}/components/terminal.mjs`);
+    assert.equal(pane.status,200);
+    assert.match(pane.body,/from '@xterm\/xterm'/);
+    assert.match(pane.body,/from '@xterm\/addon-fit'/);
+    // The tab itself, which is the only thing that reaches the component.
+    const view=await get(`${s.base}/views/task-detail.mjs`);
+    assert.match(view.body,/from '\.\.\/components\/terminal\.mjs'/);
+    assert.match(view.body,/'terminal'/);
+  }finally{s.stop()}
 });

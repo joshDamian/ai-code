@@ -1,8 +1,10 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { WebSocketServer } from 'ws';
 import { Service } from './service.mjs';
 import { Runner } from './runner.mjs';
+import { TerminalSessions, TERMINAL_TARGETS, terminalTargets } from './terminal.mjs';
 
 const root = process.env.AI_CODE_ROOT || process.cwd();
 // One Service for the whole process. Every request shares it, so the in-process
@@ -17,7 +19,19 @@ const svc = new Service(root, { allowMock: process.env.AI_CODE_ALLOW_MOCK === '1
 // Service is what lets it count a provider's in-flight runs, whichever started them.
 const runner = new Runner(svc);
 svc.runner = runner;
+// The interactive shells. In this process rather than in each connection, because a
+// session outlives the socket that opened it (see src/terminal.mjs).
+const terminals = new TerminalSessions({ reapMs: Number(process.env.AI_CODE_TERMINAL_REAP_MS) || undefined });
+// A terminal is arbitrary command execution, and this server has no auth. The switch
+// is here so an install that does not want that can say so without patching the code.
+const terminalEnabled = !process.env.AI_CODE_DISABLE_TERMINAL;
 const port = Number(process.env.PORT || 4317);
+
+// The checkout a task belongs to. Not `root`, which is where this process was started
+// and where the database lives: projects are registered with a path of their own, and
+// a port reads and writes the project's repository. Anything that has to name the
+// repo a task's branch lands on has to ask for it here.
+const repoOf = (task) => svc.project(task.project_id).path;
 
 const json = (res, x, status = 200) => {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' });
@@ -293,7 +307,12 @@ const server = http.createServer(async (req, res) => {
       // render as the task it would port.
       if (op === 'show') {
         const task = svc.task(id);
-        return json(res, { task, runs: svc.store.listRuns(id), branches: svc.destinations(id), revision: svc.revision(task), live: svc.liveRun(id), ported: svc.ported(id) });
+        // `terminal` rides on the same payload for the same reason `branches` does: the
+        // tab has to render its picker on the render that already names the task, and
+        // whether the worktree directory is still there is a read of the filesystem
+        // the client cannot do. It is answered by the same function the upgrade
+        // handler below uses, so a target offered here is a target accepted there.
+        return json(res, { task, runs: svc.store.listRuns(id), branches: svc.destinations(id), revision: svc.revision(task), live: svc.liveRun(id), ported: svc.ported(id), terminal: { enabled: terminalEnabled, targets: terminalTargets(task, repoOf(task)) } });
       }
       if (op === 'refine') {
         const b = await body(req);
@@ -465,6 +484,98 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// The interactive terminal. A WebSocket rather than a route, because the traffic is
+// bidirectional and long-lived: keystrokes one way, PTY output the other, and the
+// existing streams are server-sent events, which have no way back.
+//
+// `noServer` rather than a second `listen`: one process, one port, one shutdown path.
+// A second listener would need its own origin policy and its own place in the signal
+// handlers, and there is nothing here that wants a different port from the dashboard.
+const routeTerminal = /^\/api\/tasks\/([^/]+)\/terminal$/;
+const wss = new WebSocketServer({ noServer: true });
+
+// The browser's Origin header is the one that matters. CORS does not cover WebSocket
+// upgrades, so a page served from anywhere can open a socket to localhost - and the
+// `access-control-allow-origin: *` this server already sets on every response means
+// any origin can read the API anyway. Neither of those is a reason to accept a shell:
+// a browser tab the user is not looking at cannot start one if the origin is checked,
+// and DNS rebinding cannot fake a Host of localhost into a same-origin connection.
+//
+// So this route narrows relative to the rest of the server rather than inheriting the
+// posture: localhost or nothing, and only when the terminal is enabled at all.
+const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?$/;
+
+function fromLocalhost(req) {
+  if (!LOCAL_HOST.test(req.headers.host || '')) return false;
+  const origin = req.headers.origin;
+  // Absent for a client that is not a browser - curl, the test suite - which leaves the
+  // Host check as the whole of the guard for it.
+  if (!origin) return true;
+  try {
+    return LOCAL_HOST.test(new URL(origin).host);
+  } catch {
+    return false;
+  }
+}
+
+// A refusal is an HTTP response rather than a WebSocket close: the handshake has not
+// happened, so there is no frame to close with. The reason goes in the body because a
+// browser cannot read it either way, and `curl -i` against the same URL is how anyone
+// finds out why their terminal will not open.
+function refuseUpgrade(socket, status, why) {
+  const text = `${why}\n`;
+  socket.write(
+    `HTTP/1.1 ${status}\r\ncontent-type: text/plain; charset=utf-8\r\nconnection: close\r\ncontent-length: ${Buffer.byteLength(text)}\r\n\r\n${text}`,
+  );
+  socket.destroy();
+}
+
+server.on('upgrade', (req, socket, head) => {
+  let u;
+  try {
+    u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  } catch {
+    return socket.destroy();
+  }
+  const m = u.pathname.match(routeTerminal);
+  // Anything else - another upgrade path, a probe - is not this server's to answer.
+  if (!m) return socket.destroy();
+
+  if (!terminalEnabled) return refuseUpgrade(socket, '403 Forbidden', 'The terminal is disabled (AI_CODE_DISABLE_TERMINAL is set).');
+  if (!fromLocalhost(req)) return refuseUpgrade(socket, '403 Forbidden', 'The terminal is only available from localhost.');
+
+  const target = u.searchParams.get('target');
+  if (!TERMINAL_TARGETS.includes(target)) return refuseUpgrade(socket, '400 Bad Request', `target must be one of: ${TERMINAL_TARGETS.join(', ')}`);
+
+  // The task and the checkout it belongs to. The project is read under the same catch
+  // as the task: a task whose project cannot be resolved has nowhere to open a shell,
+  // which is the same answer as a task that is not there.
+  let task;
+  let repo;
+  try {
+    task = svc.task(m[1]);
+    repo = repoOf(task);
+  } catch {
+    return refuseUpgrade(socket, '404 Not Found', 'No such task.');
+  }
+  const spec = terminalTargets(task, repo).find((t) => t.id === target);
+  if (!spec.available) return refuseUpgrade(socket, '409 Conflict', spec.reason);
+
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    let session;
+    try {
+      // 80x24 until the client measures its own box, which it does on open and sends
+      // as soon as it has. The gap is under a frame.
+      session = terminals.open({ taskId: task.id, target, cwd: spec.dir });
+    } catch (e) {
+      // 1011 is "the server could not do it" - here, no free session slot. Truncated
+      // because a close reason is capped at 123 bytes.
+      return ws.close(1011, String(e.message).slice(0, 120));
+    }
+    terminals.attach(session, ws);
+  });
+});
+
 // The agents this process spawns are detached, so they lead their own process
 // groups. Without this, Ctrl-C kills the server and leaves every agent it started
 // running with nothing watching it and no way to stop it.
@@ -473,6 +584,10 @@ function shutdown() {
   if (closing) return;
   closing = true;
   runner.shutdown();
+  // The shells are children of this process in the ordinary way, but they are also
+  // holding sessions a reconnecting tab would come back to; killing them is what
+  // makes "the server is gone" true for the terminal too.
+  terminals.killAll();
   server.close();
   // The aborts are asynchronous. A stuck agent does not get to hold the terminal,
   // and the timer is unref'd so a clean exit does not wait on it.

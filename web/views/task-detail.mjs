@@ -11,13 +11,14 @@ import { Markdown } from '../components/markdown.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
 import { RunTimeline, BarChart, compactNumber } from '../components/chart.mjs';
 import { DataTable } from '../components/data-table.mjs';
+import { TerminalPane } from '../components/terminal.mjs';
 
 // States in which the harness may have an agent mid-flight. This previously listed
 // EXECUTING, which is not a real state (the implementation state is IMPLEMENTING),
 // and omitted TESTING. It also claimed PLANNING, which is usually the opposite:
 // a task parked in PLANNING with no run is waiting for the user to start one.
 const WORKING_STATES = new Set(['IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING']);
-const TABS = ['plan', 'execute', 'review', 'port', 'stats', 'activity'];
+const TABS = ['plan', 'execute', 'review', 'port', 'terminal', 'stats', 'activity'];
 
 export function TaskDetail({ id, navigate, onTitle }) {
   const [data, setData] = useState(null);
@@ -256,6 +257,7 @@ export function TaskDetail({ id, navigate, onTitle }) {
         ${tab === 'execute' ? html`<${ExecuteTab} task=${task} runs=${runs} busy=${busy} run=${run} live=${live} />` : null}
         ${tab === 'review' ? html`<${ReviewTab} task=${task} busy=${busy} run=${run} live=${live} />` : null}
         ${tab === 'port' ? html`<${PortTab} task=${task} branches=${data.branches || []} busy=${busy} run=${run} />` : null}
+        ${tab === 'terminal' ? html`<${TerminalTab} task=${task} live=${live} terminal=${data.terminal} />` : null}
         ${tab === 'stats' ? html`<${StatsTab} runs=${runs} live=${data.live} />` : null}
         ${tab === 'activity' ? html`<${ActivityTab} taskId=${task.id} store=${buffer} />` : null}
       </div>
@@ -1148,6 +1150,64 @@ function row(label, value) {
     <div class="list-row-main"><b>${label}</b></div>
     <div class="list-row-side"><span class="muted">${value}</span></div>
   </div>`;
+}
+
+// A shell in one of the task's two directories: its worktree, and the checkout the
+// branch is meant to land on. Both are things this workflow otherwise only reports on
+// - landing a branch needs a real `git merge`, and working out why a run failed needs
+// a claude session you can talk to - and neither fits a button.
+//
+// The picker chooses between them rather than showing both at once, because only one
+// terminal can hold the keyboard, and a second one on screen is a pane that swallows
+// whatever is typed into it.
+function TerminalTab({ task, live, terminal }) {
+  const [chosen, setChosen] = useState(null);
+  const targets = terminal?.targets || [];
+  // The choice, falling back to the first target that can actually be opened: a task
+  // whose worktree has been removed would otherwise open on the one directory that
+  // cannot run anything.
+  const spec = targets.find((t) => t.id === chosen) || targets.find((t) => t.available) || null;
+
+  if (!terminal?.enabled) {
+    return html`<${EmptyState} message="The terminal is disabled on this server (AI_CODE_DISABLE_TERMINAL is set)." />`;
+  }
+
+  return html`
+    <div class="stack">
+      ${
+        // Only the worktree, and only while a run holds the lease: an agent run never
+        // writes the parent checkout, and there is no run to race when there is none.
+        // A warning and not a refusal - watching a run is a reason to be in here, and
+        // a read-only `git log` beside it is harmless.
+        live && spec?.id === 'worktree'
+          ? html`
+              <div class="terminal-warn">
+                <span>A ${live.role} run is writing this worktree — commands here may corrupt it.</span>
+              </div>
+            `
+          : null
+      }
+
+      <div class="card">
+        <${Select}
+          label="Directory"
+          value=${spec?.id || ''}
+          options=${targets.map((t) => ({ value: t.id, label: t.label }))}
+          onChange=${setChosen}
+        />
+        ${spec?.dir ? html`<p class="muted"><code>${spec.dir}</code></p>` : null}
+      </div>
+
+      ${
+        spec?.available
+          ? // Keyed by target so switching remounts the emulator and its socket: the two
+            // are different sessions on the server, and a reused emulator would keep the
+            // other one's screen.
+            html`<${TerminalPane} key=${spec.id} taskId=${task.id} target=${spec.id} />`
+          : html`<p class="muted">${spec?.reason || 'No directory to open a shell in.'}</p>`
+      }
+    </div>
+  `;
 }
 
 function ReviewTab({ task, busy, run, live }) {

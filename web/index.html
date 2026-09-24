@@ -12,10 +12,13 @@
     "htm": "https://cdn.jsdelivr.net/npm/htm@3/dist/htm.module.js",
     "marked": "https://cdn.jsdelivr.net/npm/marked@15.0.12/lib/marked.esm.js",
     "dompurify": "https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.es.mjs",
+    "@xterm/xterm": "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.mjs",
+    "@xterm/addon-fit": "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.mjs",
     "ai-code/format": "/shared/format.mjs"
   }
 }
 </script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css" />
 <style>
 :root{
   --bg:#0a0c10;
@@ -457,6 +460,26 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .diff-cell+.diff-cell{border-left:1px solid var(--line)}
 .diff-span{padding:1px var(--space-3)}
 .diff-blank{background:rgba(255,255,255,.02)}
+
+/* ---- terminal ----
+   The host carries an explicit height and no padding, and neither is a style choice:
+   xterm's fit addon reads its parent's computed height and width as the space it has,
+   and subtracts the padding of the element xterm itself inserts. Padding here would be
+   counted as space the terminal may draw into, and the last row would render outside
+   the box. A border is safe, because the computed height is the content box and a
+   border sits outside it. */
+.terminal-frame{display:flex;flex-direction:column;gap:var(--space-2)}
+.terminal-bar{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;font-size:12.5px;color:var(--muted);min-height:20px}
+.terminal-bar code{color:var(--text)}
+.terminal-host{height:clamp(320px,56vh,640px);background:var(--bg);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+/* A shell that outlived its socket: the server went away, or the network did. Said in
+   the bar rather than written into the terminal, which is replaying what the shell
+   printed before it went quiet - a line typed into that would read as the shell's. */
+.terminal-state.warn{color:var(--warn)}
+/* The worktree terminal while an agent run is writing the same directory. A warning
+   and not a lock: watching a run is a reason to be in here, and a read-only `git log`
+   mid-run is harmless. */
+.terminal-warn{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;font-size:13px;padding:var(--space-2) var(--space-3);border:1px solid #5c4a2c;border-radius:var(--radius-sm);background:rgba(255,211,122,.08);color:var(--warn)}
 
 /* ---- providers ---- */
 .provider-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-4)}
