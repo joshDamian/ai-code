@@ -37,7 +37,7 @@ const body = (req) =>
     });
   });
 
-const routeTask = /^\/api\/tasks\/([^/]+)\/(plan|approve|execute|implement|test|review|repair|reject|replan|refine|diff|port|cancel|close|show|activity)$/;
+const routeTask = /^\/api\/tasks\/([^/]+)\/(plan|approve|execute|implement|test|review|repair|reject|replan|retry|refine|diff|port|cancel|close|show|activity)$/;
 // The one route that always queues rather than blocks. Matched before routeTask,
 // whose pattern has no room for the extra path segment.
 const routeBackground = /^\/api\/tasks\/([^/]+)\/execute\/background$/;
