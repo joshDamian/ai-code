@@ -91,20 +91,29 @@ export async function* runMock(input) {
   for (let i = 0; i < (input.mockSubagentToolCalls || 0); i++) {
     yield { type: 'message', data: { parent_tool_use_id: 'call_mock_subagent', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: `sub-${i}.mjs` } }] } } };
   }
-  // A subagent's lifetime, in the two frames the CLI writes for one: every spawn
-  // opens before the wait and closes after it. Held open for a real interval,
-  // because the thing the exemption measures is wall clock - a mock that opened and
-  // closed in one tick would leave a run charged for nothing and prove nothing.
-  // Several at once is the case worth having: they overlap, so the run is waiting
-  // once, not once per spawn.
+  // A subagent's lifetime, in the frames the CLI writes for one: every spawn opens
+  // before the wait and closes after it. Held open for a real interval, because the
+  // thing the exemption measures is wall clock - a mock that opened and closed in
+  // one tick would leave a run charged for nothing and prove nothing. Several at
+  // once is the case worth having: they overlap, so the run is waiting once, not
+  // once per spawn.
+  //
+  // Both closes are emitted, because the CLI writes both for every agent spawn: a
+  // `task_updated` carrying the terminal status and a `task_notification` carrying
+  // the subagent's report. `mockTaskType` is the other half of the rule - the CLI
+  // announces a Bash command with the same `task_started` pair, and one of those is
+  // the run's own tool call, so a test can hold that shape open and show the clock
+  // does not stop for it.
   if (input.mockSubagentMs) {
     const spawns = input.mockSubagents || 1;
+    const type = input.mockTaskType || 'local_agent';
     for (let i = 0; i < spawns; i++) {
-      yield { type: 'system', data: { type: 'system', subtype: 'task_started', task_id: `mock-task-${i}`, tool_use_id: `call_mock_spawn_${i}`, subagent_type: 'Explore' } };
+      yield { type: 'system', data: { type: 'system', subtype: 'task_started', task_id: `mock-task-${i}`, tool_use_id: `call_mock_spawn_${i}`, task_type: type, is_backgrounded: type === 'local_agent', subagent_type: 'Explore' } };
     }
     await sleep(input.mockSubagentMs, input.signal);
     for (let i = 0; i < spawns; i++) {
       yield { type: 'system', data: { type: 'system', subtype: 'task_updated', task_id: `mock-task-${i}`, patch: { status: 'completed', end_time: Date.now() } } };
+      yield { type: 'message', data: { type: 'system', subtype: 'task_notification', task_id: `mock-task-${i}`, tool_use_id: `call_mock_spawn_${i}`, status: 'completed', output_file: '', summary: `${type} finished` } };
     }
   }
   // A run that has streamed and then goes quiet, which is the shape a stall detector
@@ -551,6 +560,7 @@ export async function* runAgent(provider, model, input) {
         mockSubagentToolCalls: provider.config.subagentToolCalls || 0,
         mockSubagents: provider.config.subagents || 1,
         mockSubagentMs: provider.config.subagentMs || 0,
+        mockTaskType: provider.config.taskType || 'local_agent',
         mockStreamEvents: provider.config.streamEvents || 0,
         mockStreamMs: provider.config.streamMs || 0,
         mockStallMs: provider.config.stallMs || 0,

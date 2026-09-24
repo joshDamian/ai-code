@@ -427,20 +427,41 @@ function countToolCalls(event) {
 
 // Whether a frame opens or closes a subagent's lifetime, for the same reason the
 // calls above are the parent's only: what a subagent spends is its own, and the
-// parent is charged for neither. Two frames say so - the CLI opens a Task spawn
-// with `task_started` and closes it with a `task_updated` carrying a terminal
-// status - and they are the whole lifetime rather than a sample of it, which is
-// what makes them usable as a clock. `parent_tool_use_id` is not: it marks only
-// the frames a subagent writes, so an interval opened on one would never close.
+// parent is charged for neither. The frames are the CLI's own - `task_started`
+// opens a spawn and a terminal `task_updated` or `task_notification` closes it -
+// and they say when the lifetime began and ended rather than sampling it, which
+// is what makes them usable as a clock. `parent_tool_use_id` is not: it marks
+// only the frames a subagent writes, so an interval opened on one would never
+// close.
 //
-// A negative answer is only ever taken to close an interval that was opened, so a
-// task frame for something this run did not open cannot run the count below zero.
-function subagentLifetime(event) {
-  if (event.type !== 'system') return 0;
-  const { subtype, patch } = event.data || {};
-  if (subtype === 'task_started') return 1;
-  if (subtype === 'task_updated' && patch?.status && patch.status !== 'running') return -1;
-  return 0;
+// `open` is the spawns this run is waiting on, by the id the CLI gives each one,
+// and it is the id that pairs the two frames. The CLI writes *both* closes for
+// every agent spawn - 25 of 25 in this install's store - so closing on the frame
+// rather than on the id would end one wait twice; and a close whose spawn this
+// run did not open (a session resumed into an attempt that did not start it)
+// ends nothing at all.
+//
+// Only a subagent counts. The CLI announces a Bash command with the same
+// `task_started`, and the wait behind one of those is the run's own tool call -
+// counted against it already, and bounded by the call returning. Counting it
+// would hand a role that runs the full suite a way to open its own clock: the
+// repair of bb9ac058 opened two of them, and neither ever closed.
+function subagentLifetime(event, open) {
+  // The frame's own `type` is not the envelope's: a notification carrying usage
+  // is passed through as a `message`, as everything with usage is.
+  const d = event.data || {};
+  if (d.type !== 'system' || !d.task_id) return 0;
+  if (d.subtype === 'task_started') {
+    if (d.task_type !== 'local_agent' || open.has(d.task_id)) return 0;
+    open.add(d.task_id);
+    return 1;
+  }
+  const done =
+    d.subtype === 'task_notification'
+      ? d.status && d.status !== 'running'
+      : d.subtype === 'task_updated' && d.patch?.status && d.patch.status !== 'running';
+  if (!done || !open.delete(d.task_id)) return 0;
+  return -1;
 }
 
 // A budget that is absent, unparseable or zero means no limit, so a routing.json
@@ -2038,14 +2059,14 @@ export class Service {
         // subagent is the one that has gone quiet: a wait that only counted up on
         // frames would credit nothing for exactly the case it exists for.
         const capMs = Math.max(0, (policy.subagentWait || 0) * 1000);
-        let openWaits = 0;
+        const waitingOn = new Set();
         let openSince = 0;
         let bankedMs = 0;
         let armedCredit = -1;
         let timeoutId = null;
         // The wait credited so far: what earlier subagents banked plus the one in
         // progress, capped - so overlapping spawns are one wait and not one each.
-        const creditAt = (now) => Math.min(bankedMs + (openWaits > 0 ? now - openSince : 0), capMs);
+        const creditAt = (now) => Math.min(bankedMs + (waitingOn.size > 0 ? now - openSince : 0), capMs);
         const armTimeout = () => {
           const now = Date.now();
           armedCredit = creditAt(now);
@@ -2066,17 +2087,13 @@ export class Service {
         // credit is where it was, so a role with no exemption arms exactly once,
         // as it did before this existed.
         const noteWait = (event) => {
-          const n = subagentLifetime(event);
           const now = Date.now();
-          if (n > 0) {
-            if (!openWaits) openSince = now;
-            openWaits += n;
-          } else if (n < 0 && openWaits) {
-            // Banked only when the last one closes: two spawns open together are
-            // one wait, and closing one of them does not end it.
-            if (openWaits + n === 0) bankedMs += now - openSince;
-            openWaits = Math.max(0, openWaits + n);
-          }
+          const was = waitingOn.size;
+          if (!subagentLifetime(event, waitingOn)) return;
+          // Banked only where the last one closes: three spawns open together are
+          // one wait, and closing one of them does not end it.
+          if (was === 0) openSince = now;
+          else if (waitingOn.size === 0) bankedMs += now - openSince;
           if (creditAt(now) !== armedCredit) armTimeout();
         };
         armTimeout();

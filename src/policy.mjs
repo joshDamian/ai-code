@@ -34,6 +34,13 @@ const ROLES = ['planner', 'implementer', 'reviewer', 'repair'];
 // Zero or absent means no exemption. It is a cap and not a discount, so a chain
 // of subagents cannot extend a run without end.
 //
+// It covers an agent spawn and not a Bash command. The CLI announces both with the
+// same `task_started`, but a command the run is waiting on is its own tool call -
+// counted against it already, and bounded by the call returning - and the repair of
+// bb9ac058 ran two `npm test`s that way. Counting those would let a role that runs
+// the suite open its own clock; two of them unclosed would have bought that repair
+// most of a second budget.
+//
 // The two timeouts that had to move. The reviewer's prompt is the largest of the
 // four - the task, the plan and the diff - and a reasoning model spends the front
 // of the run on it: on 2026-09-23 the reviewer of task 8e900a8c spent 277s

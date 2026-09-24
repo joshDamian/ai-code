@@ -456,6 +456,32 @@ test('an uncharged wait does not cover a subagent that goes quiet',async()=>{
   assert.ok(Date.now()-started<15000,`stopped at a second of silence, not after the 30s spawn (${Date.now()-started}ms)`);
 });
 
+test('a Bash command the run waits on is not a subagent, and buys no time',async()=>{
+  // The CLI announces a `npm test` with the same `task_started` it announces an
+  // Explore with, so the two are told apart by what the frame says the task is.
+  // This one is the run's own tool call: the repair of bb9ac058 held two of them
+  // open - 288s of its 600s budget - and counting them as waits would let any role
+  // that runs the suite open its own clock. The repair's own frames show the rest
+  // of the shape: a `local_bash` task closes with a `task_notification` and never
+  // with the `task_updated` an agent gets, so a rule that recognised either one as
+  // the wait would have credited the second as well.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'bashy',name:'Bashy',kind:'mock',enabled:true,config:{routable:true,streamEvents:10,streamMs:100,subagentMs:2000,taskType:'local_bash'}});
+  s.addModel({id:'bashy-m',providerId:'bashy',name:'b',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,stall:60,timeout:1,subagentWait:600}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const started=Date.now();
+  const err=await s.plan(t.id).then(()=>null,e=>e);
+  const ms=Date.now()-started;
+  assert.equal(err?.code,'TIMEOUT','2s inside a command is a 2s wait, and the budget is 1s');
+  assert.ok(ms<2500,`killed on its own clock, not the command's (${ms}ms)`);
+  const run=s.store.listRuns(t.id).find(x=>x.role==='planner');
+  assert.doesNotMatch(run.error,/waiting on subagents/,'and nothing was credited for it');
+});
+
 test('cancel aborts the running agent and leaves the task re-executable',async()=>{
   const root=repo();const s=new Service(root,{allowMock:true});
   s.updateProvider('mock',{enabled:false});
