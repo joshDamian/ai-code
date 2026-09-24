@@ -376,6 +376,25 @@ test('show carries the branches a port could land on, and not the task branches'
   }finally{s.stop()}
 });
 
+test('show reports a completed task as ported once its port has run',async()=>{
+  // The next-step banner and the dot on the port tab are drawn from this field, and
+  // they are drawn on the payload the task itself arrives on - a port writes refs, so
+  // the client cannot derive it, and a reload has to see what the click saw.
+  const {root,taskId}=await worked();
+  const svc=new Service(root,{silent:true});
+  svc.store.updateTask(taskId,{state:'COMPLETE'});
+  const s=await startServer(root);
+  try{
+    const before=JSON.parse((await get(`${s.base}/api/tasks/${taskId}/show`)).body);
+    assert.equal(before.task.state,'COMPLETE');
+    assert.equal(before.ported,false,'the work is still in the worktree, so nothing has been ported');
+    const port=await post(`${s.base}/api/tasks/${taskId}/port`,{});
+    assert.equal(port.status,200);
+    const after=JSON.parse((await get(`${s.base}/api/tasks/${taskId}/show`)).body);
+    assert.equal(after.ported,true,'and the port that just ran is what the next show reports');
+  }finally{s.stop()}
+});
+
 test('the port routes take their options from the request',async()=>{
   const {root,taskId}=await worked();
   const s=await startServer(root);

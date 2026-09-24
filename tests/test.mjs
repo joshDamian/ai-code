@@ -3254,6 +3254,24 @@ test('the diff a reviewer is handed survives a port',async()=>{
   assert.match(after,/diff --git a\/app\.mjs/,'and it is emphatically not empty, which is the whole regression');
 });
 
+// The nudge the web banner draws: a completed task is ported once a port has run for
+// it, and that answer has to be read from git rather than from a stored flag - a port
+// moves refs and never writes the task row. The default destination is the branch the
+// work was cut from, which is checked out, so the port publishes the work and hands
+// back a merge command rather than moving anything, and the published commit is what
+// has to count.
+test('a completed task stops asking to be ported once the port has run',async()=>{
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  assert.equal(s.ported(t.id),false,'a task still in flight is never reported ported');
+  s.store.updateTask(t.id,{state:'COMPLETE'});
+  assert.equal(s.ported(t.id),false,'completed is not ported: the work is still in the worktree');
+  const r=await s.port(t.id);
+  assert.equal(r.alreadyPorted,false,'the destination is checked out, so its ref was left alone');
+  assert.ok(r.command,'and the port handed back the command that would land it');
+  assert.equal(s.ported(t.id),true,'and once the port has run the banner has nothing left to say');
+});
+
 test('a task branch that does not descend from the target is not treated as a fast-forward',async()=>{
   // The rewound-branch bug, in its real shape. A worktree reused after a second plan
   // records the newer HEAD as its base while its branch stays on the older commit,
