@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,PLANNER_PROMPT,CHAT_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -2284,6 +2284,12 @@ test('a planner and a reviewer cannot write, and only an implementer skips permi
   // so dropping it there would hand a reviewer an unrestricted shell.
   assert.deepEqual(denied('reviewer'),['Edit','Write']);
   assert.ok(!claudeArgs({role:'reviewer',model:'m',prompt:'p'}).includes('--dangerously-skip-permissions'));
+  // A chat answers questions about a repository it may not change, so it is denied
+  // what the planner is denied. The branch is an allowlist of read-only roles and
+  // everything else lands on `--dangerously-skip-permissions`, so a role that is
+  // not named in it has write access - which is what a chat must never have.
+  assert.deepEqual(denied('chat'),['Edit','Write','Bash']);
+  assert.ok(!claudeArgs({role:'chat',model:'m',prompt:'p'}).includes('--dangerously-skip-permissions'));
   // `--` last, so a prompt that opens with a dash is not read as a flag.
   const planner=claudeArgs({role:'planner',model:'m',prompt:'p'});
   assert.equal(planner[planner.length-2],'--');
@@ -2294,10 +2300,10 @@ test('a planner and a reviewer cannot write, and only an implementer skips permi
 test('plan mode is countermanded in the system prompt, not the task prompt',()=>{
   // Plan mode's own reminder tells the model to write a plans file using a tool
   // that is denied. A task-prompt clause saying so does not stop the attempt; an
-  // appended system prompt does. So the flag has to be on both read-only roles,
+  // appended system prompt does. So the flag has to be on every read-only role,
   // and its value has to survive as one argv entry rather than being read as a
   // flag itself.
-  for(const role of ['planner','reviewer']){
+  for(const role of ['planner','reviewer','chat']){
     const args=claudeArgs({role,model:'m',prompt:'p'});
     const i=args.indexOf('--append-system-prompt');
     assert.ok(i>-1,`${role} must countermand plan mode`);
@@ -3791,3 +3797,129 @@ await s.implement(t.id);
 assert.equal(fs.realpathSync(s.task(t.id).worktree),fs.realpathSync(wt.dir),'the worktree is reused, not recreated');
 assert.equal(s.task(t.id).base_commit,cut,"the diff base stays where the worktree was cut, so main's own commits are not read as deletions")});
 test('closeTask removes the worktree if it exists',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const beforeClose=s.task(t.id);assert.equal(beforeClose.state,'APPROVED');const wtDir=createWorktree(s.project(p.id).path,t.id);s.store.updateTask(t.id,{worktree:wtDir.dir,branch:wtDir.branch,base_commit:wtDir.base});assert.ok(fs.existsSync(wtDir.dir));s.closeTask(t.id);assert.equal(fs.existsSync(wtDir.dir),false)});
+
+// -- direct chat -------------------------------------------------------------
+
+test('a chat keeps its transcript in order and names the question it still owes an answer',()=>{
+  // The pending question is read back out of the database rather than held in
+  // memory, because the process that writes a question and the process that
+  // answers it are not always the same one: the dashboard queues, the Runner
+  // answers, and a reload in between must not lose the question.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const c=s.createChatSession(p.id);
+  assert.equal(c.title,'New chat');
+  const first=s.askChat(c.id,'Where does the queue live?');
+  // Retitled from the first question, so a session list reads as a list of
+  // subjects rather than as a column of the word "New chat".
+  assert.equal(s.chatSession(c.id).title,'Where does the queue live?');
+  assert.equal(s.store.pendingChatMessage(c.id).id,first.id);
+  const reply=s.store.addChatMessage({id:s.store.id(),sessionId:c.id,role:'assistant',content:'In src/runner.mjs.',runId:first.run_id});
+  // Paired by run id, not by order: an answer to some other question must not be
+  // able to close a question that is still open.
+  assert.equal(s.store.pendingChatMessage(c.id),null);
+  assert.equal(s.store.getChatMessage(reply.id).content,'In src/runner.mjs.');
+  assert.deepEqual(s.store.listChatMessages(c.id).map(m=>[m.seq,m.role]),[[1,'user'],[2,'assistant']]);
+  // `seq` is the cursor a streaming reader reconnects with, so it has to be
+  // exclusive and monotonic rather than an index into a list that keeps growing.
+  assert.deepEqual(s.store.listChatMessages(c.id,1).map(m=>m.seq),[2]);
+  const second=s.askChat(c.id,'And the store?');
+  assert.equal(s.store.pendingChatMessage(c.id).id,second.id);
+  // Writing a turn is what makes a conversation current: the list is ordered by
+  // `updated_at`, so a chat whose newest reply is an hour old would otherwise
+  // sort as though nothing had been said.
+  const listed=s.store.listChatSessions(p.id);
+  assert.deepEqual(listed.map(x=>x.id),[c.id]);
+  assert.ok(listed[0].updated_at>c.created_at);
+  // A second question does not retitle a session that already has a subject.
+  assert.equal(s.chatSession(c.id).title,'Where does the queue live?');
+  assert.equal(s.store.pendingChatMessage('no-such-session'),null);
+});
+
+test('a chat answers as a planning-capable model, because reading a repository is the job',()=>{
+  // The capability is `planning` and not a `chat` capability of its own. No model
+  // row declares a capability named chat, so a chain keyed on one would be empty
+  // for every install and every question would fail with "no available model
+  // capable of chat" - a routing failure for the one role whose entire purpose is
+  // to answer.
+  const root=repo();
+  const s=new Service(root,{allowMock:true});
+  s.addProvider({id:'a',name:'A',kind:'claude-code',enabled:true,config:{routable:true}});
+  s.addModel({id:'sharp',providerId:'a',name:'sharp',capabilities:['planning','review'],reasoning:'frontier',speed:10,quality:10,cost:0,contextLength:100000});
+  // A cheap model guessing at architecture it was never able to read is the
+  // failure the floor exists to prevent, and a chat reads the same repository.
+  s.addModel({id:'dull',providerId:'a',name:'dull',capabilities:['planning','review'],reasoning:'basic',speed:10,quality:20,cost:0,contextLength:100000});
+  assert.equal(s.select('chat').m.id,'sharp');
+  assert.deepEqual(s.eligible('chat').map(c=>c.m.id),['sharp']);
+  assert.ok(s.eligible('chat').length>0,'a chat must have somewhere to run');
+});
+
+test('the chat is told the two things the planner is told',()=>{
+  // Both clauses are here for the same reason they are in PLANNER_PROMPT, and
+  // both were learned from a real run: an agent with no work to do invents some,
+  // and an agent told to produce a document looks for a tool to write it with.
+  // Read-only is the third, and it is the one the role is named for.
+  assert.match(CHAT_PROMPT,/You are read-only/i);
+  assert.match(CHAT_PROMPT,/No tool that writes a file exists/i);
+  assert.match(CHAT_PROMPT,/do not invent work that does not exist/i);
+  // An answer that cannot name what it is based on is an answer nobody can check.
+  assert.match(CHAT_PROMPT,/name the paths you relied on/i);
+  // A question with no single right answer has to be allowed to come back as one.
+  assert.match(CHAT_PROMPT,/ambiguous/i);
+});
+
+test('a chat turn stores its answer and leaves no task behind it',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  // A real task in the same project, so "the chat is not a task's run" is asked
+  // of a project that has a task in it rather than of an empty database.
+  const t=s.createTask(p.id,'unrelated work');
+  s.updateProvider('mock',{config:{routable:false,chatText:'The queue lives in src/runner.mjs, which owns the jobs table mirror.'}});
+  const c=s.createChatSession(p.id);
+  const answer=await s.chat(c.id,{message:'Where does the queue live?'});
+  assert.equal(answer.role,'assistant');
+  assert.equal(answer.content,'The queue lives in src/runner.mjs, which owns the jobs table mirror.');
+  assert.equal(s.store.pendingChatMessage(c.id),null,'the turn is answered, so nothing is waiting on it');
+  const run=s.store.listRuns().find(r=>r.id===answer.run_id);
+  assert.ok(run,'the turn is a run, not a call nobody can account for');
+  assert.equal(run.role,'chat');
+  // No task id: a chat is not a task, and every list that keys on `runs.task_id`
+  // then leaves it alone for free - it cannot make a resting task look busy, and
+  // it cannot appear in a task's history as work that task did.
+  assert.equal(run.task_id,null);
+  assert.equal(s.store.listRuns(t.id).some(r=>r.id===answer.runId),false);
+  assert.equal(s.store.liveRun(t.id),null);
+  assert.equal(s.store.taskHasLiveRun(t.id),false);
+  assert.equal(s.task(t.id).state,'CREATED','answering a question about the project does not move a task');
+  // The spend is real, so it is counted. Hiding it would make the usage page a
+  // record of the spend that was hidden from it.
+  const usage=s.usage('all');
+  assert.equal(usage.by_role.find(r=>r.role==='chat').runs,1);
+});
+
+test('a chat is answered one turn at a time, and a refusal keeps the question',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  // Slow enough that the first turn is still in flight when the second arrives.
+  s.updateProvider('mock',{config:{routable:false,delayMs:150,chatText:'Answered.'}});
+  const c=s.createChatSession(p.id);
+  const first=s.chat(c.id,{message:'First question?'});
+  await assert.rejects(()=>s.chat(c.id,{message:'Second question?'}),/already answering/);
+  await first;
+  // The refused turn is refused before it runs but after its question is written,
+  // so the question survives to be asked again rather than being dropped on the
+  // floor by the guard that stopped it.
+  const msgs=s.store.listChatMessages(c.id);
+  assert.deepEqual(msgs.map(m=>[m.role,m.content]),[
+    ['user','First question?'],['user','Second question?'],['assistant','Answered.'],
+  ]);
+  assert.equal(s.store.pendingChatMessage(c.id).content,'Second question?');
+  // Pairing is by run id, not by position - which is what lets a question asked
+  // while another was being answered stay open instead of being closed by an
+  // answer it never got.
+  assert.equal(msgs[2].run_id,msgs[0].run_id);
+  // A question that has already been answered is not a question, so a turn with
+  // nothing waiting is refused rather than answered a second time.
+  await s.chat(c.id);
+  await assert.rejects(()=>s.chat(c.id),/no question waiting/);
+});

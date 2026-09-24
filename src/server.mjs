@@ -122,6 +122,81 @@ function taskStream(req, res, id) {
   req.on('close', () => clearInterval(timer));
 }
 
+// A chat turn's progress, in the frame shapes the task stream already uses:
+// `meta` once on connect with the whole transcript, `message` per new chat
+// message, `event` per agent event of the run answering the question, and `state`
+// on every tick.
+//
+// The `event` frames are the run's own events, which is most of why a chat run is
+// written to `runs` at all: the reader watches the agent read the repository while
+// it composes an answer, through the same formatters the activity tab uses.
+function chatStream(req, res, id) {
+  sse(res);
+  let lastSeq = 0;
+  let lastEvent = 0;
+  let seeded = false;
+  let ticks = 0;
+  // Whether this stream has ever seen a question being answered. A session with
+  // nothing in flight is the resting case, and ending there would have the browser
+  // reconnect once a second for as long as the page is open - the same reason the
+  // task stream waits until it has seen the task move.
+  let sawAnswering = false;
+  const timer = setInterval(() => {
+    try {
+      const session = svc.store.getChatSession(id);
+      if (!session) {
+        clearInterval(timer);
+        res.write(`event: error\ndata: ${JSON.stringify({ error: 'Chat session not found' })}\n\n`);
+        return res.end();
+      }
+      // The question still waiting for an answer, and so the run answering it. Read
+      // from the message table rather than from this process's memory, so a reload,
+      // a second dashboard and the process that started the run all name the same
+      // run - and `event` frames are therefore the same events.
+      const pending = svc.store.pendingChatMessage(id);
+      const runId = pending?.run_id || null;
+      const job = svc.store.listJobs(id)[0] || null;
+      if (!seeded) {
+        seeded = true;
+        res.write(`event: meta\ndata: ${JSON.stringify({ session, messages: svc.store.listChatMessages(id) })}\n\n`);
+      }
+      // The first tick sends the transcript again, because the client's cursor
+      // starts at zero and meta is the frame a reconnect gets. Both are cheap and
+      // the client keys by message id, so a duplicate is not a duplicate row.
+      for (const m of svc.store.listChatMessages(id, lastSeq)) {
+        lastSeq = Math.max(lastSeq, m.seq);
+        res.write(`event: message\ndata: ${JSON.stringify(m)}\n\n`);
+      }
+      for (const e of runId ? svc.store.listEvents(runId, lastEvent) : []) {
+        lastEvent = Math.max(lastEvent, e.id);
+        res.write(`event: event\ndata: ${JSON.stringify(e)}\n\n`);
+      }
+      // Answering is a run in flight, not a question without an answer: a question
+      // whose run never started - routing failed, the server was restarted - is
+      // waiting forever, and the job row is what says so.
+      const queued = job && (job.state === 'queued' || job.state === 'running');
+      const answering = !!runId && (!!queued || svc.store.hasLiveLease(runId));
+      if (answering) sawAnswering = true;
+      // Written before the termination check, so the last frame a client sees is
+      // the settled state rather than the one before it.
+      res.write(`event: state\ndata: ${JSON.stringify({ session, runId, answering, job })}\n\n`);
+      // The answer landing is the end of the work this stream exists for. The tick
+      // cap covers the resting session and the one whose run died with the process:
+      // the client reads the job row out of the state frame and stops on a terminal
+      // one, so neither has to hold the connection open.
+      if ((sawAnswering && !answering) || ticks++ > STREAM_MAX_TICKS) {
+        clearInterval(timer);
+        res.end();
+      }
+    } catch (e) {
+      clearInterval(timer);
+      res.write(`event: error\ndata: ${JSON.stringify({ error: e.message })}\n\n`);
+      res.end();
+    }
+  }, 500);
+  req.on('close', () => clearInterval(timer));
+}
+
 const webDir = new URL('../web/', import.meta.url).pathname;
 // The dashboard and the CLI share one set of formatters. The one file is
 // published to the browser rather than copied into the web bundle, where it would
@@ -265,6 +340,41 @@ const server = http.createServer(async (req, res) => {
     }
     if (u.pathname.match(/^\/api\/tasks\/([^/]+)\/stream$/)) {
       return taskStream(req, res, u.pathname.split('/')[3]);
+    }
+
+    // Direct chat. A session is a conversation; a message is one turn of it.
+    if (u.pathname === '/api/chat/sessions') {
+      if (req.method === 'GET') return json(res, svc.store.listChatSessions(u.searchParams.get('projectId') || undefined));
+      const b = await body(req);
+      return json(res, svc.createChatSession(b.projectId, b.title), 201);
+    }
+
+    const chat = u.pathname.match(/^\/api\/chat\/sessions\/([^/]+)(?:\/(messages|stream))?$/);
+    if (chat) {
+      const id = chat[1];
+      if (chat[2] === 'stream') return chatStream(req, res, id);
+      // The turn, queued rather than awaited, for the reason execute/background is
+      // queued: an answer can take as long as a planner run, and a reply held open
+      // that long is a request the browser gives up on long before it arrives.
+      if (chat[2] === 'messages' && req.method === 'POST') {
+        const b = await body(req);
+        const text = String(b.message || '').trim();
+        if (!text) return json(res, { error: 'message is required' }, 400);
+        // Asked before the question is written, so a refusal leaves no trace. Two
+        // checks because they cover different ground: the set catches the run this
+        // process is driving, and the job row catches one another process queued.
+        // Both are read synchronously before the write, so within this process the
+        // answer cannot go stale between them.
+        if (svc.chatBusy.has(id) || svc.store.activeJobs().some((j) => j.task_id === id)) {
+          return json(res, { error: 'This chat is already answering a question' }, 409);
+        }
+        const message = svc.askChat(id, text);
+        return json(res, { message, job: runner.enqueue(id, 'chat') }, 202);
+      }
+      if (!chat[2]) {
+        const session = svc.chatSession(id);
+        return json(res, { session, messages: svc.store.listChatMessages(id), job: svc.store.listJobs(id)[0] || null });
+      }
     }
 
     if (u.pathname === '/api/providers') {

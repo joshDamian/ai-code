@@ -40,6 +40,18 @@ export class Store {
       -- finished jobs stay as history and thousands of them share a task id.
       CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL,error TEXT,created_at TEXT NOT NULL,started_at TEXT,ended_at TEXT);
       CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active ON jobs(task_id) WHERE state IN ('queued','running');
+      -- A direct conversation with the project, which is not a task: it has no
+      -- state machine, no plan, no worktree and no approval gate. Its own tables
+      -- rather than rows in the tasks table, because a task row is what every list
+      -- product filters on and a chat has no state to filter by.
+      CREATE TABLE IF NOT EXISTS chat_sessions(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,title TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      -- run_id on a user message names the run that will answer it; on an
+      -- assistant message it names the run that produced it. That pairing is the
+      -- whole of "is this question still waiting", and it is how a stream finds
+      -- the live run's events from the database rather than from one process's
+      -- memory. No foreign key: a question whose run never started still has to
+      -- be readable, and its own row is what says so.
+      CREATE TABLE IF NOT EXISTS chat_messages(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,run_id TEXT,created_at TEXT NOT NULL);
     `);
     for (const [table, columns] of Object.entries({
       tasks: [
@@ -194,6 +206,14 @@ export class Store {
   liveRunIds() {
     const cutoff = new Date(Date.now() - LEASE_STALE_MS).toISOString();
     return this.db.prepare('SELECT run_id FROM run_leases WHERE heartbeat_at >= ?').all(cutoff).map((r) => r.run_id);
+  }
+
+  // Whether one run is still held. `liveRun` cannot answer this: it is keyed on a
+  // task id, and a chat run has no task to be keyed on. The chat stream is the
+  // caller - it watches a run by its id and needs to know when to stop.
+  hasLiveLease(runId) {
+    const cutoff = new Date(Date.now() - LEASE_STALE_MS).toISOString();
+    return !!this.db.prepare('SELECT 1 x FROM run_leases WHERE run_id=? AND heartbeat_at>=?').get(runId, cutoff);
   }
 
   requestCancel(taskId) {
@@ -679,6 +699,73 @@ export class Store {
         h.last_failure_at ?? null, h.last_success_at ?? null
       );
     return h;
+  }
+
+  // -- chat -----------------------------------------------------------------
+  // A conversation is ordered by insertion, and `chat_messages.id` is a uuid, so
+  // the order is the rowid. It is returned as `seq` for the same reason `events`
+  // returns its autoincrement id: a stream that reconnects needs a cursor, and a
+  // uuid cannot be one. The `*` is expanded first so an explicit column list
+  // would shadow nothing - `seq` is the only added name.
+
+  createChatSession({ id, projectId, title }) {
+    const now = new Date().toISOString();
+    this.db.prepare('INSERT INTO chat_sessions(id,project_id,title,created_at,updated_at) VALUES(?,?,?,?,?)').run(id, projectId, title, now, now);
+    return this.getChatSession(id);
+  }
+
+  getChatSession(id) {
+    return this.db.prepare('SELECT * FROM chat_sessions WHERE id=?').get(id) || null;
+  }
+
+  listChatSessions(projectId) {
+    const q = projectId
+      ? 'SELECT * FROM chat_sessions WHERE project_id=? ORDER BY updated_at DESC'
+      : 'SELECT * FROM chat_sessions ORDER BY updated_at DESC';
+    return this.db.prepare(q).all(...(projectId ? [projectId] : []));
+  }
+
+  updateChatSession(id, patch) {
+    const s = this.getChatSession(id);
+    if (!s) return null;
+    const n = { ...s, ...patch, updated_at: new Date().toISOString() };
+    this.db.prepare('UPDATE chat_sessions SET title=?,updated_at=? WHERE id=?').run(n.title, n.updated_at, id);
+    return this.getChatSession(id);
+  }
+
+  getChatMessage(id) {
+    return this.db.prepare('SELECT rowid AS seq,* FROM chat_messages WHERE id=?').get(id) || null;
+  }
+
+  // Writing a message is also what makes its conversation current: the session
+  // list is ordered by `updated_at`, and a chat whose newest reply is an hour old
+  // would otherwise sort as though nothing had been said.
+  addChatMessage(m) {
+    const now = new Date().toISOString();
+    this.db.prepare('INSERT INTO chat_messages(id,session_id,role,content,run_id,created_at) VALUES(?,?,?,?,?,?)').run(m.id, m.sessionId, m.role, m.content, m.runId ?? null, now);
+    this.db.prepare('UPDATE chat_sessions SET updated_at=? WHERE id=?').run(now, m.sessionId);
+    return this.getChatMessage(m.id);
+  }
+
+  listChatMessages(sessionId, afterSeq = 0) {
+    return this.db.prepare('SELECT rowid AS seq,* FROM chat_messages WHERE session_id=? AND rowid>? ORDER BY rowid').all(sessionId, afterSeq);
+  }
+
+  // The question a run is about to answer, or null when every question has been
+  // answered. `IS` rather than `=` so the comparison is null-safe: a question
+  // written without a run id is waiting on nothing, and `= NULL` would make it
+  // invisible to this query rather than pending in it.
+  pendingChatMessage(sessionId) {
+    return (
+      this.db
+        .prepare(
+          `SELECT rowid AS seq,* FROM chat_messages m
+            WHERE m.session_id=? AND m.role='user'
+              AND NOT EXISTS (SELECT 1 FROM chat_messages a WHERE a.session_id=m.session_id AND a.role='assistant' AND a.run_id IS m.run_id)
+            ORDER BY m.rowid DESC LIMIT 1`
+        )
+        .get(sessionId) || null
+    );
   }
 
   // -- events ---------------------------------------------------------------

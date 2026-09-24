@@ -1520,7 +1520,12 @@ export function buildTaskContext(project, task, options = {}) {
   const architecture = readDoc(project.path, 'architecture.md', cfg.architecture);
   const conventions = readDoc(project.path, 'conventions.md', cfg.conventions);
   let review = role === 'repair' || role === 'reviewer' ? task.review || null : null;
-  let previous = role === 'planner' ? null : previousSummary(options.store, task, role);
+  // A chat run belongs to no task, so `previousSummary` has no id to scope its
+  // query by - `listRuns(null)` returns every run in the database, and the
+  // "previous attempt" a chat would be handed is some other conversation's
+  // failure. The same reason the planner reads nothing: there is no earlier
+  // attempt at this role that says anything about this question.
+  let previous = role === 'planner' || role === 'chat' ? null : previousSummary(options.store, task, role);
 
   const files = [...picked.contents];
   let arch = architecture;

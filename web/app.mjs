@@ -7,19 +7,21 @@ import { Overview } from './views/overview.mjs';
 import { Projects } from './views/projects.mjs';
 import { Tasks } from './views/tasks.mjs';
 import { TaskDetail } from './views/task-detail.mjs';
+import { Chat } from './views/chat.mjs';
 import { Providers } from './views/providers.mjs';
 import { Routing } from './views/routing.mjs';
 import { Runs } from './views/runs.mjs';
 import { Usage } from './views/usage.mjs';
 import { Settings } from './views/settings.mjs';
 
-const GO = { o: '#/overview', t: '#/tasks', p: '#/providers', r: '#/runs' };
+const GO = { o: '#/overview', t: '#/tasks', c: '#/chat', p: '#/providers', r: '#/runs' };
 
 function parseHash() {
   const hash = location.hash.replace(/^#\/?/, '');
   const parts = hash.split('/').filter(Boolean);
   if (!parts.length) return { view: 'overview' };
   if (parts[0] === 'tasks' && parts[1]) return { view: 'task-detail', id: parts[1] };
+  if (parts[0] === 'chat' && parts[1]) return { view: 'chat-detail', id: parts[1] };
   return { view: parts[0] };
 }
 
@@ -203,6 +205,12 @@ function App() {
     case 'task-detail':
       view = html`<${TaskDetail} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
       break;
+    case 'chat':
+      view = html`<${Chat} navigate=${navigate} onTitle=${setPageTitle} />`;
+      break;
+    case 'chat-detail':
+      view = html`<${Chat} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
+      break;
     case 'providers':
       view = html`<${Providers} navigate=${navigate} />`;
       break;
@@ -222,8 +230,8 @@ function App() {
       view = html`<${Overview} navigate=${navigate} />`;
   }
 
-  const navRoute = route.view === 'task-detail' ? 'tasks' : route.view;
-  const title = route.view === 'task-detail' ? pageTitle : null;
+  const navRoute = route.view === 'task-detail' ? 'tasks' : route.view === 'chat-detail' ? 'chat' : route.view;
+  const title = route.view === 'task-detail' || route.view === 'chat-detail' ? pageTitle : null;
 
   return html`
     <${Fragment}>

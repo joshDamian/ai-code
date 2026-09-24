@@ -89,8 +89,17 @@ export const api = {
 
   automations: () => request('/api/automations'),
   updateAutomation: (id, body) => request(`/api/automations/${id}`, { method: 'PATCH', body }),
+
+  chatSessions: (projectId) => request(`/api/chat/sessions${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
+  createChatSession: (projectId, title) => request('/api/chat/sessions', { method: 'POST', body: { projectId, title } }),
+  chatSession: (id) => request(`/api/chat/sessions/${id}`),
+  sendChatMessage: (sessionId, message) => request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', body: { message } }),
 };
 
 export function taskStreamUrl(id) {
   return `/api/tasks/${id}/stream`;
+}
+
+export function chatStreamUrl(id) {
+  return `/api/chat/sessions/${id}/stream`;
 }
