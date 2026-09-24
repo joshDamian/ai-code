@@ -836,12 +836,14 @@ export class Service {
     return this.transition(id, 'PLANNING');
   }
 
-  retry(id) {
+  async retry(id) {
     const t = this.task(id);
     if (t.state !== 'FAILED') throw new Error('Can only retry when FAILED');
     if (!t.worktree || !fs.existsSync(t.worktree)) throw new Error('No worktree to retry — use replan instead');
     this.store.updateTask(id, { review: null });
-    return this.transition(id, 'TESTING');
+    this.transition(id, 'TESTING');
+    await this.runTests(id);
+    return this.review(id);
   }
 
   async refine(id, feedback) {

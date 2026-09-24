@@ -313,7 +313,7 @@ const server = http.createServer(async (req, res) => {
       // execute reads the body too: it reaches implement() through execute(), and
       // that is where an override of the dirty-baseline refusal is honoured.
       let opts = {};
-      if (op === 'implement' || op === 'execute' || op === 'test' || (op === 'review' && req.method === 'POST')) {
+      if (op === 'implement' || op === 'execute' || op === 'test' || op === 'retry' || (op === 'review' && req.method === 'POST')) {
         const b = await body(req);
         if (b.background) return json(res, runner.enqueue(id, op), 202);
         opts = { force: !!b.force };
@@ -328,7 +328,7 @@ const server = http.createServer(async (req, res) => {
         : op === 'repair' ? await svc.repair(id)
         : op === 'reject' ? svc.reject(id)
         : op === 'replan' ? svc.replan(id)
-        : op === 'retry' ? svc.retry(id)
+        : op === 'retry' ? await svc.retry(id)
         : op === 'cancel' ? svc.cancelTask(id)
         : op === 'close' ? svc.closeTask(id)
         : null;

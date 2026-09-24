@@ -126,6 +126,7 @@ export class Runner {
       case 'test': return this.service.runTests(job.task_id);
       case 'review': return this.service.review(job.task_id);
       case 'repair': return this.service.repair(job.task_id);
+      case 'retry': return this.service.retry(job.task_id);
       default: return this.service.execute(job.task_id);
     }
   }
