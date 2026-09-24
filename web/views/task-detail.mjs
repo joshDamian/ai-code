@@ -877,8 +877,12 @@ function row(label, value) {
 }
 
 function ReviewTab({ task, busy, run, live }) {
-  if (task.state === 'REVIEWING') {
-    if (live || busy) return html`<${Spinner} message="Review in progress..." />`;
+  // REPAIRING is set by a FAIL verdict and stays set while the repair agent runs,
+  // so the live run's role is what tells "repair needed" from "repair running".
+  // `live` is the server's lease-backed answer, so a reload mid-repair sees it too.
+  const repairing = live?.role === 'repair';
+  if (task.state === 'REVIEWING' || repairing) {
+    if (live || busy) return html`<${Spinner} message=${repairing ? 'Repair in progress...' : 'Review in progress...'} />`;
     return html`
       <div class="stack">
         <p class="muted">This task is in review, but no reviewer is running.</p>
