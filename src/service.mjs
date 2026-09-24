@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Store } from './store.mjs';
 import { inspect, writeContext, readDependencies, relevantFiles, buildTaskContext, contextConfig, estimateTokens, treeOnlyContext } from './context.mjs';
@@ -327,6 +327,18 @@ const TOOL_ROLES = new Set(['implementer', 'repair']);
 // cancellation latency is never worse than the progress redraw. Overridable via
 // the tickMs option so tests can exercise cross-process cancel without waiting.
 const TICK_MS = 2000;
+
+// What one line of test output may cost in the events table. A suite that prints a
+// stack trace, a minified bundle or a progress bar can put megabytes on one line,
+// and the store keeps every event it is given - so the line is cut at write time.
+// The cap is there to bound a pathological line, not a long one.
+const TEST_LINE_CAP = 2000;
+
+// How much of the test command's output is kept to describe a failure. Bounded for
+// the same reason, and this one rides on a run row and an error message: streaming
+// has no maxBuffer to stop at, so the tail is what stops the whole transcript from
+// becoming the failure text.
+const TEST_TAIL_CHARS = 4000;
 
 // Every path that stops a run - the cancel API, the timeout, and the cross-process
 // cancel poll - must throw this exact shape, because the catch in runRole branches
@@ -845,6 +857,10 @@ export class Service {
     try {
       await this.test(this.task(id), t.worktree);
     } catch (e) {
+      // The same rule runTests applies. The test step is cancellable now, and a
+      // cancel read as a failing suite would send a repair agent into a task the
+      // user has just stopped.
+      if (e.code === 'CANCELLED') throw e;
       this.store.updateTask(id, { review: `TEST_FAILED:\n${e.message}` });
       this.transition(id, 'REPAIRING');
       return this.repair(id);
@@ -1100,8 +1116,8 @@ export class Service {
     return this.task(id);
   }
 
-  // The test command and the transition into REVIEWING. `test` below is the raw
-  // command runner and takes the worktree; this is the workflow step around it.
+  // The test command and the transition into REVIEWING. `test` below runs the
+  // command and takes the worktree; this is the workflow step around it.
   async runTests(id) {
     const t = this.task(id);
     if (t.state !== 'TESTING') throw new Error('Task must be in TESTING');
@@ -1109,6 +1125,10 @@ export class Service {
     try {
       await this.test(t, t.worktree);
     } catch (e) {
+      // A cancel is not a failure of the task. The test step holds a lease now, so a
+      // cancel can land inside it, and the task stays in TESTING where it is
+      // re-runnable - the same reading review() gives its own cancel.
+      if (e.code === 'CANCELLED') throw e;
       this.store.updateTask(id, { state: 'FAILED' });
       throw e;
     }
@@ -1119,11 +1139,164 @@ export class Service {
   async test(t, cwd) {
     const cmd = this.project(t.project_id).commands.test;
     if (!cmd) return { skipped: true };
+    return this.#runTest(t, cwd, cmd);
+  }
+
+  // The test command as a tracked process: a run row of its own, its output streamed
+  // into the events table line by line, a lease the dashboard reads for its live-run
+  // indicator, and a controller the cancel path can abort. Nothing here routes or
+  // falls back - a shell command is not an agent - but everything downstream of it is
+  // the same harness an agent run gets.
+  //
+  // It lives here rather than in runTests() because three other callers reach this
+  // method directly - execute(), retry() and repair() - so one implementation covers
+  // all four. The return shape is unchanged: `{ skipped: true }` for a project with
+  // no test command, `{ passed: true }` when the suite passes, and a throw otherwise.
+  async #runTest(t, cwd, cmd) {
+    const store = this.store;
+    const runId = store.id();
+    const started = Date.now();
+    // A tester has no provider and no model, which is what keeps these rows out of
+    // the breaker: countRecentFailures filters on provider_id, so a failing suite
+    // can never be counted against the provider that wrote the code.
+    store.addRun({
+      id: runId,
+      taskId: t.id,
+      role: 'tester',
+      providerId: null,
+      modelId: null,
+      status: 'running',
+      startedAt: new Date(started).toISOString(),
+    });
+    const controller = new AbortController();
+    this.active.set(runId, { controller, taskId: t.id, role: 'tester' });
+    // Claimed before the spawn, so another process sees the task as live from the
+    // first tick rather than from the first line of output.
+    this.#beat(runId, t.id);
+    store.addEvent({ runId, type: 'test', data: { command: cmd } });
+
+    const child = spawn(cmd, {
+      cwd,
+      shell: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // A detached child leads its own process group, so a kill can reach every
+      // process the command spawned instead of just the shell it opened in - which
+      // is where a suite that forks workers actually lives.
+      detached: process.platform !== 'win32',
+    });
+
+    const killGroup = (sig) => {
+      try {
+        process.kill(-child.pid, sig);
+      } catch {
+        // No process group (already gone, or not our child): fall back to the pid.
+        try {
+          child.kill(sig);
+        } catch {
+          /* already dead */
+        }
+      }
+    };
+
+    let aborted = null;
+    const onAbort = () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      aborted = controller.signal.reason instanceof Error ? controller.signal.reason : cancelled();
+      killGroup('SIGTERM');
+      // Escalate only if it is still running, and do not hold the event loop open.
+      const grace = setTimeout(() => killGroup('SIGKILL'), 5000);
+      grace.unref?.();
+      child.once('close', () => clearTimeout(grace));
+    };
+    controller.signal.addEventListener('abort', onAbort, { once: true });
+    if (controller.signal.aborted) onAbort();
+
+    // One buffer per stream holds whatever a chunk split in half, so a line is
+    // recorded whole whenever its newline arrives. The tails are the other half of
+    // that: the end of the output is the reason a failure gives, and it is the only
+    // copy that survives a suite which printed a hundred thousand lines.
+    const buffers = { stdout: '', stderr: '' };
+    const tails = { stdout: '', stderr: '' };
+    const record = (stream, text) => {
+      if (!text.trim()) return;
+      tails[stream] = `${tails[stream]}${text}\n`.slice(-TEST_TAIL_CHARS);
+      store.addEvent({ runId, type: 'test', data: { stream, line: text.slice(0, TEST_LINE_CAP) } });
+    };
+    const drain = (stream, chunk) => {
+      const lines = `${buffers[stream]}${chunk}`.split('\n');
+      buffers[stream] = lines.pop() || '';
+      for (const line of lines) record(stream, line);
+    };
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (c) => drain('stdout', c));
+    child.stderr.on('data', (c) => drain('stderr', c));
+
+    const tick = setInterval(() => this.#pollLease(runId, t.id, controller), this.options.tickMs ?? TICK_MS);
+    let code = null;
+    let signal = null;
+    let spawnError = null;
     try {
-      await exec(cmd, { cwd, shell: true, maxBuffer: 10 * 1024 * 1024 });
+      try {
+        ({ code, signal } = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', (c, s) => resolve({ code: c, signal: s }));
+        }));
+      } catch (e) {
+        // The command never started at all: a shell that is not there, a cwd that
+        // has been removed. Not a failing suite, but a failure of this step, and it
+        // is recorded as one rather than thrown raw out of a run that stays open.
+        spawnError = e;
+      }
+      // Whatever arrived without a trailing newline is still output.
+      drain('stdout', '\n');
+      drain('stderr', '\n');
+
+      const durationMs = Date.now() - started;
+      // Before the exit code, which an aborted process reports as a signal rather
+      // than as a status: the cancel is what happened, not what it did on the way out.
+      if (aborted) {
+        store.updateRun(runId, {
+          status: 'cancelled',
+          ended_at: new Date().toISOString(),
+          error: 'Cancelled by user',
+          duration_ms: durationMs,
+        });
+        // The cancel has been delivered, so it is spent. Left set, it would abort the
+        // next agent this task starts. Same rule as runRole's cancel path.
+        store.setTaskCancel(t.id, false);
+        throw aborted;
+      }
+      if (spawnError || code !== 0) {
+        const detail =
+          tails.stderr.trim() ||
+          tails.stdout.trim() ||
+          spawnError?.message ||
+          (signal ? `killed by ${signal}` : `exited ${code}`);
+        const message = `TEST_FAILED: ${detail}`;
+        // The row first, then the event, then the throw - the order runRole uses, so
+        // the recorded run is never behind the exception a caller is handling.
+        store.updateRun(runId, {
+          status: 'failed',
+          ended_at: new Date().toISOString(),
+          error: message,
+          duration_ms: durationMs,
+        });
+        store.addEvent({ runId, type: 'test_result', data: { passed: false, durationMs, error: message } });
+        throw new Error(message);
+      }
+      store.updateRun(runId, { status: 'succeeded', ended_at: new Date().toISOString(), duration_ms: durationMs });
+      store.addEvent({ runId, type: 'test_result', data: { passed: true, durationMs } });
       return { passed: true };
-    } catch (e) {
-      throw new Error(`TEST_FAILED: ${e.stderr || e.stdout || e.message}`);
+    } finally {
+      clearInterval(tick);
+      controller.signal.removeEventListener('abort', onAbort);
+      this.active.delete(runId);
+      try {
+        store.releaseLease(runId);
+      } catch {
+        /* a stranded lease is reaped once it goes stale */
+      }
     }
   }
 
@@ -1660,9 +1833,10 @@ export class Service {
     // process, and that process notices within one tick. Aborting a controller we
     // own below is just the fast path on top of it.
     this.store.requestCancel(id);
-    // Also on the task itself: a cancel that lands while no agent is mid-run -
-    // between two steps, or during the test command - has no lease to mark, and
-    // would otherwise be forgotten by the time the next agent starts.
+    // Also on the task itself: a cancel that lands while no run is in flight - between
+    // two steps of the chain - has no lease to mark, and would otherwise be forgotten
+    // by the time the next agent starts. Every step that runs a process, the test
+    // command included, holds a lease and is signalled through it instead.
     this.store.setTaskCancel(id, true);
     const live = [...this.active.entries()].filter(([, v]) => v.taskId === id);
     for (const [, v] of live) v.controller.abort(cancelled());
@@ -1974,9 +2148,9 @@ export class Service {
   #pollLease(runId, taskId, controller) {
     this.#beat(runId, taskId);
     try {
-      // Two channels. The lease covers a run already in flight; the task flag
-      // covers the gap between two steps of the same task, and the test command,
-      // which holds no lease and so cannot be signalled any other way.
+      // Two channels. The lease covers a run already in flight - including the test
+      // command, which holds one of its own now; the task flag covers the gap between
+      // two steps of the same task, where no run exists to be marked.
       if (this.store.cancelRequested(runId) || (taskId && this.store.taskCancelRequested(taskId))) controller.abort(cancelled());
     } catch {
       /* treat an unreadable flag as "not cancelled" and check again next tick */
@@ -2645,9 +2819,15 @@ export class Service {
     const runs = this.store.listRunsSince(since);
     const names = new Map(this.store.listProviders().map((p) => [p.id, p.name]));
 
+    // Model spend only. The test command is a tracked run with no provider behind it,
+    // and counting it here would put a nameless provider and a zero-token role on a
+    // report about what the models cost. A run with no provider spent nothing by
+    // construction, so this is the question rather than a filter over row types.
+    const priced = runs.filter((r) => r.provider_id);
+
     // `tokens` is what the models generated; `context_tokens` is what was sent to
     // them. They are different questions - the second is what the budget governs.
-    const totals = { runs: runs.length, tokens: 0, context_tokens: 0, cost: 0, succeeded: 0, failed: 0, fallbacks: 0 };
+    const totals = { runs: priced.length, tokens: 0, context_tokens: 0, cost: 0, succeeded: 0, failed: 0, fallbacks: 0 };
     const byProvider = new Map();
     const byRole = new Map();
     const byDay = new Map();
@@ -2655,7 +2835,7 @@ export class Service {
     // provider breakdown needs the per-provider split, not just the total.
     const byProviderDay = new Map();
 
-    for (const r of runs) {
+    for (const r of priced) {
       const tokens = Number(r.tokens || 0);
       const cost = Number(r.cost || 0);
       totals.tokens += tokens;
@@ -2715,7 +2895,7 @@ export class Service {
       cost_by_provider: [...byProviderDay.entries()]
         .sort(byDayKey)
         .flatMap(([day, m]) => [...m.entries()].map(([pk, v]) => ({ day, provider_id: pk, provider: names.get(pk) || pk, cost: v.cost, runs: v.runs }))),
-      top_runs: [...runs].sort(byCost).slice(0, 5),
+      top_runs: [...priced].sort(byCost).slice(0, 5),
     };
   }
 

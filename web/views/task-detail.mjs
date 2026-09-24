@@ -725,7 +725,7 @@ function ExecuteTab({ task, runs, busy, run, live }) {
                       <div class="list-row" key=${r.id}>
                         <div class="list-row-main">
                           <b>${r.role}</b>
-                          <span class="muted">${r.provider_id} / ${r.model_id}</span>
+                          <span class="muted">${r.provider_id || '—'} / ${r.model_id || '—'}</span>
                         </div>
                         <div class="list-row-side">
                           <${StatusBadge} status=${r.status} />

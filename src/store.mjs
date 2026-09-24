@@ -627,9 +627,9 @@ export class Store {
 
   // -- tasks: cancellation intent -------------------------------------------
 
-  // Set on the task rather than only on the leases, so a cancel that lands
-  // between two steps - or during the test command, which holds no lease - is
-  // still honoured when the next agent starts.
+  // Set on the task rather than only on the leases, so a cancel that lands between
+  // two steps of a chain - where no run exists to hold a lease - is still honoured
+  // when the next agent starts.
   setTaskCancel(taskId, on) {
     this.db.prepare('UPDATE tasks SET cancel_requested=? WHERE id=?').run(on ? 1 : 0, taskId);
   }
