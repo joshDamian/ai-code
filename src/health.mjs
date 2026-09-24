@@ -46,6 +46,10 @@ export const FAILURE_POLICY = {
   COST_LIMIT: { transient: false, resume: false, health: 'none' },
   PROVIDER_DOWN: { transient: true, resume: true, health: 'count' },
   TIMEOUT: { transient: true, resume: true, health: 'count' },
+  // An endpoint that stopped answering mid-response. Same reading as a timeout - the
+  // provider is at fault and the next one may not be - but it is reached in a
+  // fraction of the time, which is the point of measuring silence separately.
+  STALLED: { transient: true, resume: true, health: 'count' },
   AGENT_FAILURE: { transient: false, resume: false, health: 'count' },
 };
 

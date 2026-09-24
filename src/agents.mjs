@@ -59,6 +59,28 @@ export async function* runMock(input) {
   // mock that reported usage only at the end could not exercise the case that
   // matters, which is a run stopped mid-stream by a budget.
   if (input.mockUsage) yield { type: 'message', data: { usage: input.mockUsage } };
+  // The frames claude writes with --include-partial-messages, in the order it writes
+  // them: the request opens, the reasoning streams as deltas, and the CLI counts it.
+  // Emitted before the tool calls for the same reason the usage above is: the silence
+  // this exists to break is the one before an agent's first action.
+  if (input.mockStreamEvents) {
+    yield { type: 'stream_event', data: { type: 'stream_event', event: { type: 'message_start', message: { usage: { input_tokens: 1000, output_tokens: 0 } } } } };
+    // Real deltas are spread over the response, and the intervals are measured in
+    // real time, so a mock that emits its whole response in one tick cannot stand in
+    // for a long one: `mockStreamMs` is what lets a test produce a response the
+    // progress throttle and the stall timer have something to say about.
+    const gap = input.mockStreamMs ? Math.max(1, Math.round(input.mockStreamMs / input.mockStreamEvents)) : 0;
+    for (let i = 0; i < input.mockStreamEvents; i++) {
+      if (gap) await sleep(gap, input.signal);
+      yield { type: 'system', data: { type: 'system', subtype: 'thinking_tokens', estimated_tokens: (i + 1) * 10 } };
+      yield { type: 'stream_event', data: { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'thinking '.repeat(10) } } } };
+    }
+    yield { type: 'stream_event', data: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 1000, output_tokens: input.mockStreamEvents * 10 } } } };
+    yield { type: 'stream_event', data: { type: 'stream_event', event: { type: 'message_stop' } } };
+  }
+  // A run that has streamed and then goes quiet, which is the shape a stall detector
+  // has to catch and the total timeout cannot tell from a run that is merely busy.
+  if (input.mockStallMs) await sleep(input.mockStallMs, input.signal);
   // A real agent's stream is mostly tool calls, and the per-role budget counts
   // them. The mock emits them on demand so that budget is exercisable without a
   // provider, in the same shape a claude assistant message carries them.
@@ -165,7 +187,7 @@ export const REVIEWER_SCHEMA = {
 // Built here rather than inside runClaude so the argv is a value a test can read
 // without spawning an agent.
 export function claudeArgs(input) {
-  const args = ['-p', '--output-format', 'stream-json', '--verbose'];
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
   if (input.model) args.push('--model', input.model);
   if (input.effort) args.push('--effort', input.effort);
   if (input.role === 'planner') {
@@ -209,7 +231,107 @@ export function agentCwd(input) {
 // Drives the claude binary.
 export async function* runClaude(input) {
   const env = childEnv(input.env);
-  yield* runProcess('claude', claudeArgs(input), { cwd: agentCwd(input), env, role: input.role, signal: input.signal });
+  yield* collapseStream(
+    runProcess('claude', claudeArgs(input), { cwd: agentCwd(input), env, role: input.role, signal: input.signal })
+  );
+}
+
+// How often a streaming response reports itself, and how long it has to be before it
+// reports at all. A response shorter than the first interval is not reported while it
+// streams, because its completed block produces a row of its own the moment it
+// arrives and a second row beside it would say nothing the first did not - the
+// intervals are for the long response, which is the one with no row coming.
+const PROGRESS_MS = 5000;
+const PROGRESS_FIRST_MS = 2000;
+
+// Collapses claude's streaming frames into the frames consumers read.
+//
+// Without `--include-partial-messages` the CLI writes one frame per *completed*
+// content block, so a model that reasons before it acts writes nothing at all for
+// the whole duration of that reasoning. On 2026-09-23 the reviewer of task 8e900a8c
+// (run 14185f67) sat silent for 277s after its session started and then produced a
+// single 111,625-character reasoning block - 92% of its 300s budget spent before it
+// had done anything, with nothing in the log to say so. With partial messages the
+// deltas arrive as they are produced, tens per second, so a run that is thinking and
+// a run that is hung stop looking identical.
+//
+// The deltas themselves cannot be persisted: one reasoning block is tens of
+// thousands of frames. They are collapsed here, at the process boundary, so no
+// consumer has to know the difference - a `progress` frame per response once the
+// response has been open for PROGRESS_FIRST_MS, then at most one every
+// PROGRESS_MS, and one at close carrying the response's usage. The shape is the
+// service's `{ type, data }`, and `data.usage` is read by the same cost accounting as
+// any other frame, which is how a run's spend becomes visible while it is still
+// running rather than only in its closing `result` frame.
+//
+// `thinking_tokens` notices are folded into the same frame rather than dropped: the
+// CLI's running estimate is the most direct answer to "how much has it reasoned",
+// and it is the number the progress row wants to show.
+//
+// The two intervals are parameters rather than constants read in place, for the same
+// reason health.mjs takes `now`: watching a five-second throttle work should not cost
+// a test five seconds.
+export async function* collapseStream(frames, { firstMs = PROGRESS_FIRST_MS, everyMs = PROGRESS_MS } = {}) {
+  let progress = null;
+  let startedAt = 0;
+  let emittedAt = 0;
+  let force = false;
+  for await (const frame of frames) {
+    const obj = frame.data;
+    if (frame.type === 'system' && obj?.subtype === 'thinking_tokens') {
+      if (progress) progress.thinkingTokens = Number(obj.estimated_tokens) || progress.thinkingTokens;
+    } else if (frame.type === 'stream_event') {
+      const ev = obj.event || {};
+      if (ev.type === 'message_start') {
+        progress = { kind: 'thinking', chars: 0, thinkingTokens: null, usage: ev.message?.usage };
+        startedAt = Date.now();
+        emittedAt = 0;
+      } else if (!progress) {
+        // A provider that starts mid-stream still gets one.
+        progress = { kind: 'thinking', chars: 0, thinkingTokens: null };
+        startedAt = Date.now();
+        emittedAt = 0;
+      } else if (ev.type === 'content_block_start') {
+        progress.kind = ev.content_block?.type || progress.kind;
+      } else if (ev.type === 'content_block_delta') {
+        const d = ev.delta || {};
+        progress.chars += String(d.thinking ?? d.text ?? d.partial_json ?? '').length;
+      } else if (ev.type === 'message_delta') {
+        // The closing usage is reported once per response and is the only frame that
+        // carries a real output-token count, so it is emitted whatever the throttle
+        // says: the cost ceiling is computed from these numbers, and a ceiling that
+        // cannot see output tokens cannot stop a run.
+        if (ev.usage) {
+          progress.usage = ev.usage;
+          force = true;
+        }
+      } else if (ev.type === 'message_stop') {
+        progress = null;
+        startedAt = 0;
+        emittedAt = 0;
+        force = false;
+        continue;
+      }
+    } else {
+      // A completed block or a whole turn: the response it belonged to is over.
+      progress = null;
+      startedAt = 0;
+      emittedAt = 0;
+      force = false;
+      yield frame;
+      continue;
+    }
+    if (!progress) continue;
+    const now = Date.now();
+    // Since the last report, or since the response opened if there has not been one.
+    const due = emittedAt ? everyMs : firstMs;
+    if (force || now - (emittedAt || startedAt) >= due) {
+      emittedAt = now;
+      force = false;
+      const { kind, chars, thinkingTokens, usage } = progress;
+      yield { type: 'progress', data: { kind, chars, thinkingTokens, ...(usage ? { usage } : {}) } };
+    }
+  }
 }
 
 async function* runProcess(cmd, args, { cwd, env, role, signal }) {
@@ -277,8 +399,9 @@ async function* runProcess(cmd, args, { cwd, env, role, signal }) {
       }
       if (obj.session_id) sessionId = obj.session_id;
       if (obj.api_error_status || obj.is_error) apiError = { status: obj.api_error_status || null, message: String(obj.result || '') };
-      // Thinking-token accounting is noise for every consumer downstream.
-      if (obj.subtype === 'thinking_tokens') continue;
+      // Every frame is passed through, including the streaming ones. Deciding which
+      // of them a consumer should see is collapseStream's job, and a parser that
+      // dropped a frame would hide it from the one caller that wants it.
       if (obj.type === 'assistant' || obj.type === 'result' || obj.message?.content || obj.usage) {
         yield { type: obj.type === 'result' ? 'result' : 'message', data: obj };
       } else {
@@ -382,21 +505,28 @@ export function providerEnv(provider, model) {
 
 export async function* runAgent(provider, model, input) {
   if (provider.kind === 'mock') {
-    yield* runMock({
-      ...input,
-      mockDelayMs: provider.config.delayMs || 0,
-      mockCode: provider.config.failCode,
-      mockSessionId: provider.config.sessionId,
-      mockToolCalls: provider.config.toolCalls || 0,
-      mockSubagentToolCalls: provider.config.subagentToolCalls || 0,
-      mockReadPaths: provider.config.readPaths || [],
-      mockWrites: provider.config.writes || [],
-      mockUsage: provider.config.usage || null,
-      mockReviewText: provider.config.reviewText || null,
-      mockReviewVerdict: provider.config.reviewVerdict || null,
-      mockPlanText: provider.config.planText || null,
-      mockFailure: provider.config.failRoles?.includes(input.role) ? 'SIMULATED_FAILURE' : null,
-    });
+    // Through collapseStream like a real provider, so a test can drive the streaming
+    // frames - and the stall they are the evidence for - without a network.
+    yield* collapseStream(
+      runMock({
+        ...input,
+        mockDelayMs: provider.config.delayMs || 0,
+        mockCode: provider.config.failCode,
+        mockSessionId: provider.config.sessionId,
+        mockToolCalls: provider.config.toolCalls || 0,
+        mockSubagentToolCalls: provider.config.subagentToolCalls || 0,
+        mockStreamEvents: provider.config.streamEvents || 0,
+        mockStreamMs: provider.config.streamMs || 0,
+        mockStallMs: provider.config.stallMs || 0,
+        mockReadPaths: provider.config.readPaths || [],
+        mockWrites: provider.config.writes || [],
+        mockUsage: provider.config.usage || null,
+        mockReviewText: provider.config.reviewText || null,
+        mockReviewVerdict: provider.config.reviewVerdict || null,
+        mockPlanText: provider.config.planText || null,
+        mockFailure: provider.config.failRoles?.includes(input.role) ? 'SIMULATED_FAILURE' : null,
+      })
+    );
     return;
   }
   if (provider.kind === 'claude-code' || provider.kind === 'deepseek') {

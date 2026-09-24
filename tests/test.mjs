@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,childEnv,providerEnv,classify,claudeArgs,agentCwd} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,PLANNER_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -210,16 +210,51 @@ test('activity paging walks the journal without gaps or overlap',()=>{
 
 test('thinking-token pings are dropped but the session id survives',async()=>{
   // The CLI emits one of these per few seconds for the whole run; they were 97%
-  // of a 22k-event journal and carried no usage accounting.
+  // of a 22k-event journal and carried no usage accounting. They are dropped at
+  // collapseStream rather than in the parser, because the count they carry is what a
+  // reader wants during a long reasoning block - so the parser has to pass one
+  // through for the collapse to fold.
   const script=[
     `console.log(JSON.stringify({type:'system',subtype:'thinking_tokens',session_id:'s1',estimated_tokens:3000}));`,
     `console.log(JSON.stringify({type:'assistant',session_id:'s1',message:{content:[{type:'text',text:'hi'}]}}));`,
   ].join('');
+  const frames=[];
+  for await(const ev of runProcess(process.execPath,['-e',script],{cwd:os.tmpdir(),env:process.env,role:'implementer'}))frames.push(ev);
+  assert.equal(frames.some(e=>e.data?.subtype==='thinking_tokens'),true,'the parser passes the frame through');
   const seen=[];
-  for await(const ev of runProcess(process.execPath,['-e',script],{cwd:os.tmpdir(),env:process.env,role:'implementer'}))seen.push(ev);
+  for await(const ev of collapseStream(frames))seen.push(ev);
   assert.ok(seen.some(e=>e.type==='message'),'the real event still reaches the journal');
   assert.equal(seen.some(e=>JSON.stringify(e).includes('thinking_tokens')),false,'the ping is dropped');
   assert.equal(seen.find(e=>e.type==='completed').data.sessionId,'s1','the session id is still captured for resume');
+});
+
+test('a streaming response reports on an interval, and a short one reports once',async()=>{
+  // This is the throttle that keeps a reasoning model's 111k-character block from
+  // becoming 111k journal rows. Both intervals are injectable, so an interval that is
+  // five seconds in production is watched here in milliseconds.
+  const stream=async function*(count,gap){
+    yield {type:'stream_event',data:{type:'stream_event',event:{type:'message_start',message:{usage:{input_tokens:5}}}}};
+    for(let i=0;i<count;i++){
+      await new Promise(r=>setTimeout(r,gap));
+      yield {type:'stream_event',data:{type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'x'.repeat(10)}}}};
+    }
+    // A real response always closes with usage, so every response reports at least
+    // once however briefly it ran - the close is where the numbers are.
+    yield {type:'stream_event',data:{type:'stream_event',event:{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{input_tokens:5,output_tokens:120}}}};
+    yield {type:'stream_event',data:{type:'stream_event',event:{type:'message_stop'}}};
+  };
+  const take=async(g)=>{const out=[];for await(const e of g)out.push(e);return out};
+
+  const short=(await take(collapseStream(stream(3,5),{firstMs:1000,everyMs:1000}))).filter(e=>e.type==='progress');
+  assert.equal(short.length,1,'a response shorter than the first interval does not report while it streams');
+  assert.equal(short[0].data.chars,30,'its single report is the whole response, not a prefix of it');
+  assert.equal(short[0].data.usage.output_tokens,120,'and it carries the usage the cost ceiling is computed from');
+
+  const long=(await take(collapseStream(stream(12,25),{firstMs:60,everyMs:120}))).filter(e=>e.type==='progress');
+  assert.ok(long.length>=2&&long.length<=4,`12 deltas over 300ms report a few times, not 12 (${long.length})`);
+  assert.equal(long[0].data.kind,'thinking','a reader is told it is reasoning, not shown a stream frame');
+  assert.ok(long[0].data.chars>0&&long[0].data.chars<120,'the reports are of the response so far');
+  assert.equal(long[long.length-1].data.chars,120);
 });
 
 test('an api error reported on stdout is classified rather than flattened',async()=>{
@@ -263,6 +298,79 @@ test('role timeout aborts the agent and falls back to the next provider',async()
   const failed=runs.find(x=>x.status==='failed');
   assert.ok(failed&&/TIMEOUT/.test(failed.error),'run recorded TIMEOUT');
   assert.equal(runs.filter(x=>x.status==='succeeded').length,1,'fell back to the next provider');
+});
+
+test('a response that is still being written reports itself, and is not counted as work',async()=>{
+  // What this closes: without partial messages a provider writes nothing until a
+  // whole content block is finished, so a reasoning model's first 277 s produced no
+  // frame at all (run 14185f67), and a run that is thinking could not be told from
+  // one that is wedged. The pulse is a `progress` frame, and it must not be mistaken
+  // for the agent's own tool calls - a budget that counted deltas would stop every
+  // run that reasons before it acts.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'streamy',name:'Streamy',kind:'mock',enabled:true,config:{routable:true,streamEvents:50}});
+  s.addModel({id:'streamy-m',providerId:'streamy',name:'streamy',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,maxToolCalls:3}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const planned=await s.plan(t.id);
+  assert.equal(planned.state,'AWAITING_APPROVAL','50 streamed deltas do not spend a tool-call budget of 3');
+  const run=s.store.listRuns(t.id).find(x=>x.role==='planner');
+  const progress=s.store.listEvents(run.id).filter(e=>e.type==='progress');
+  assert.ok(progress.length>=1,'the run says what it is doing while it is doing it');
+  assert.ok(progress.length<=2,`a burst of 50 deltas is throttled, not journalled (${progress.length} rows)`);
+  const last=progress[progress.length-1];
+  assert.equal(last.data.thinkingTokens,500,'the CLI reasoning count rides the frame');
+  assert.equal(last.data.usage.output_tokens,500,'the closing usage reaches the cost accounting mid-run');
+  const described=describeEvent({type:'progress',data:last.data});
+  assert.ok(described&&described.kind==='think','a reader sees reasoning, not a raw stream frame');
+  assert.match(described.text,/500 tokens reasoned/);
+});
+
+test('a response that starts and then goes quiet is stopped as stalled',async()=>{
+  // A wall clock fires on a busy run and a wedged one alike, and the only value that
+  // is safe for it is one that fits the slowest honest run. Silence is the signal
+  // that separates them, and with partial messages a live response produces one
+  // every few milliseconds - so a second of nothing at all is already conclusive.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  // The deltas are spread over two seconds, which is what makes this the case the
+  // silence budget is for: the response is streaming, then it stops mid-flight. A
+  // burst that lands in one tick would arm the timer only at its close.
+  s.addProvider({id:'wedged',name:'Wedged',kind:'mock',enabled:true,config:{routable:true,streamEvents:10,streamMs:2000,stallMs:30000}});
+  s.addModel({id:'wedged-m',providerId:'wedged',name:'w',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,stall:1,timeout:60}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const started=Date.now();
+  const err=await s.plan(t.id).then(()=>null,e=>e);
+  const ms=Date.now()-started;
+  assert.equal(err?.code,'STALLED','the run that stopped answering is stopped for that reason');
+  assert.ok(ms<15000,`cut off at 1s of silence rather than waited out (${ms}ms)`);
+  const run=s.store.listRuns(t.id).find(x=>x.role==='planner');
+  assert.match(run.error,/STALLED/,'and it is recorded on the run');
+  assert.equal(s.providerHealthList().find(h=>h.providerId==='wedged').state,'DEGRADED','a stall counts against the provider');
+});
+
+test('a provider that writes nothing until it is done is not read as stalled',async()=>{
+  // The guard on the above. A provider that ignores --include-partial-messages emits
+  // no frame between blocks, so a silence budget applied to it would kill it while it
+  // was working - which is a worse failure than the one being fixed. The timer is
+  // armed only after the run has shown it streams at all.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'quiet',name:'Quiet',kind:'mock',enabled:true,config:{routable:true,delayMs:3000}});
+  s.addModel({id:'quiet-m',providerId:'quiet',name:'q',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,stall:1,timeout:60}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const planned=await s.plan(t.id);
+  assert.equal(planned.state,'AWAITING_APPROVAL','3s of silence from a provider that never streams is not a stall');
+  assert.equal(s.store.listRuns(t.id).filter(x=>/STALLED/.test(x.error||'')).length,0);
 });
 
 test('cancel aborts the running agent and leaves the task re-executable',async()=>{

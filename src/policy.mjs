@@ -16,11 +16,26 @@ const ROLES = ['planner', 'implementer', 'reviewer', 'repair'];
 // $2.21 rediscovering a codebase it had been given no files for. A planner and a
 // reviewer explore and answer, so they get a tight budget; the two roles that
 // actually edit and test get a wide one. Unset or non-positive means no limit.
+//
+// stall is the seconds of silence - no frame at all from a response that has
+// started streaming - that count as wedged. It is the same number for every role
+// because silence is a property of the provider rather than of the role. 120s is
+// far above what a streaming provider produces, which is a frame every few
+// milliseconds or a thinking-token notice every few hundred, and (matching
+// elsewhere) unreachable once the response is producing anything at all. Set it to
+// 0 for a provider that batches a whole block before writing it.
+//
+// The reviewer's timeout is the one that had to move. Its prompt is the largest of
+// the four - the task, the plan and the diff - and a reasoning model spends the
+// front of the run on it: on 2026-09-23 the reviewer of task 8e900a8c spent 277s
+// producing its first block against a budget of 300, and the same task's reviewer
+// on a faster provider ran out at 300 mid-review, so it failed twice for the same
+// reason. 900 fits a slow first block and a whole review behind it.
 const defaults = {
-  planner: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.2, speed: 0.1, effort: 'high', timeout: 300, maxToolCalls: 40, maxRunCost: 1 },
-  implementer: { strategy: 'balanced', preferred: [], fallback: [], quality: 0.5, cost: 0.2, speed: 1, effort: 'medium', timeout: 600, maxToolCalls: 200, maxRunCost: 5 },
-  reviewer: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.1, speed: 0.3, effort: 'high', timeout: 300, maxToolCalls: 40, maxRunCost: 1 },
-  repair: { strategy: 'speed', preferred: [], fallback: [], quality: 0.2, cost: 0.4, speed: 1, effort: 'medium', timeout: 600, maxToolCalls: 200, maxRunCost: 5 },
+  planner: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.2, speed: 0.1, effort: 'high', timeout: 300, stall: 120, maxToolCalls: 40, maxRunCost: 1 },
+  implementer: { strategy: 'balanced', preferred: [], fallback: [], quality: 0.5, cost: 0.2, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5 },
+  reviewer: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.1, speed: 0.3, effort: 'high', timeout: 900, stall: 120, maxToolCalls: 40, maxRunCost: 1 },
+  repair: { strategy: 'speed', preferred: [], fallback: [], quality: 0.2, cost: 0.4, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5 },
   // Circuit-breaker thresholds. Absent means the defaults in src/health.mjs apply.
   health: {},
   // Prompt budget for the context assembler. Absent means the defaults in

@@ -196,6 +196,15 @@ export function describeEvent(event) {
   }
   if (type === 'result') return describeResult(data);
   if (type === 'rate_limit_event') return describeRateLimit(data);
+  // What a streaming response is doing while it is still doing it. `thinking_tokens`
+  // is the CLI's own estimate of how much the model has reasoned, which is the number
+  // that makes a long silence legible instead of looking like a hang.
+  if (type === 'progress') {
+    const what = data.kind === 'thinking' ? 'reasoning' : data.kind === 'tool_use' ? 'writing a tool call' : data.kind === 'text' ? 'writing' : 'streaming';
+    const tokens = data.thinkingTokens != null ? ` · ${formatTokens(data.thinkingTokens)} tokens reasoned` : '';
+    const chars = data.chars ? ` · ${formatTokens(data.chars)} chars` : '';
+    return { kind: 'think', text: `${what}${tokens || chars}` };
+  }
 
   if (typeof data === 'string') {
     const text = firstLine(data);

@@ -1774,6 +1774,38 @@ export class Service {
           controller.abort(err);
         }, timeoutMs);
 
+        // A wall clock cannot tell a run that is thinking from one that is wedged, so
+        // it fires on both and the only safe value for it is one that fits the slowest
+        // honest run. This one measures silence instead. It is armed by a streaming
+        // response and cleared by a frame that carries finished work, so it covers the
+        // window between a request and the model's first word - where the whole of the
+        // 277s gap in run 14185f67 lived - and never covers a local tool call, where a
+        // long `npm test` writes no frames at all because it is busy producing one.
+        //
+        // Only a frame carrying work clears it: the CLI's own status notices neither
+        // arm nor clear, because a provider that wedges after saying it was requesting
+        // would otherwise keep the detector quiet with the notice itself.
+        //
+        // It is armed only once the run has streamed at all. A provider that ignores
+        // `--include-partial-messages` writes nothing between blocks, and a silence
+        // budget applied to one of those would kill it while it was working, so until
+        // the first progress frame arrives the total timeout is the only bound.
+        const stallMs = (policy.stall || 0) * 1000;
+        let stallId = null;
+        const clearStall = () => {
+          clearTimeout(stallId);
+          stallId = null;
+        };
+        const armStall = () => {
+          if (!stallMs) return;
+          clearTimeout(stallId);
+          stallId = setTimeout(() => {
+            const err = new Error(`${role} produced nothing for ${Math.round(stallMs / 1000)}s after its response began`);
+            err.code = 'STALLED';
+            controller.abort(err);
+          }, stallMs);
+        };
+
         try {
           for await (const e of runAgent(p, m, {
             role,
@@ -1791,6 +1823,10 @@ export class Service {
             if (u) usage = { ...usage, ...u };
             const txt = this.extractText(e.data);
             approxTokens += Math.ceil(txt.length / 4);
+            // Streaming frames are the run's pulse and a finished turn is its work;
+            // the silence budget watches the first and the total timeout covers both.
+            if (e.type === 'progress') armStall();
+            else if (e.type === 'message' || e.type === 'result' || e.type === 'completed') clearStall();
             if (e.type === 'completed' && e.data?.sessionId) sessionId = e.data.sessionId;
             // Checked as the stream arrives rather than when it ends: the point of
             // a budget is to stop the run that is spiralling, and a run that has to
@@ -1806,6 +1842,7 @@ export class Service {
           }
         } finally {
           clearTimeout(timeoutId);
+          clearStall();
           clearInterval(tick);
           if (!quiet) process.stderr.write('\r\x1b[K');
         }
