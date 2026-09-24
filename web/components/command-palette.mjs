@@ -62,11 +62,13 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
   // convenience group, and a list one task stale reads better than a dialog that
   // re-fetches, and flashes, every time it is summoned.
   const loadedRef = useRef(false);
+  const inputRef = useRef(null);
 
   useEffect(() => {
     if (!open) return;
     setQuery('');
     setActive(0);
+    inputRef.current?.focus();
   }, [open]);
 
   useEffect(() => {
@@ -193,12 +195,13 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
         aria-label="Command palette"
         onClick=${(e) => e.stopPropagation()}
       >
+        <!-- Preact does not apply the autoFocus attribute to a dynamically mounted input, so focus is applied explicitly when the dialog opens. -->
         <input
           class="cmd-input"
           type="text"
           placeholder="Type a command or search…"
           value=${query}
-          autoFocus=${true}
+          ref=${inputRef}
           onInput=${(e) => {
             setQuery(e.target.value);
             // The old index pointed into a list that no longer exists.
