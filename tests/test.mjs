@@ -3880,21 +3880,46 @@ test('a chat turn stores its answer and leaves no task behind it',async()=>{
   assert.equal(answer.role,'assistant');
   assert.equal(answer.content,'The queue lives in src/runner.mjs, which owns the jobs table mirror.');
   assert.equal(s.store.pendingChatMessage(c.id),null,'the turn is answered, so nothing is waiting on it');
-  const run=s.store.listRuns().find(r=>r.id===answer.run_id);
+  const run=s.store.getChatRun(answer.run_id);
   assert.ok(run,'the turn is a run, not a call nobody can account for');
   assert.equal(run.role,'chat');
-  // No task id: a chat is not a task, and every list that keys on `runs.task_id`
-  // then leaves it alone for free - it cannot make a resting task look busy, and
-  // it cannot appear in a task's history as work that task did.
-  assert.equal(run.task_id,null);
-  assert.equal(s.store.listRuns(t.id).some(r=>r.id===answer.runId),false);
+  assert.equal(run.chat_session_id,c.id,'the row belongs to the conversation it answers');
+  // Not in `runs`. That table is the record of what a task did: the usage page,
+  // the runs list, a task's own history and the live-run lookup all read it, and a
+  // row in it belonging to no task is a row every one of them would have to know
+  // to exclude. So the chat's bookkeeping is kept in its own table instead.
+  assert.equal(s.store.listRuns().length,0,'no chat row leaks into the runs table');
+  assert.equal(s.store.listRuns(t.id).length,0);
   assert.equal(s.store.liveRun(t.id),null);
   assert.equal(s.store.taskHasLiveRun(t.id),false);
   assert.equal(s.task(t.id).state,'CREATED','answering a question about the project does not move a task');
-  // The spend is real, so it is counted. Hiding it would make the usage page a
-  // record of the spend that was hidden from it.
+  // Which is what the two surfaces the plan named see: no chat run in the usage
+  // page and none in the runs list, with the spend recorded in `chat_runs` where
+  // the conversation can read it.
   const usage=s.usage('all');
-  assert.equal(usage.by_role.find(r=>r.role==='chat').runs,1);
+  assert.equal(usage.totals.runs,0,'a chat turn is not a task run and is not counted as one');
+  assert.equal(usage.by_role.some(r=>r.role==='chat'),false);
+});
+
+test('a chat turn is still counted against the provider it used',()=>{
+  // The two counters that must not lose sight of a chat because its row moved
+  // tables. A chat is an agent talking to a provider like any other: a gateway
+  // that serves one at a time cannot serve a chat and an implementer at once, and
+  // a provider refusing chats is a provider the breaker exists to notice.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const c=s.createChatSession(p.id);
+  const run=s.store.addChatRun({id:'chat-run',role:'chat',providerId:'a',modelId:'m',status:'running',startedAt:new Date().toISOString()},c.id);
+  s.store.heartbeat(run.id,null);
+  assert.equal(s.store.countRunningByProvider().find(r=>r.pid==='a').c,1,'a chat in flight holds a provider slot');
+  s.store.updateChatRun(run.id,{status:'failed',ended_at:new Date().toISOString(),error:'TIMEOUT the provider stopped answering'});
+  const since=new Date(Date.now()-3600000).toISOString();
+  assert.equal(s.store.countRecentFailures('a',since),1,'a chat that failed in the window counts against the breaker');
+  assert.equal(s.store.countRecentFailuresByProvider(since).get('a'),1);
+  // The breaker's own rules are unchanged by the move: a code that is held on a
+  // clock rather than counted is not counted here either.
+  s.store.updateChatRun(run.id,{status:'failed',ended_at:new Date().toISOString(),error:'RATE_LIMIT the provider refused it'});
+  assert.equal(s.store.countRecentFailures('a',since),0);
 });
 
 test('a chat is answered one turn at a time, and a refusal keeps the question',async()=>{
@@ -3922,4 +3947,38 @@ test('a chat is answered one turn at a time, and a refusal keeps the question',a
   // nothing waiting is refused rather than answered a second time.
   await s.chat(c.id);
   await assert.rejects(()=>s.chat(c.id),/no question waiting/);
+});
+
+test('a chat a provider refuses is answered by the fallback that took the turn over',async()=>{
+  // Two providers, the first refusing every chat. The turn is one question and one
+  // answer, but two runs - and that is the point: a chat that fell back is still a
+  // provider failing, so the attempt that died keeps its own row and the breaker
+  // sees it. One row per turn would have to overwrite that failure to record the
+  // answer, which is the failure disappearing.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'flaky',name:'Flaky',kind:'mock',enabled:true,config:{routable:true,failRoles:['chat'],failCode:'PROVIDER_DOWN'}});
+  s.addProvider({id:'steady',name:'Steady',kind:'mock',enabled:true,config:{routable:true,chatText:'The queue lives in src/runner.mjs.'}});
+  s.addModel({id:'flaky-m',providerId:'flaky',name:'flaky',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  s.addModel({id:'steady-m',providerId:'steady',name:'steady',capabilities:['planning'],speed:10,quality:9,cost:0,contextLength:100000});
+  const c=s.createChatSession(p.id);
+  const question=s.askChat(c.id,'Where does the queue live?');
+  const answer=await s.chat(c.id);
+  assert.equal(answer.content,'The queue lives in src/runner.mjs.');
+  const runs=s.store.listChatRuns(c.id);
+  assert.equal(runs.length,2,'every attempt is a run, so a failure is recorded rather than retried invisibly');
+  const failed=runs.find(r=>r.status==='failed');
+  const answered=runs.find(r=>r.status==='succeeded');
+  assert.equal(failed.provider_id,'flaky');
+  assert.match(failed.error,/PROVIDER_DOWN/);
+  assert.equal(answered.provider_id,'steady');
+  assert.equal(answered.fallback_from,'flaky','the answer says what it was rescued from');
+  assert.equal(answer.run_id,answered.id,'the answer is credited to the provider that produced it');
+  assert.equal(s.store.countRecentFailures('flaky',new Date(Date.now()-3600000).toISOString()),1,'the refused attempt still counts against the provider');
+  // The question is moved onto the run that answered it. A reply is paired with
+  // its question by run id, so one left naming the dead attempt would be a question
+  // waiting forever for an answer that is already stored.
+  assert.equal(s.store.pendingChatMessage(c.id),null,'the answered question is not still waiting');
+  assert.equal(s.store.getChatMessage(question.id).run_id,answered.id);
 });

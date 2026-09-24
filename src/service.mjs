@@ -862,10 +862,10 @@ export class Service {
     try {
       const project = this.project(session.project_id);
       const result = await this.runRole(
-        // A chat's run belongs to no task, so it is written with no task id - the
-        // same shape a provider connectivity test uses. Every list that keys on
-        // `runs.task_id` then leaves it alone for free: it is not a task's run, it
-        // is not a task's live run, and it cannot make a resting task look busy.
+        // A chat's run belongs to no task, and `runRole` writes it to `chat_runs`
+        // rather than to `runs` - see the chatSessionId option below. So this
+        // object is not a task row and is not read as one: it is what `runRole`
+        // reads for the prompt, which is the question as the task text.
         {
           id: null,
           project_id: session.project_id,
@@ -882,7 +882,10 @@ export class Service {
         // the tree the agent may read.
         project.path,
         [],
-        { runId: pending.run_id }
+        // `chatSessionId` is what routes the run's rows to `chat_runs` instead of
+        // `runs`; `runId` is minted by askChat, because the question carries the id
+        // of the run that will answer it.
+        { runId: pending.run_id, chatSessionId: sessionId }
       );
       const answer = this.finalText(result.runId).trim() || 'The model returned no answer. Inspect the run events before asking again.';
       return this.store.addChatMessage({ id: this.store.id(), sessionId, role: 'assistant', content: answer, runId: result.runId });
@@ -1874,7 +1877,14 @@ export class Service {
   // `options.runId` names the run before it exists. One caller needs that: a chat
   // question is stored with the id of the run that will answer it, so the run id
   // has to be known before the run starts. Nothing else passes it, and a caller
-  // that does not gets the id minted here as it always was.
+  // that does not gets the id minted here as it always was. It names the first
+  // attempt only - a fallback is a run of its own, and the waiting question is
+  // moved onto it so the id it carries is always the run answering it.
+  //
+  // `options.chatSessionId` says this run answers a conversation rather than a
+  // task, which is what decides the table its row is written to. It is the one
+  // option that changes where the bookkeeping goes, so it is named for the thing
+  // the row belongs to rather than for the role, which is `chat` either way.
   async runRole(task, role, prompt, cwd, excluded = [], options = {}) {
     let last;
     let previous = null;
@@ -1883,6 +1893,17 @@ export class Service {
     // two runs sharing the server's stderr would interleave their spinners.
     const quiet = this.options.silent || this.quiet;
     const log = quiet ? () => {} : (m) => process.stderr.write(`  [${role}] ${m}\n`);
+    // Where this attempt's row goes. A chat turn is not a task's run, so its
+    // bookkeeping is written to `chat_runs` rather than to `runs` - the same row
+    // shape in the table of the conversation it answers. `options.chatSessionId`
+    // is what says so, and it is also what the row records, so a caller cannot
+    // route the writes somewhere the row does not name.
+    const chat = options.chatSessionId || null;
+    const addRun = (row) => (chat ? this.store.addChatRun(row, chat) : this.store.addRun(row));
+    const updateRun = (id, patch) => (chat ? this.store.updateChatRun(id, patch) : this.store.updateRun(id, patch));
+    // The run the conversation's waiting question names, kept current as one
+    // attempt hands the turn to the next.
+    let turnRunId = chat ? options.runId || null : null;
 
     for (let attempt = 0; attempt < 8; attempt++) {
       let p, m, healthForced;
@@ -1903,8 +1924,13 @@ export class Service {
       const maxRunCost = budgetOf(policy.maxRunCost);
       log(`${m.displayName || m.name} via ${p.name}${previous ? ' (fallback)' : ''}${healthForced ? ' (all providers unhealthy; retrying anyway)' : ''}`);
 
-      const run = this.store.addRun({
-        id: options.runId || this.store.id(),
+      const run = addRun({
+        // The question a chat is answering carries the id of the run that will
+        // answer it, so the first attempt is that run. A fallback is a run of its
+        // own - its own row, its own lease, so the failure that caused it stays
+        // recorded rather than being overwritten - and the question is moved onto
+        // it below.
+        id: !previous && options.runId ? options.runId : this.store.id(),
         taskId: task.id,
         role,
         providerId: p.id,
@@ -1913,6 +1939,14 @@ export class Service {
         startedAt: new Date().toISOString(),
         fallbackFrom: previous,
       });
+      // A handover, in the same order it happened: this attempt owns the turn now,
+      // so the waiting question names it before the run can produce anything. The
+      // chat stream reads the column every tick, which is how a reader who was
+      // already watching follows the turn onto the fallback.
+      if (chat) {
+        if (turnRunId && turnRunId !== run.id) this.store.retargetChatQuestion(chat, turnRunId, run.id);
+        turnRunId = run.id;
+      }
       const started = Date.now();
       let sessionId = null;
       let approxTokens = 0;
@@ -1956,7 +1990,7 @@ export class Service {
         // What this attempt actually cost before the model said a word. Recorded
         // even when the run then fails, because the number is what the next
         // attempt's context check has to reason about.
-        this.store.updateRun(run.id, {
+        updateRun(run.id, {
           context_tokens: needTokens,
           relevant_files: context.manifest.files.length,
           context_budget: context.manifest.budget,
@@ -2055,7 +2089,7 @@ export class Service {
         // it reported none at all.
         const priced = this.price(m, usage, new Date(run.started_at || run.startedAt || new Date()).toISOString());
         const spent = this.#usagePatch(priced, usage, approxTokens);
-        this.store.updateRun(run.id, {
+        updateRun(run.id, {
           status: 'succeeded',
           ended_at: new Date().toISOString(),
           duration_ms: Date.now() - started,
@@ -2087,7 +2121,7 @@ export class Service {
         if (code === 'CANCELLED') {
           // A cancel is not a provider fault, so the provider is not penalised and
           // no fallback is attempted. The caller decides what the task state becomes.
-          this.store.updateRun(run.id, {
+          updateRun(run.id, {
             status: 'cancelled',
             ended_at: new Date().toISOString(),
             error: 'Cancelled by user',
@@ -2101,7 +2135,7 @@ export class Service {
           throw e;
         }
 
-        this.store.updateRun(run.id, {
+        updateRun(run.id, {
           status: 'failed',
           ended_at: new Date().toISOString(),
           error: `${code} ${e.message}`,

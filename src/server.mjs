@@ -127,9 +127,11 @@ function taskStream(req, res, id) {
 // message, `event` per agent event of the run answering the question, and `state`
 // on every tick.
 //
-// The `event` frames are the run's own events, which is most of why a chat run is
-// written to `runs` at all: the reader watches the agent read the repository while
-// it composes an answer, through the same formatters the activity tab uses.
+// The `event` frames are the run's own events, which is why a chat run is recorded
+// at all: the reader watches the agent read the repository while it composes an
+// answer, through the same formatters the activity tab uses. The events table is
+// keyed on a run id, so this reads them by the id the question carries - which is
+// the same id its row in `chat_runs` has.
 function chatStream(req, res, id) {
   sse(res);
   let lastSeq = 0;
