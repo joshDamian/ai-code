@@ -35,6 +35,7 @@ Providers
   provider add-claude
   provider add-deepseek [model]
   provider add-openrouter
+  provider sync [provider-id]
   provider test <provider-id> [model-id]
   provider health [provider-id]
   provider enable <provider-id>
@@ -105,6 +106,14 @@ const OPENROUTER_MODELS = [
   { id: 'openrouter:meta-llama/llama-4-maverick', name: 'llama-4-maverick', displayName: 'Llama 4 Maverick', providerModelId: 'meta-llama/llama-4-maverick', invocationModelId: 'meta-llama/llama-4-maverick', capabilities: ['coding'], speed: 9, quality: 8, contextLength: 1000000, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.2, outputCostPerMTok: 0.6, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
   { id: 'openrouter:qwen/qwen3-235b-a22b', name: 'qwen3-235b', displayName: 'Qwen 3 235B', providerModelId: 'qwen/qwen3-235b-a22b', invocationModelId: 'qwen/qwen3-235b-a22b', capabilities: ['coding'], speed: 7, quality: 9, contextLength: 131072, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 0.7, outputCostPerMTok: 2.8, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
 ];
+
+// What each provider's models should be, keyed by the id `add-*` writes. `provider
+// sync` reads it, so there is one place that knows what a provider's list is.
+const CATALOGS = {
+  'anthropic-claude-code': CLAUDE_MODELS,
+  'deepseek-claude-code': DEEPSEEK_MODELS,
+  'openrouter': OPENROUTER_MODELS,
+};
 
 // Commands the task namespace accepts. `execute` and the planning verbs are async;
 // the state-machine verbs are not.
@@ -208,25 +217,50 @@ async function taskCommand(sub, rest) {
   return out(r);
 }
 
+// `add-*` is create-only. Re-running one looks like the way to refresh a provider
+// whose catalog has moved on, and it is not: the provider row is written with
+// INSERT OR REPLACE, so a second run silently resets config the user has since
+// edited. `provider sync` is the refresh, and this error is how they hear about it.
+function createOnly(id) {
+  if (s.store.getProvider(id)) throw new Error(`Provider '${id}' already exists; run \`provider sync ${id}\` to refresh its models`);
+}
+
 async function providerCommand(sub, rest) {
   if (sub === 'list') return out({ providers: s.store.listProviders(), models: s.store.listModels() });
 
   if (sub === 'add-claude') {
+    createOnly('anthropic-claude-code');
     s.addProvider({ id: 'anthropic-claude-code', name: 'Anthropic / Claude Code', kind: 'claude-code', enabled: true, config: { routable: true, billingMode: 'subscription' } });
     for (const m of CLAUDE_MODELS) s.addModel({ ...m, providerId: 'anthropic-claude-code' });
     return out(s.store.getProvider('anthropic-claude-code'));
   }
 
   if (sub === 'add-deepseek') {
+    createOnly('deepseek-claude-code');
     s.addProvider({ id: 'deepseek-claude-code', name: 'DeepSeek via Claude Code', kind: 'deepseek', enabled: true, config: { apiKeyEnv: 'DEEPSEEK_API_KEY', effort: 'max', routable: true, billingMode: 'api' } });
     for (const m of DEEPSEEK_MODELS) s.addModel({ ...m, providerId: 'deepseek-claude-code' });
     return out(s.store.getProvider('deepseek-claude-code'));
   }
 
   if (sub === 'add-openrouter') {
+    createOnly('openrouter');
     s.addProvider({ id: 'openrouter', name: 'OpenRouter', kind: 'openrouter', enabled: true, config: { apiKeyEnv: 'OPENROUTER_API_KEY', effort: 'max', routable: true, billingMode: 'api' } });
     for (const m of OPENROUTER_MODELS) s.addModel({ ...m, providerId: 'openrouter' });
     return out(s.store.getProvider('openrouter'));
+  }
+
+  // The command that is *not* create-only: it reconciles the model rows a provider
+  // already has against its catalog, adding what is missing and deleting what is no
+  // longer there. Naming one that is not installed is a mistake worth reporting; an
+  // unqualified run covers the providers this install actually has, because an
+  // install with one provider must not have to name it to use the command.
+  if (sub === 'sync') {
+    const named = rest[0];
+    if (named && !CATALOGS[named]) throw new Error(`Unknown provider '${named}'; syncable providers: ${Object.keys(CATALOGS).join(', ')}`);
+    if (named && !s.store.getProvider(named)) throw new Error(`Provider '${named}' not found; add it first with provider add-claude, add-deepseek or add-openrouter`);
+    const ids = named ? [named] : Object.keys(CATALOGS).filter((id) => s.store.getProvider(id));
+    const synced = ids.map((id) => s.syncProviderModels(id, CATALOGS[id]));
+    return out(named ? synced[0] : synced);
   }
 
   if (sub === 'test') return out(await s.testProvider(rest[0], rest[1]));

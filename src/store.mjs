@@ -390,6 +390,13 @@ export class Store {
       );
   }
 
+  // Deleting a model is safe for history: `runs.model_id` is a plain text column
+  // with no foreign key, so a run row keeps naming the model it ran on after the
+  // row it named is gone.
+  deleteModel(id) {
+    this.db.prepare('DELETE FROM models WHERE id=?').run(id);
+  }
+
   updateModel(id, patch) {
     const m = this.getModel(id);
     if (!m) throw Error('Model not found');

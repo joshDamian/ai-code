@@ -246,6 +246,35 @@ test('the planning-model preference validates the model and persists on the task
 
 test('provider model controls persist',()=>{const root=repo();const s=new Service(root);s.addProvider({id:'a',name:'A',kind:'claude-code',enabled:true,config:{routable:true}});s.addModel({id:'m',providerId:'a',name:'m',capabilities:['planning'],enabled:true});assert.equal(s.updateProvider('a',{enabled:false}).enabled,false);assert.equal(s.updateModel('m',{enabled:false}).enabled,false)});
 
+// A catalog moves on - a slug retires upstream, a model is added - and the rows in
+// the database do not, because nothing rewrites them. Sync is the reconciliation:
+// the catalog wins on every field except `enabled`, which is the one a person owns,
+// and a row the catalog no longer lists is deleted.
+test('provider sync reconciles a provider\'s model rows against its catalog',()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);const t=s.createTask(p.id,'x');
+  s.addProvider({id:'p1',name:'P1',kind:'claude-code',enabled:true,config:{routable:true,apiKeyEnv:'P1_KEY'}});
+  s.addModel({id:'p1:one',providerId:'p1',name:'one-stale',capabilities:['planning'],speed:1,quality:1,enabled:false});
+  s.addModel({id:'p1:dead',providerId:'p1',name:'dead',capabilities:['coding'],speed:5,quality:5});
+  s.store.addRun({id:'r1',taskId:t.id,role:'implementer',providerId:'p1',modelId:'p1:dead',status:'succeeded',startedAt:new Date().toISOString()});
+  const catalog=[
+    {id:'p1:one',name:'one',capabilities:['planning','coding'],speed:9,quality:9,contextLength:100000},
+    {id:'p1:two',name:'two',capabilities:['coding'],speed:5,quality:5},
+  ];
+  assert.deepEqual(s.syncProviderModels('p1',catalog),{providerId:'p1',added:1,updated:1,removed:1});
+  assert.equal(s.store.getModel('p1:dead'),undefined,'a row that left the catalog is deleted');
+  const one=s.store.getModel('p1:one');
+  assert.equal(one.enabled,false,'a model someone turned off stays off');
+  assert.equal(one.name,'one','the catalog overwrites drift rather than merging with it');
+  assert.equal(one.speed,9);
+  assert.equal(one.provider_id,'p1');
+  assert.equal(s.store.getModel('p1:two').enabled,true,'and a model with no row is added enabled');
+  assert.deepEqual(s.store.getProvider('p1').config,{routable:true,apiKeyEnv:'P1_KEY'},'the provider row is not rewritten');
+  assert.equal(s.store.db.prepare('SELECT model_id FROM runs WHERE id=?').get('r1').model_id,'p1:dead','history keeps naming the model it ran on');
+  assert.deepEqual(s.syncProviderModels('p1',catalog),{providerId:'p1',added:0,updated:2,removed:0},'a second sync has nothing left to do');
+  assert.throws(()=>s.syncProviderModels('nope',catalog),/not found/,'syncing a provider that was never added is not how models get orphaned');
+});
+
 test('model registry keeps dashboard IDs separate from provider invocation IDs',()=>{
   const root=repo();const s=new Service(root,{allowMock:true});
   s.addProvider({id:'deepseek-claude-code',name:'DeepSeek',kind:'deepseek',enabled:true,config:{routable:true,apiKeyEnv:'DEEPSEEK_API_KEY'}});

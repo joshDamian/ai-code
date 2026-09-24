@@ -2932,4 +2932,39 @@ export class Service {
   updateModel(id, p) {
     return this.store.updateModel(id, p);
   }
+
+  // Reconciles a provider's model rows against its catalog: every entry in the
+  // catalog is written, and every row that is not in it is deleted. That is the
+  // whole of the contract - a sync replaces drift with the catalog rather than
+  // merging with it, so a row whose price or capabilities were edited by hand
+  // comes back as the catalog has it.
+  //
+  // `enabled` is the one field carried over from the existing row. A model a
+  // person turned off has to stay off, or every sync would quietly re-arm it, and
+  // an entry there is no row for yet takes the catalog's own flag.
+  //
+  // The catalog arrives as an argument rather than being imported: the model
+  // constants live in cli.mjs, and cli.mjs already imports this module, so reading
+  // them the other way would be a cycle. The provider row is never written - `add-*`
+  // owns it, and the config reset that a repeated `add-*` caused is why this exists.
+  syncProviderModels(providerId, catalog) {
+    if (!this.store.getProvider(providerId)) throw new Error(`Provider '${providerId}' not found`);
+    const existing = new Map(this.store.listModels(providerId).map((m) => [m.id, m]));
+    const wanted = new Set(catalog.map((m) => m.id));
+    let added = 0;
+    let updated = 0;
+    let removed = 0;
+    for (const m of catalog) {
+      const old = existing.get(m.id);
+      this.store.addModel(old ? { ...m, providerId, enabled: old.enabled } : { ...m, providerId });
+      if (old) updated++;
+      else added++;
+    }
+    for (const id of existing.keys()) {
+      if (wanted.has(id)) continue;
+      this.store.deleteModel(id);
+      removed++;
+    }
+    return { providerId, added, updated, removed };
+  }
 }

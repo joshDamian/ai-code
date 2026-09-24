@@ -492,6 +492,47 @@ test('close refuses a task with a run in flight',async()=>{const {root,taskId}=s
 
 test('ai-code task close exits 0 and prints CANCELLED state',async()=>{const {root,taskId}=seeded();const r=await new Promise((res)=>{const p=spawn(process.execPath,[cliPath,'task','close',taskId],{cwd:root,stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});assert.equal(r.code,0);assert.match(r.out,/CANCELLED/)});
 
+// The state an install that added OpenRouter before the catalog changed is in: the
+// retired slug still has a row and the Claude entries were never seeded. Re-running
+// `add-openrouter` must not be the way out of it - that rewrites the provider row -
+// so `provider sync` is, and `add-*` refuses instead.
+test('provider sync re-seeds the openrouter catalog and add-openrouter refuses a re-run',async()=>{
+  const root=gitRepo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  s.initProject('p',root);
+  s.addProvider({id:'openrouter',name:'OpenRouter',kind:'openrouter',enabled:true,config:{apiKeyEnv:'OPENROUTER_API_KEY',effort:'max',routable:true,billingMode:'api'}});
+  s.addModel({id:'openrouter:mistralai/codestral-2501',providerId:'openrouter',name:'codestral-2501',capabilities:['coding'],speed:5,quality:5});
+  s.addModel({id:'openrouter:anthropic/claude-sonnet-5',providerId:'openrouter',name:'claude-sonnet-5',capabilities:['coding'],speed:1,quality:1,enabled:false});
+  const run=(args)=>new Promise((res)=>{const p=spawn(process.execPath,[cliPath,...args],{cwd:root,stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});
+
+  const first=await run(['provider','sync','openrouter']);
+  assert.equal(first.code,0);
+  assert.equal(JSON.parse(first.out).removed,1,'the retired slug is the one row that leaves');
+  const {providers,models}=JSON.parse((await run(['provider','list'])).out);
+  const ids=models.map(m=>m.id);
+  assert.equal(ids.includes('openrouter:mistralai/codestral-2501'),false,'the dead model is gone from the database');
+  assert.equal(ids.filter(id=>id.startsWith('openrouter:anthropic/claude-')).length,5,'the five Claude entries are attached');
+  assert.equal(models.find(m=>m.id==='openrouter:anthropic/claude-sonnet-5').enabled,false,'a model someone turned off stays off');
+  assert.equal(providers.find(p=>p.id==='openrouter').config.effort,'max','and the provider config survives');
+
+  const second=JSON.parse((await run(['provider','sync','openrouter'])).out);
+  assert.equal(second.added,0);
+  assert.equal(second.removed,0,'a second sync has nothing left to do');
+
+  const all=JSON.parse((await run(['provider','sync'])).out);
+  assert.deepEqual(all.map(s=>s.providerId),['openrouter'],'an unqualified sync covers what this install has, rather than failing on what it does not');
+
+  const dup=await run(['provider','add-openrouter']);
+  assert.equal(dup.code,1);
+  assert.match(dup.err,/already exists/);
+  assert.match(dup.err,/provider sync openrouter/);
+
+  const unknown=await run(['provider','sync','nope']);
+  assert.equal(unknown.code,1);
+  assert.match(unknown.err,/Unknown provider 'nope'/);
+  assert.match(unknown.err,/openrouter/);
+});
+
 test('POST /api/chat/sessions creates a new chat',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-'));git(root,['init','-q']);fs.writeFileSync(path.join(root,'README.md'),'x');git(root,['add','.']);git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);const s=new Service(root,{allowMock:true,silent:true});const p=s.initProject('p',root);const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{const r=await post(`${srv.base}/api/chat/sessions`,{projectId:p.id});assert.equal(r.status,201);const body=JSON.parse(r.body);assert.ok(body.id);assert.equal(body.project_id,p.id);assert.equal(body.title,'New chat')}finally{srv.stop()}});
 
 test('POST /api/chat/sessions/:id/messages queues a job and returns 202',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-msg-'));git(root,['init','-q']);fs.writeFileSync(path.join(root,'README.md'),'x');git(root,['add','.']);git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);const s=new Service(root,{allowMock:true,silent:true});const p=s.initProject('p',root);s.updateProvider('mock',{enabled:false});s.addProvider({id:'chat-provider',name:'Chat',kind:'mock',enabled:true,config:{routable:true,chatText:'Answer to the question.'}});s.addModel({id:'chat-m',providerId:'chat-provider',name:'chat',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{const createResp=await post(`${srv.base}/api/chat/sessions`,{projectId:p.id});const session=JSON.parse(createResp.body);const msgResp=await post(`${srv.base}/api/chat/sessions/${session.id}/messages`,{message:'What is in this repo?'});assert.equal(msgResp.status,202);const body=JSON.parse(msgResp.body);assert.ok(body.message);assert.equal(body.message.role,'user');assert.equal(body.message.content,'What is in this repo?');assert.ok(body.job);assert.equal(body.job.kind,'chat')}finally{srv.stop()}});
