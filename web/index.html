@@ -462,16 +462,17 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .diff-blank{background:rgba(255,255,255,.02)}
 
 /* ---- terminal ----
-   The host carries an explicit height and no padding, and neither is a style choice:
-   xterm's fit addon reads its parent's computed height and width as the space it has,
-   and subtracts the padding of the element xterm itself inserts. Padding here would be
-   counted as space the terminal may draw into, and the last row would render outside
-   the box. A border is safe, because the computed height is the content box and a
-   border sits outside it. */
+   The host is what xterm's fit addon measures: it reads that element's computed height
+   and width as the space the terminal has, and subtracts only the padding of the element
+   xterm itself inserts. Under `*{box-sizing:border-box}` the computed height is the
+   border box, so padding added to the host is space the terminal is sized against and
+   then draws past - the last row is clipped. The inset between the border and the
+   terminal is the box's padding for that reason, and the box is never measured. */
 .terminal-frame{display:flex;flex-direction:column;gap:var(--space-2)}
 .terminal-bar{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;font-size:12.5px;color:var(--muted);min-height:20px}
 .terminal-bar code{color:var(--text)}
-.terminal-host{height:clamp(320px,56vh,640px);background:var(--bg);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.terminal-box{background:var(--bg);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;padding:var(--space-2)}
+.terminal-host{height:clamp(320px,56vh,640px)}
 /* A shell that outlived its socket: the server went away, or the network did. Said in
    the bar rather than written into the terminal, which is replaying what the shell
    printed before it went quiet - a line typed into that would read as the shell's. */

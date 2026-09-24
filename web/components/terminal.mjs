@@ -143,7 +143,9 @@ export function TerminalPane({ taskId, target }) {
       <div class="terminal-bar">
         <span class="terminal-state ${tone}">${text}</span>
       </div>
-      <div class="terminal-host" ref=${hostRef}></div>
+      <div class="terminal-box">
+        <div class="terminal-host" ref=${hostRef}></div>
+      </div>
     </div>
   `;
 }
