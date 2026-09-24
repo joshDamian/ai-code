@@ -773,13 +773,17 @@ function PortTab({ task, branches, busy, run }) {
 }
 
 // What the diff pane is showing, which is one of three things and they are not
-// interchangeable: work the worktree is still holding, the commit the branch holds, or the
+// interchangeable: work the worktree is still holding, the commits the branch holds, or the
 // change already in the destination. Leaving the label at "Change" is much of what made a
 // landed port read as work still waiting to be ported.
+//
+// `branch` and `commit` name the same place - the branch - and differ only in whether the
+// work arrived in one commit a port wrote or in the several an agent wrote, which is not a
+// distinction the person reading the pane has any use for.
 function changeLabel(view) {
   if (view.state?.key === 'landed') return `The change, as it landed in ${view.target}`;
   if (view.from === 'worktree') return 'The change, uncommitted in the worktree';
-  if (view.from === 'commit') return `The change on ${view.branch}`;
+  if (view.from === 'commit' || view.from === 'branch') return `The change on ${view.branch}`;
   return 'The change';
 }
 

@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { Store } from './store.mjs';
 import { inspect, writeContext, readDependencies, relevantFiles, buildTaskContext, contextConfig, estimateTokens, treeOnlyContext } from './context.mjs';
 import {
-  ensureGit, status, createWorktree, diffAgainst, statusPaths, untracked, dirtyPaths, head, changedBetween, protectAiCode,
+  ensureGit, status, createWorktree, diffAgainst, diffBetween, statusPaths, untracked, dirtyPaths, head, changedBetween, protectAiCode,
   currentBranch, revParse, isAncestor, mergeBase, findCommit, branches, checkedOut, mergeTree, commitTree, setBranch, commitAll, removeWorktree, commitDiff,
   landingCommit, commitRef,
 } from './git.mjs';
@@ -1064,15 +1064,28 @@ export class Service {
     const dirty = live ? dirtyPaths(t.worktree) : [];
     for (const f of dirty) touched.add(f);
     if (base && taskTip) for (const f of changedBetween(p.path, base, taskTip)) touched.add(f);
-    // The commit this task published, if it ever did. Reading it off ancestry does
-    // not work, and both ways it fails are the interesting cases. A task that was
-    // never materialized sits at its own fork point, so `targetTip` contains the
-    // branch tip and the test reports "already ported" for work stranded uncommitted
-    // in a worktree - the exact case this feature exists for. And once the work is in
-    // the target, the branch tip and the fork point are again the same commit, so it
-    // would report the same thing for a port that never happened. The commit's own
-    // message is the record, and materialize is the only thing that writes one.
+    // Whether the branch holds work the destination does not: the tip is not the point
+    // where the two forked. This is the question "is there anything on the branch", and
+    // it is asked of ancestry rather than of commit messages. An agent commits its own
+    // work under its own subject - nothing in the harness tells it to, and nothing
+    // stops it - so a message scan only ever sees what a port wrote, and a branch
+    // holding a whole finished task was read as an empty one.
+    const ahead = !!(taskTip && base && taskTip !== base);
+    // The commit this task published, if a port ever published one. The message is
+    // still the only record a *landed* task can be read from: ancestry cannot stand in
+    // for it, because a task that was never materialized sits at its own fork point, so
+    // `targetTip` contains the branch tip and an ancestry test alone reports "already
+    // ported" for work stranded uncommitted in a worktree - the exact case this feature
+    // exists for. Once the work is in the target the tip and the fork point are the
+    // same commit again, so the same test would say it about a port that never
+    // happened.
     const published = findCommit(p.path, branch, `AI Code task ${t.id}`);
+    // The merge itself, under whichever message made it: a port that lands writes
+    // `Merge AI Code task <id> into <target>`, and a merge someone runs from the command
+    // the port printed gets git's own `Merge branch '<branch>'`. The second is the
+    // common one here, because a target that is checked out anywhere is left alone
+    // rather than moved, so the merge is run by hand.
+    const merged = findCommit(p.path, target, branch);
     const a = {
       // What was assessed: the pair a port would move between. Named here because the
       // verdict is written from it, and a state that says "undefined already contains
@@ -1082,9 +1095,17 @@ export class Service {
       targetTip,
       taskTip,
       base,
-      committed: !!published,
-      // The commit itself, so a surface can name it rather than only reporting that one
-      // exists. Read in one place because the way this is found is the subtle part.
+      // The branch holds a commit for this task: one a port published, or one the agent
+      // wrote for itself. Both are work, and which one it is matters only to where the
+      // change is read from.
+      committed: !!(published || ahead),
+      // The commits the branch holds that the destination does not. Where the change is
+      // read from when the worktree has nothing left uncommitted in it.
+      ahead,
+      merged,
+      // The commit a port published, so a surface can name it rather than only
+      // reporting that one exists. Read in one place because the way this is found is
+      // the subtle part.
       commit: published,
       // Work sitting in the worktree that the branch does not have. A port is what
       // publishes it, and a prediction drawn from the branch tip does not contain it.
@@ -1094,7 +1115,11 @@ export class Service {
       // replan sits on an older commit than the base_commit rewritten underneath
       // it, and moving the target's ref on that answer silently rewinds the branch.
       fastForward: !!(taskTip && isAncestor(p.path, targetTip, taskTip)),
-      alreadyPorted: !!(published && isAncestor(p.path, published, targetTip)),
+      // A branch that is ahead of its fork point has not landed, whatever landed before
+      // it and whatever the target's history says about it - a task restored to and
+      // worked on again after a port is work to port a second time, not work already
+      // in place.
+      alreadyPorted: !!((published && isAncestor(p.path, published, targetTip)) || (!ahead && merged)),
       // `git branch -f` refuses to move a branch checked out in any worktree, so
       // the port has to know this before it tries rather than after it fails.
       checkedOut: checkedOut(p.path).includes(target),
@@ -1119,11 +1144,12 @@ export class Service {
     a.state = portState(a);
     // The two commits worth being able to name, each answering a different question. The
     // task's own commit is the work - what to read to see what this task did - and it
-    // exists from the moment a port publishes it, landed or not. The commit it landed as
-    // only exists once the destination has it, and for a merge it is a different commit
-    // from the work, which is exactly why both are carried.
-    a.taskCommit = commitRef(p.path, published);
-    a.landedAs = a.alreadyPorted ? commitRef(p.path, landingCommit(p.path, published, targetTip)) : null;
+    // exists from the moment a port publishes it, landed or not; where no port wrote one
+    // the branch holds the work itself and its tip is the commit to name. The commit it
+    // landed as only exists once the destination has it, and for a merge it is a
+    // different commit from the work, which is exactly why both are carried.
+    a.taskCommit = commitRef(p.path, published || (ahead ? taskTip : null));
+    a.landedAs = a.alreadyPorted ? commitRef(p.path, landingCommit(p.path, published || merged, targetTip)) : null;
     return a;
   }
 
@@ -1137,11 +1163,30 @@ export class Service {
     const target = this.portTarget(t, opts);
     const live = !!(t.worktree && fs.existsSync(t.worktree));
     const a = this.assess(t, p, branch, target);
-    // Uncommitted work when there is any, and the commit the branch holds otherwise. The
-    // worktree's existence is not the test, and taking it for one showed an empty pane for
-    // a worktree that had already been committed - which reads as the work having been
-    // lost when it is only waiting on the branch.
+    // Where the change is read from, in the order the work moves: what the worktree has
+    // not committed, the commit a port published, the commits the branch holds that the
+    // destination does not, and the commit that landed. The worktree's existence is
+    // not the test, and taking it for one showed an empty pane for a worktree that had
+    // already been committed - which reads as the work having been lost when it is only
+    // waiting on the branch.
     const fromWorktree = live && dirtyPaths(t.worktree).length > 0;
+    const read = fromWorktree
+      ? { from: 'worktree', files: statusPaths(t.worktree), diff: worktreeDiff(t.worktree, t) }
+      // The commit a port published, when there is one: it is the narrower answer, since
+      // the branch may hold other commits beside it, and naming it is what a surface
+      // showing "the commit for this task" means.
+      : a.commit
+        ? { from: 'commit', files: changedBetween(p.path, `${a.commit}^`, a.commit), diff: commitDiff(p.path, a.commit) }
+        // The branch's own commits: an agent can finish and commit a task without any port
+        // writing a commit, and the range is what holds it. Not read from the worktree,
+        // which may be gone while the branch remains.
+        : a.ahead
+          ? { from: 'branch', files: changedBetween(p.path, a.base, a.taskTip), diff: diffBetween(p.path, a.base, a.taskTip) }
+          // Landed with no port commit of its own: the merge is the record, and against
+          // its first parent it carries exactly what the branch brought across.
+          : a.merged
+            ? { from: 'landed', files: changedBetween(p.path, `${a.merged}^`, a.merged), diff: commitDiff(p.path, a.merged) }
+            : { from: 'none', files: [], diff: '' };
     return {
       task: t.id,
       branch,
@@ -1149,15 +1194,12 @@ export class Service {
       // Whether the directory is still there, so a surface can say where the work is
       // held rather than leaving it to be inferred from an empty diff.
       worktree: live,
-      // What the port carries: the porcelain list while there is uncommitted work, and
-      // the commit's own files otherwise. Not the base..tip range - a landed branch is
-      // its own merge base, so that range is empty exactly when the work is in place.
-      files: fromWorktree ? statusPaths(t.worktree) : a.commit ? changedBetween(p.path, `${a.commit}^`, a.commit) : [],
       untracked: untrackedFiles(t.worktree),
-      diff: fromWorktree ? worktreeDiff(t.worktree, t) : a.commit ? commitDiff(p.path, a.commit) : '',
-      // Which of the two the change above was read from, so a surface can label what it
-      // is showing instead of presenting committed work as something still pending.
-      from: fromWorktree ? 'worktree' : a.commit ? 'commit' : 'none',
+      // What the port carries while there is uncommitted work is the porcelain list, and
+      // otherwise it is the change the ref above holds. Both are named by `from`, so a
+      // surface can label what it is showing instead of presenting committed work as
+      // something still pending.
+      ...read,
       ...a,
     };
   }
@@ -1194,7 +1236,12 @@ export class Service {
     // nothing the branch lacks. `put.gone` separates the two ways that happens, and it
     // is the difference worth saying out loud - a worktree that was removed with the
     // work already on the branch is not the same as one removed with nothing in it.
-    if (put.empty && !a.committed) {
+    //
+    // Landed work is excluded here rather than by `committed`, because a branch merged
+    // by hand has neither a published commit nor anything ahead of the target, so this
+    // is the one statement that would call it empty - and the port below answers it
+    // better.
+    if (put.empty && !a.committed && !a.alreadyPorted) {
       return {
         task: id, target, branch, commit: null, empty: true, published: false, next: [],
         note: put.gone

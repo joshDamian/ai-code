@@ -13,6 +13,10 @@ export function createWorktree(root,id){ensureGit(root);const base=head(root);co
 // reviewer a blank page, and a blank page is a PASS. Against a ref it reads the
 // same before and after a materialize, and survives the worktree being removed.
 export function diffAgainst(dir,ref){return git(dir,['diff','--no-color',ref])}
+// What a range of commits carries, for the work a branch holds in several commits
+// rather than in the one a port wrote. Read from the repository rather than from a
+// worktree, because the branch outlives the directory it was cut into.
+export function diffBetween(root,from,to){return git(root,['diff','--no-color',from,to])}
 // The porcelain tail that used to be appended to the diff. Kept separate because
 // it is not a diff: it is the only thing that names an untracked file at all,
 // since no diff carries one's contents.

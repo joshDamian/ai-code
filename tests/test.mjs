@@ -3173,6 +3173,72 @@ test('a diff read after the worktree is removed still shows the work',async()=>{
   assert.deepEqual(d.files,['app.mjs'],'and the file it touches is still named');
 });
 
+test('the commits an agent wrote on its own branch are work to port',async()=>{
+  // The reported case. Only a port writes `AI Code task <id>`, so a branch whose work
+  // the agent committed itself carried the whole finished task and satisfied nothing
+  // the message scan looked for: the screen read "There is no change here to land"
+  // over two commits of real work. Whether the branch holds work is a question for
+  // ancestry, and the change is read from the range rather than from a commit a port
+  // never made.
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  // The mock implementer writes into the worktree and stages nothing, so the commit is
+  // of the whole tree - the agent's own commit, arriving on the branch with a message
+  // this task never wrote.
+  sh(t.worktree,['add','-A']);
+  commitAs(t.worktree,'write the button colour myself');
+  const d=s.diff(t.id);
+  assert.equal(d.state.key,'ready','there is work to land');
+  assert.equal(d.from,'branch','and it is read off the branch');
+  assert.equal(d.committed,true,'which the branch holds as a commit');
+  assert.equal(d.pending,false,'with nothing left in the worktree');
+  assert.deepEqual(d.files,['app.mjs']);
+  assert.match(d.diff,/diff --git a\/app\.mjs/);
+  assert.equal(d.taskCommit.sha,d.taskTip,'and the commit it names is the branch tip');
+  sh(root,['branch','staging',currentBranch(root)]);
+  const r=await s.port(t.id,{to:'staging'});
+  assert.ok(r.landed,'and it lands');
+  assert.match(sh(root,['show','staging:app.mjs']),/written by the mock implementer/,'after which the destination has the work, not an empty merge');
+});
+
+test('a branch merged by hand reads as landed',async()=>{
+  // The other half of the same complaint, one step later. Nothing here writes the
+  // port's merge message: `main` is checked out, so a port prints `git merge` instead
+  // of moving the ref, and the merge git makes carries `Merge branch 'ai-code/<id>'`.
+  // A landed task read as empty is the same screen saying the work was lost, now
+  // pointing at work that is in the destination.
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  sh(t.worktree,['add','-A']);
+  commitAs(t.worktree,'write the button colour myself');
+  const branch=s.task(t.id).branch;
+  sh(root,['-c','user.email=test@example.com','-c','user.name=Test','merge','--no-ff',branch,'-m',`Merge branch '${branch}'`]);
+  const d=s.diff(t.id);
+  assert.equal(d.state.key,'landed');
+  assert.equal(d.alreadyPorted,true);
+  assert.equal(d.next.length,0,'nothing left to run');
+  assert.match(d.diff,/diff --git a\/app\.mjs/,'and the change is still on screen');
+});
+
+test('a branch with nothing on it is not read as landed',async()=>{
+  // The guard on the ancestry term. A task whose implementer wrote nothing sits at its
+  // own fork point, which is exactly where a landed branch sits too, so ancestry alone
+  // reports "already ported" for work that was never done. That is the case the feature
+  // exists for, and it must not be swallowed by the fix for the case next to it.
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t0=s.createTask(p.id,'change the button colour');
+  s.prepare(t0.id);await s.plan(t0.id);s.approve(t0.id);
+  await s.implement(t0.id);
+  const d=s.diff(t0.id);
+  assert.equal(d.state.key,'empty');
+  assert.equal(d.alreadyPorted,false);
+  assert.equal(d.committed,false);
+  assert.equal(d.pending,false);
+  assert.deepEqual(d.next,[]);
+});
+
 test('a port is refused while the task has a run in flight',async()=>{
   // A port is not a job, so the partial unique index on jobs does not cover it, and
   // this process's run registry cannot see a run the dashboard owns. Committing the
