@@ -126,6 +126,7 @@ export class Runner {
       case 'chat': return this.service.chat(job.task_id);
       case 'intake': return this.service.draftIntake(job.task_id);
       case 'proposals': return this.service.proposeTasks(job.task_id);
+      case 'infer-spec': return this.service.inferSpec(job.task_id);
       case 'implement': return this.service.implement(job.task_id);
       case 'test': return this.service.runTests(job.task_id);
       case 'review': return this.service.review(job.task_id);

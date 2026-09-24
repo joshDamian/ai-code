@@ -143,7 +143,7 @@ export function Projects({ navigate }) {
                       </div>
                       <div class="list-row-side">
                         ${p.drafts?.length ? html`<span class="badge badge-warn">${p.drafts.length} drafted</span>` : null}
-                        ${p.spec ? html`<span class="badge badge-good">spec</span>` : p.idea ? html`<span class="badge badge-warn">idea only</span>` : null}
+                        ${p.spec ? html`<span class="badge badge-good">spec</span>` : p.idea ? html`<span class="badge badge-warn">idea only</span>` : html`<span class="badge badge-neutral">no spec</span>`}
                         <span class="badge badge-neutral">${Object.keys(p.commands || {}).length} commands</span>
                       </div>
                     </div>

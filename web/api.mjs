@@ -61,6 +61,9 @@ export const api = {
   // Drafts a fresh batch against the stored spec and the open task list. The reply
   // names the conversation the pass answers in.
   proposeTasks: (id) => request(`/api/projects/${id}/proposals`, { method: 'POST' }),
+  // Infers a spec from the existing codebase. The reply names the conversation it
+  // answers in, and the draft lands on the project page.
+  inferSpec: (id) => request(`/api/projects/${id}/infer-spec`, { method: 'POST' }),
 
   decisions: (id, state) => request(`/api/projects/${id}/decisions${state ? `?state=${encodeURIComponent(state)}` : ''}`),
   approveDecision: (id) => request(`/api/decisions/${id}/approve`, { method: 'POST' }),

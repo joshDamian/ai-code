@@ -350,6 +350,14 @@ const server = http.createServer(async (req, res) => {
       return json(res, { session, job: runner.enqueue(session.id, 'proposals') }, 202);
     }
 
+    // Infer spec from codebase: read the real repository and draft a spec, so the
+    // turn is watchable and the draft lands on the project page for approval.
+    const is = u.pathname.match(/^\/api\/projects\/([^/]+)\/infer-spec$/);
+    if (is) {
+      const session = svc.askInferSpec(is[1]);
+      return json(res, { session, job: runner.enqueue(session.id, 'infer-spec') }, 202);
+    }
+
     const dc = u.pathname.match(/^\/api\/projects\/([^/]+)\/decisions$/);
     if (dc) return json(res, svc.store.listDecisions(dc[1], u.searchParams.get('state') || undefined));
 

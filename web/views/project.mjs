@@ -82,6 +82,20 @@ export function Project({ id, navigate, onTitle }) {
     }
   }
 
+  async function inferSpec() {
+    try {
+      setBusy('infer-spec');
+      const r = await api.inferSpec(id);
+      // The agent reads the real repository and drafts a spec in a conversation,
+      // so this opens it and the draft appears on this page.
+      navigate(`#/chat/${r.session.id}`);
+    } catch (e) {
+      showToast(e.message, 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
   if (!data) return html`<${Spinner} message="Loading project..." />`;
 
   const taskTitle = (tid) => tasks.find((t) => t.id === tid)?.title || null;
@@ -228,6 +242,7 @@ export function MemoryPanel({ project, onReload, navigate }) {
               ? html`<span class="badge badge-neutral">approved ${revision.at ? new Date(revision.at).toLocaleDateString() : ''}</span>`
               : html`<span class="badge badge-neutral">none yet</span>`
           }
+          ${!project.spec && !project.idea && !waiting ? html`<button class="btn secondary" disabled=${!!busy} onClick=${inferSpec}>Infer from codebase</button>` : null}
           <button class="btn secondary" disabled=${!!busy} onClick=${() => setEditing((v) => !v)}>
             ${editing ? 'Cancel' : waiting ? 'Edit draft' : project.spec ? 'Propose a change' : 'Write it'}
           </button>

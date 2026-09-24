@@ -5000,6 +5000,27 @@ test('proposals are drafted against the spec and the open tasks, and wait like i
   assert.throws(() => s.approveDraft(p.id, 'no-such-draft'), /Draft not found/);
 });
 
+test('a spec is inferred from the existing codebase, and waits like proposals', async () => {
+  const root = repo();
+  const s = chatService(root, chatPayload({ spec: '# Goals\n\nProvide CLI file operations.\n\n# Not goals\n\nGUI support.' }));
+  const p = s.initProject('p', root);
+  // Infer-spec requires a real repository with a path, which initProject gives.
+  // No spec exists yet.
+  assert.equal(s.project(p.id).spec, null);
+  const session = s.askInferSpec(p.id);
+  assert.equal(s.store.pendingChatMessage(session.id).content, 'What is this project?', 'the question is a real turn in the conversation');
+  const result = await s.inferSpec(session.id);
+  // The spec is drafted and waiting for approval.
+  assert.match(s.project(p.id).spec_draft, /Provide CLI file operations/);
+  assert.equal(s.project(p.id).spec, null, 'the spec is a draft, not yet approved');
+  assert.equal(s.store.pendingChatMessage(session.id), null, 'the question was answered');
+  assert.match(s.store.listChatMessages(session.id)[1].content, /# Goals/);
+  // Approved on the same surface as an intake draft.
+  const approved = s.approveSpec(p.id);
+  assert.match(approved.spec, /Provide CLI file operations/);
+  assert.equal(s.project(p.id).spec_draft, null, 'the draft is cleared');
+});
+
 test('a completed task drafts decision entries from its diff and its review, and a person lands them', async () => {
   const root = repo();
   const s = chatService(root, chatPayload({ decisions: [{ title: 'One module for the rename plan', detail: 'The plan is built before any file moves, so a dry run and a real run cannot disagree.' }] }), { writes: ['app.mjs'], reviewText: 'The implementation matches the plan.' });

@@ -467,6 +467,17 @@ export const PROPOSALS_PROMPT = (spec, open) =>
 // reads as a conversation rather than as an answer with no question above it.
 export const PROPOSALS_QUESTION = 'What else should I build?';
 
+// Auto-generate a spec from the existing codebase. The model reads the real repository
+// and drafts what the code already is: its goals, what it deliberately does not do, and
+// the product decisions the code implies. Output shape is just {spec}, with no
+// suggestedPath or tasks, since the project already exists at a real path.
+export const INFER_SPEC_PROMPT =
+  'Read this existing repository and draft the specification for what it already is: its goals, what it deliberately does not do, and the product decisions the code implies. Do not describe what the code does mechanically - capture why it was built and what tradeoffs were made. You are read-only: do not modify source files, create files, run mutating commands, or commit. No tool that writes a file exists in this session.\n\n' +
+  payloadInstruction('{"spec":"<the whole spec, as markdown>"}');
+
+// The question that opens an infer-spec conversation.
+export const INFER_SPEC_QUESTION = 'What is this project?';
+
 // The decision log's source: the change a task made, and what its review said about
 // it. The prompt is deliberately narrow - a decision worth recording is a choice
 // somebody would have to know to work on this project later, and a diff carries
@@ -1122,6 +1133,54 @@ export class Service {
     const session = this.createChatSession(projectId, 'Task proposals', null);
     const runId = this.store.id();
     this.store.addChatMessage({ id: this.store.id(), sessionId: session.id, role: 'user', content: PROPOSALS_QUESTION, runId });
+    return this.chatSession(session.id);
+  }
+
+  // -- auto-generate spec from codebase -----------------------------------
+  //
+  // Like proposals, this is a chat turn on demand that reads a real repository
+  // and returns a draft the user can accept, refine, or reject. The draft lands
+  // in spec_draft, using the same approval flow as intake drafts.
+
+  async inferSpec(sessionId) {
+    const session = this.chatSession(sessionId);
+    const project = this.project(session.project_id);
+    const pending = this.store.pendingChatMessage(sessionId);
+    if (!pending) throw new Error('This infer-spec chat has no question waiting to be answered');
+    if (this.chatBusy.has(sessionId)) throw new Error('This chat is already answering a question');
+    this.chatBusy.add(sessionId);
+    try {
+      const result = await this.runRole(
+        {
+          id: null,
+          project_id: project.id,
+          title: pending.content,
+          description: pending.content,
+          plan: 'No plan: this is a question about the project.',
+        },
+        'chat',
+        INFER_SPEC_PROMPT,
+        project.path,
+        [],
+        { runId: pending.run_id, chatSessionId: sessionId }
+      );
+      const text = this.finalText(result.runId).trim();
+      const parsed = draftPayload(text, (x) => {
+        return x.spec ? { spec: String(x.spec).trim() } : null;
+      });
+      this.store.addChatMessage({ id: this.store.id(), sessionId, role: 'assistant', content: text || 'The model returned no spec.', runId: result.runId });
+      if (parsed?.spec) this.proposeSpec(project.id, parsed.spec);
+      return { project: this.project(project.id), session: this.chatSession(sessionId) };
+    } finally {
+      this.chatBusy.delete(sessionId);
+    }
+  }
+
+  // Opens the conversation an infer-spec pass answers in, and writes the question into it.
+  askInferSpec(projectId) {
+    const session = this.createChatSession(projectId, 'Infer spec', null);
+    const runId = this.store.id();
+    this.store.addChatMessage({ id: this.store.id(), sessionId: session.id, role: 'user', content: INFER_SPEC_QUESTION, runId });
     return this.chatSession(session.id);
   }
 
