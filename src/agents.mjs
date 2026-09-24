@@ -553,14 +553,29 @@ export function providerEnv(provider, model) {
   if (provider.kind === 'deepseek') {
     const keyEnv = provider.config.apiKeyEnv || 'DEEPSEEK_API_KEY';
     const key = process.env[keyEnv];
-    // A missing key is an auth failure, not an agent failure: it must open the
-    // circuit on the first attempt instead of retrying eight times against the
-    // same unset variable.
     if (!key) throw Object.assign(new Error(`Missing ${keyEnv} for DeepSeek provider`), { code: 'AUTH_FAILURE' });
     const mid = model.invocationModelId || model.providerModelId || model.name;
     return {
       AI_CODE_PROVIDER: provider.id,
       ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+      ANTHROPIC_AUTH_TOKEN: key,
+      ANTHROPIC_MODEL: mid,
+      ANTHROPIC_DEFAULT_OPUS_MODEL: mid,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: mid,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: mid,
+      CLAUDE_CODE_SUBAGENT_MODEL: mid,
+      CLAUDE_CODE_EFFORT_LEVEL: provider.config.effort || 'max',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(provider.config.autoCompactWindow || 786432),
+    };
+  }
+  if (provider.kind === 'openrouter') {
+    const keyEnv = provider.config.apiKeyEnv || 'OPENROUTER_API_KEY';
+    const key = process.env[keyEnv];
+    if (!key) throw Object.assign(new Error(`Missing ${keyEnv} for OpenRouter provider`), { code: 'AUTH_FAILURE' });
+    const mid = model.invocationModelId || model.providerModelId || model.name;
+    return {
+      AI_CODE_PROVIDER: provider.id,
+      ANTHROPIC_BASE_URL: 'https://openrouter.ai/api/v1',
       ANTHROPIC_AUTH_TOKEN: key,
       ANTHROPIC_MODEL: mid,
       ANTHROPIC_DEFAULT_OPUS_MODEL: mid,
@@ -607,7 +622,7 @@ export async function* runAgent(provider, model, input) {
     );
     return;
   }
-  if (provider.kind === 'claude-code' || provider.kind === 'deepseek') {
+  if (provider.kind === 'claude-code' || provider.kind === 'deepseek' || provider.kind === 'openrouter') {
     yield* runClaude({
       ...input,
       model: model.invocationModelId || model.providerModelId || model.name,

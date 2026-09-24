@@ -34,6 +34,7 @@ Providers
   provider list
   provider add-claude
   provider add-deepseek [model]
+  provider add-openrouter
   provider test <provider-id> [model-id]
   provider health [provider-id]
   provider enable <provider-id>
@@ -73,6 +74,17 @@ const CLAUDE_MODELS = [
 const DEEPSEEK_MODELS = [
   { id: 'deepseek:deepseek-flash', name: 'deepseek-flash', displayName: 'DeepSeek V4.1 Flash', providerModelId: 'deepseek-flash', invocationModelId: 'deepseek-flash', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 10, quality: 8, contextLength: 1000000, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.15, outputCostPerMTok: 0.6, cacheReadCostPerMTok: 0.003, peakInputCostPerMTok: 0.3, peakOutputCostPerMTok: 1.2, peakCacheReadCostPerMTok: 0.006, billingMode: 'api', pricingSource: 'DeepSeek official pricing', pricingUpdatedAt: '2026-09-21' },
   { id: 'deepseek:deepseek-v4-pro', name: 'deepseek-v4-pro', displayName: 'DeepSeek V4 Pro', providerModelId: 'deepseek-v4-pro', invocationModelId: 'deepseek-v4-pro', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 7, quality: 10, contextLength: 1000000, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 0.66, outputCostPerMTok: 1.98, cacheReadCostPerMTok: 0.022, peakInputCostPerMTok: 1.32, peakOutputCostPerMTok: 3.96, peakCacheReadCostPerMTok: 0.044, billingMode: 'api', pricingSource: 'DeepSeek official pricing', pricingUpdatedAt: '2026-09-21' },
+];
+
+// OpenRouter gives access to models from multiple providers through one key.
+// The invocationModelId is what OpenRouter expects; the id is namespaced for
+// the local database.
+const OPENROUTER_MODELS = [
+  { id: 'openrouter:google/gemini-2.5-pro', name: 'gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', providerModelId: 'google/gemini-2.5-pro', invocationModelId: 'google/gemini-2.5-pro', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 8, quality: 9, contextLength: 1000000, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 1.25, outputCostPerMTok: 10, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
+  { id: 'openrouter:google/gemini-2.5-flash', name: 'gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', providerModelId: 'google/gemini-2.5-flash', invocationModelId: 'google/gemini-2.5-flash', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 10, quality: 8, contextLength: 1000000, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.15, outputCostPerMTok: 0.6, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
+  { id: 'openrouter:meta-llama/llama-4-maverick', name: 'llama-4-maverick', displayName: 'Llama 4 Maverick', providerModelId: 'meta-llama/llama-4-maverick', invocationModelId: 'meta-llama/llama-4-maverick', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 9, quality: 8, contextLength: 1000000, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.2, outputCostPerMTok: 0.6, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
+  { id: 'openrouter:qwen/qwen3-235b-a22b', name: 'qwen3-235b', displayName: 'Qwen 3 235B', providerModelId: 'qwen/qwen3-235b-a22b', invocationModelId: 'qwen/qwen3-235b-a22b', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 7, quality: 9, contextLength: 131072, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 0.7, outputCostPerMTok: 2.8, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
+  { id: 'openrouter:mistralai/codestral-2501', name: 'codestral-2501', displayName: 'Codestral 25.01', providerModelId: 'mistralai/codestral-2501', invocationModelId: 'mistralai/codestral-2501', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 9, quality: 8, contextLength: 256000, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.3, outputCostPerMTok: 0.9, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
 ];
 
 // Commands the task namespace accepts. `execute` and the planning verbs are async;
@@ -190,6 +202,12 @@ async function providerCommand(sub, rest) {
     s.addProvider({ id: 'deepseek-claude-code', name: 'DeepSeek via Claude Code', kind: 'deepseek', enabled: true, config: { apiKeyEnv: 'DEEPSEEK_API_KEY', effort: 'max', routable: true, billingMode: 'api' } });
     for (const m of DEEPSEEK_MODELS) s.addModel({ ...m, providerId: 'deepseek-claude-code' });
     return out(s.store.getProvider('deepseek-claude-code'));
+  }
+
+  if (sub === 'add-openrouter') {
+    s.addProvider({ id: 'openrouter', name: 'OpenRouter', kind: 'openrouter', enabled: true, config: { apiKeyEnv: 'OPENROUTER_API_KEY', effort: 'max', routable: true, billingMode: 'api' } });
+    for (const m of OPENROUTER_MODELS) s.addModel({ ...m, providerId: 'openrouter' });
+    return out(s.store.getProvider('openrouter'));
   }
 
   if (sub === 'test') return out(await s.testProvider(rest[0], rest[1]));
