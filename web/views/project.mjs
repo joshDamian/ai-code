@@ -82,20 +82,6 @@ export function Project({ id, navigate, onTitle }) {
     }
   }
 
-  async function inferSpec() {
-    try {
-      setBusy('infer-spec');
-      const r = await api.inferSpec(id);
-      // The agent reads the real repository and drafts a spec in a conversation,
-      // so this opens it and the draft appears on this page.
-      navigate(`#/chat/${r.session.id}`);
-    } catch (e) {
-      showToast(e.message, 'error');
-    } finally {
-      setBusy(null);
-    }
-  }
-
   if (!data) return html`<${Spinner} message="Loading project..." />`;
 
   const taskTitle = (tid) => tasks.find((t) => t.id === tid)?.title || null;
@@ -230,6 +216,15 @@ export function MemoryPanel({ project, onReload, navigate }) {
   async function dropDraft(d) {
     const r = await run(`drop-${d.id}`, () => api.dropDraft(project.id, d.id));
     if (r) await onReload?.();
+  }
+
+  // The pass answers in a conversation of its own - a turn like any other - so this
+  // opens it: the draft lands on this page, and the transcript that explains it is
+  // where a person goes to read why the spec says what it says. Nothing is reloaded
+  // here because the draft does not exist yet; approving it is what reloads.
+  async function inferSpec() {
+    const r = await run('infer-spec', () => api.inferSpec(project.id));
+    if (r && navigate) navigate(`#/chat/${r.session.id}`);
   }
 
   return html`
