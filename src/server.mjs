@@ -293,7 +293,7 @@ const server = http.createServer(async (req, res) => {
       // render as the task it would port.
       if (op === 'show') {
         const task = svc.task(id);
-        return json(res, { task, runs: svc.store.listRuns(id), branches: svc.destinations(id), revision: svc.revision(task), live: svc.liveRun(id) });
+        return json(res, { task, runs: svc.store.listRuns(id), branches: svc.destinations(id), revision: svc.revision(task), live: svc.liveRun(id), ported: svc.ported(id) });
       }
       if (op === 'refine') {
         const b = await body(req);

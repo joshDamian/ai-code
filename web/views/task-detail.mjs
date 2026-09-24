@@ -168,7 +168,7 @@ export function TaskDetail({ id, navigate, onTitle }) {
   const working = data ? WORKING_STATES.has(data.task.state) : false;
   // Read from the task and the server's live run, never from the current tab, so the
   // banner below and the dot on the tabs bar always name the same step.
-  const step = data ? nextStep(data.task, live) : null;
+  const step = data ? nextStep(data.task, live, data.ported) : null;
 
   useEffect(() => {
     if (!liveOn && !working) return;
@@ -550,7 +550,10 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
 // Two states return null on purpose. A live run is its own nudge - the action bar
 // is already offering Cancel - and PLANNING with no planner running is owned by the
 // plan tab's own "Start Planning" button, which is on the tab the user starts on.
-function nextStep(task, live) {
+//
+// `ported` is the third: a completed task whose port has already run has no step
+// left to nudge towards, and the port tab holds whatever the port left to do.
+function nextStep(task, live, ported) {
   if (live) return null;
   switch (task.state) {
     case 'APPROVED':
@@ -560,7 +563,7 @@ function nextStep(task, live) {
     case 'REPAIRING':
       return { tab: 'review', text: 'Review requested changes.', cta: 'Repair' };
     case 'COMPLETE':
-      return { tab: 'port', text: 'Review passed.', cta: 'Port this change' };
+      return ported ? null : { tab: 'port', text: 'Review passed.', cta: 'Port this change' };
     case 'FAILED':
       return { tab: 'plan', text: 'The last run failed.', cta: 'View details' };
     default:

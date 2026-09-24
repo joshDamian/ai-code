@@ -1587,6 +1587,35 @@ export class Service {
     };
   }
 
+  // Whether a port has already run for this task, asked for the destination a port
+  // would use by default. Read from git on every call: a port writes refs and nothing
+  // else, so a stored answer is the one way this could go stale.
+  //
+  // Either half of a port counts as having ported. A destination nobody has checked
+  // out is moved by the port itself, and `alreadyPorted` is that. A destination that
+  // is checked out is left alone and the port prints the merge command instead, which
+  // is the common case here - the default destination is the branch the work was cut
+  // from - so the work is published to the task branch and nothing lands, and what
+  // says a port ran is `commit`, the commit it wrote. The nudge is to port, and after
+  // either the port tab holds the merge command and the task is no longer waiting on
+  // anyone to find it.
+  //
+  // Only COMPLETE tasks are asked - every other state's banner is driven by the state
+  // itself, and the git calls are wasted on work still in flight.
+  ported(id) {
+    const t = this.task(id);
+    if (t.state !== 'COMPLETE') return false;
+    try {
+      const p = this.project(t.project_id);
+      const a = this.assess(t, p, t.branch || `ai-code/${t.id}`, this.portTarget(t, {}));
+      return a.alreadyPorted || !!a.commit;
+    } catch {
+      // No resolvable target (detached HEAD, no recorded plan base): nothing has
+      // landed anywhere, and the banner is the safer guess.
+      return false;
+    }
+  }
+
   // -- cancellation ---------------------------------------------------------
 
   cancelTask(id) {
