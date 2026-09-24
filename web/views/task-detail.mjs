@@ -1203,7 +1203,7 @@ function TerminalTab({ task, live, terminal }) {
           `
         )}
       </div>
-      ${spec?.dir ? html`<p class="muted"><code>${spec.dir}</code></p>` : null}
+      ${spec?.dir ? html`<p class="muted terminal-cwd"><code>${spec.dir}</code></p>` : null}
 
       ${
         spec?.available

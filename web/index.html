@@ -477,6 +477,11 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    the bar rather than written into the terminal, which is replaying what the shell
    printed before it went quiet - a line typed into that would read as the shell's. */
 .terminal-state.warn{color:var(--warn)}
+/* The working directory line above the box. A paragraph carries the browser's default
+   ~16px top and bottom margin, and a grid item's margin is never collapsed into the
+   track gap - so without this the .stack gap below the path is that gap plus the
+   margin. Dropping it leaves the one intentional gap, the same 12px used elsewhere. */
+.terminal-cwd{margin:0}
 /* The worktree terminal while an agent run is writing the same directory. A warning
    and not a lock: watching a run is a reason to be in here, and a read-only `git log`
    mid-run is harmless. */
