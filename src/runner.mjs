@@ -7,7 +7,7 @@ const DEFAULT_CONCURRENCY = 2;
 // Gateways that front a single subscription or a single machine handle one agent
 // at a time; a hosted API is happy with a couple. A provider that knows better
 // sets `config.maxConcurrency`.
-const DEFAULT_PROVIDER_CONCURRENCY = { 'claude-code': 1, deepseek: 2 };
+const DEFAULT_PROVIDER_CONCURRENCY = { 'claude-code': 1, deepseek: 2, openrouter: 2 };
 
 // The background job queue.
 //

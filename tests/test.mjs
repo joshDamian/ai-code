@@ -299,6 +299,7 @@ test('provider env does not leak ambient Anthropic routing into the child',()=>{
     process.env.ANTHROPIC_BASE_URL='https://api.deepseek.com/anthropic';
     process.env.ANTHROPIC_MODEL='deepseek-v4-flash';
     process.env.DEEPSEEK_API_KEY='deepseek-key';
+    process.env.OPENROUTER_API_KEY='or-key';
     process.env.PATH=saved.PATH;
 
     // A subscription claude-code provider must see none of it, or it silently
@@ -315,6 +316,15 @@ test('provider env does not leak ambient Anthropic routing into the child',()=>{
     assert.equal(ds.ANTHROPIC_BASE_URL,'https://api.deepseek.com/anthropic');
     assert.equal(ds.ANTHROPIC_MODEL,'deepseek-v4-pro','the registry model wins over the ambient one');
     assert.equal(ds.ANTHROPIC_API_KEY,undefined,'the provider uses a token, not an api key');
+
+    // An openrouter provider is the same shape. The base URL is the one claude
+    // appends `/v1/messages` to, so it must not carry a `/v1` of its own.
+    const or=childEnv(providerEnv({id:'openrouter',kind:'openrouter',config:{apiKeyEnv:'OPENROUTER_API_KEY'}},{name:'gemini-2.5-pro',invocationModelId:'google/gemini-2.5-pro'}));
+    assert.equal(or.ANTHROPIC_BASE_URL,'https://openrouter.ai/api');
+    assert.equal(or.ANTHROPIC_AUTH_TOKEN,'or-key');
+    assert.equal(or.ANTHROPIC_MODEL,'google/gemini-2.5-pro');
+    assert.equal(or.ANTHROPIC_API_KEY,undefined,'the ambient key is scrubbed and the branch adds no empty one');
+    assert.throws(()=>providerEnv({kind:'openrouter',config:{apiKeyEnv:'MISSING_OR_KEY'}},{name:'x'}),/Missing MISSING_OR_KEY/);
   }finally{
     for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];
     Object.assign(process.env,saved);

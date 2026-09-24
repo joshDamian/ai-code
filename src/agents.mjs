@@ -573,10 +573,13 @@ export function providerEnv(provider, model) {
     const key = process.env[keyEnv];
     if (!key) throw Object.assign(new Error(`Missing ${keyEnv} for OpenRouter provider`), { code: 'AUTH_FAILURE' });
     const mid = model.invocationModelId || model.providerModelId || model.name;
+    // The base is `/api` and not `/api/v1`, because claude appends `/v1/messages`
+    // itself - OpenRouter's Anthropic endpoint is `https://openrouter.ai/api/v1/messages`.
+    // OpenRouter also takes optional `HTTP-Referer`/`X-Title` attribution headers, which
+    // no env var can express, so this integration goes without them.
     return {
       AI_CODE_PROVIDER: provider.id,
-      ANTHROPIC_BASE_URL: 'https://openrouter.ai/api/v1',
-      ANTHROPIC_API_KEY: '',
+      ANTHROPIC_BASE_URL: 'https://openrouter.ai/api',
       ANTHROPIC_AUTH_TOKEN: key,
       ANTHROPIC_MODEL: mid,
       ANTHROPIC_DEFAULT_OPUS_MODEL: mid,
