@@ -1,6 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';import {spawn,execFileSync} from 'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import net from 'node:net';import {Service} from '../src/service.mjs';import {WebSocket} from 'ws';import {TerminalSessions} from '../src/terminal.mjs';
 function get(url){return new Promise((res,rej)=>http.get(url,r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))}).on('error',rej))}
 function post(url,payload){return new Promise((res,rej)=>{const data=JSON.stringify(payload||{});const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)}},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.write(data);req.end()})}
+function patch(url,payload){return new Promise((res,rej)=>{const data=JSON.stringify(payload||{});const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname,method:'PATCH',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)}},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.write(data);req.end()})}
 // Reads an event stream to its end. The deadline is the point of the test: a
 // stream that only stops at the server's absolute tick cap has failed it.
 function stream(url,deadlineMs=25000){return new Promise((res,rej)=>{const req=http.get(url,r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>{clearTimeout(t);res({status:r.statusCode,body:b})})});const t=setTimeout(()=>{req.destroy();rej(new Error(`stream still open after ${deadlineMs}ms`))},deadlineMs);req.on('error',(e)=>{clearTimeout(t);rej(e)})})}
@@ -103,6 +104,34 @@ test('a server asked for port 0 announces the port it bound, and answers there',
 test('dashboard API responds',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-server-'));const s=await startServer(root);try{const r=await get(`${s.base}/api/overview`);assert.equal(r.status,200);assert.ok(JSON.parse(r.body).providers)}finally{s.stop()}});
 
 test('dashboard control-plane APIs exist',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-api-'));const s=await startServer(root);try{for(const u of ['/api/providers','/api/routing','/api/runs','/api/usage','/api/automations','/api/doctor','/api/jobs']){const r=await get(s.base+u);assert.equal(r.status,200,u)}}finally{s.stop()}});
+
+// A model id is namespaced with the provider's own slug, and OpenRouter's contain a
+// slash. The dashboard encodes the id into one path segment and the route decodes it
+// back; missing either half leaves the Disable button answering 404, which is exactly
+// what a manual click of it did. Asserted over HTTP because that is where the id is
+// split - the service call takes the id whole either way.
+test('a model whose id contains a slash can be disabled and enabled over the API',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-model-id-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  s.addProvider({id:'openrouter',name:'OpenRouter',kind:'openrouter',enabled:true,config:{apiKeyEnv:'OPENROUTER_API_KEY'}});
+  const model='openrouter:anthropic/claude-opus-5';
+  s.addModel({id:model,providerId:'openrouter',name:'claude-opus-5',capabilities:['coding'],speed:7,quality:10,cost:0,contextLength:200000});
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const url=`${srv.base}/api/models/${encodeURIComponent(model)}`;
+    const off=await patch(url,{enabled:false});
+    assert.equal(off.status,200,'the encoded id has to reach the model, not the 404 branch');
+    assert.equal(JSON.parse(off.body).enabled,false);
+    assert.equal(s.store.getModel(model).enabled,false,'the flip is the row, not the echo');
+    const on=await patch(url,{enabled:true});
+    assert.equal(on.status,200);
+    assert.equal(JSON.parse(on.body).enabled,true);
+  }finally{srv.stop()}
+});
 
 // The dashboard renders events with the CLI's own formatters, served from src/
 // rather than copied into web/. If that route stops working the activity tab goes

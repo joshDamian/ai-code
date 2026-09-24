@@ -80,7 +80,11 @@ export const api = {
   providers: () => request('/api/providers'),
   updateProvider: (id, body) => request(`/api/providers/${id}`, { method: 'PATCH', body }),
   testProvider: (id, modelId) => request(`/api/providers/${id}/test`, { method: 'POST', body: { modelId } }),
-  updateModel: (id, body) => request(`/api/models/${id}`, { method: 'PATCH', body }),
+  // Model ids are namespaced with whatever the provider calls the model, and for
+  // OpenRouter that includes a slash (`openrouter:anthropic/claude-opus-5`). Encoded,
+  // it survives as the one path segment the route matches; unencoded, the server sees
+  // a segment it has no route for and answers 404.
+  updateModel: (id, body) => request(`/api/models/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
 
   routing: () => request('/api/routing'),
   saveRouting: (policies) => request('/api/routing', { method: 'PUT', body: policies }),

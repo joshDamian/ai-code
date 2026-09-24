@@ -71,7 +71,12 @@ function ProviderCard({ provider, models, health, onChange }) {
     setTesting(true);
     setTestResult(null);
     try {
-      const r = await api.testProvider(provider.id, models[0] && models[0].id);
+      // The first *enabled* model rather than the first row: a disabled model is one
+      // the router will not reach, and it may be disabled precisely because the
+      // provider stopped serving it - so testing it reports a failure that says
+      // nothing about the provider. The same rule the server falls back on.
+      const target = models.find((m) => m.enabled) || models[0];
+      const r = await api.testProvider(provider.id, target && target.id);
       // A failed test is a 200 carrying {ok:false}, not a rejection, so the result has
       // to be read rather than caught - which is how this toasted success on failure.
       setTestResult({ ok: r.ok, detail: r.ok ? JSON.stringify(r) : r.error });

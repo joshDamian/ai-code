@@ -470,8 +470,11 @@ const server = http.createServer(async (req, res) => {
       return json(res, await svc.testProvider(pt[1], b.modelId));
     }
 
+    // The captured id is decoded because a model id can contain a slash: the client
+    // percent-encodes it to keep it one segment, and `URL.pathname` hands the escape
+    // back unchanged rather than decoding it, so the lookup would miss on `%2F`.
     const mm = u.pathname.match(/^\/api\/models\/([^/]+)$/);
-    if (mm && req.method === 'PATCH') return json(res, svc.updateModel(mm[1], await body(req)));
+    if (mm && req.method === 'PATCH') return json(res, svc.updateModel(decodeURIComponent(mm[1]), await body(req)));
 
     if (u.pathname === '/api/routing') {
       if (req.method === 'GET') return json(res, svc.getRouting());
