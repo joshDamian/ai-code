@@ -293,6 +293,14 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .legend-label{color:var(--text)}
 .legend-value{color:var(--muted);font-variant-numeric:tabular-nums}
 .chart-note{margin:var(--space-3) 0 0;font-size:12px}
+.run-timeline-row{outline:none}
+.run-timeline-row:hover .chart-bar,.run-timeline-row:focus-visible .chart-bar{filter:brightness(1.18)}
+.run-timeline-row:focus-visible{outline:2px solid var(--accent-dim);outline-offset:2px}
+/* The run in flight: dimmed under a slow pulse, so the bar with no end yet is
+   readable as still moving rather than as a run that finished at the axis end. */
+.run-timeline-bar--live{animation:run-timeline-pulse 2s ease-in-out infinite}
+.run-timeline-fallback{opacity:.7}
+@keyframes run-timeline-pulse{0%,100%{opacity:.6}50%{opacity:1}}
 
 /* Refetching keeps the previous render in place at reduced opacity rather than
    flashing a skeleton and jumping the layout. */

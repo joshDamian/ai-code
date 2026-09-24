@@ -1,5 +1,5 @@
 // Full-page task view (not a modal). URL hash: #/tasks/:id
-import { html, useState, useEffect, useRef, useCallback, useMemo, bodyKind, describeEvent, formatDuration } from '../lib.mjs';
+import { html, useState, useEffect, useRef, useCallback, useMemo, bodyKind, describeEvent, formatDuration, formatTokens, formatCost } from '../lib.mjs';
 import { api, taskStreamUrl } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
@@ -8,13 +8,16 @@ import { TextArea, Select } from '../components/form.mjs';
 import { DiffViewer } from '../components/diff-viewer.mjs';
 import { EventStream } from '../components/event-stream.mjs';
 import { Markdown } from '../components/markdown.mjs';
+import { EmptyState } from '../components/empty-state.mjs';
+import { RunTimeline, BarChart, compactNumber } from '../components/chart.mjs';
+import { DataTable } from '../components/data-table.mjs';
 
 // States in which the harness may have an agent mid-flight. This previously listed
 // EXECUTING, which is not a real state (the implementation state is IMPLEMENTING),
 // and omitted TESTING. It also claimed PLANNING, which is usually the opposite:
 // a task parked in PLANNING with no run is waiting for the user to start one.
 const WORKING_STATES = new Set(['IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING']);
-const TABS = ['plan', 'execute', 'review', 'port', 'activity'];
+const TABS = ['plan', 'execute', 'review', 'port', 'stats', 'activity'];
 
 export function TaskDetail({ id, navigate, onTitle }) {
   const [data, setData] = useState(null);
@@ -253,6 +256,7 @@ export function TaskDetail({ id, navigate, onTitle }) {
         ${tab === 'execute' ? html`<${ExecuteTab} task=${task} runs=${runs} busy=${busy} run=${run} live=${live} />` : null}
         ${tab === 'review' ? html`<${ReviewTab} task=${task} busy=${busy} run=${run} live=${live} />` : null}
         ${tab === 'port' ? html`<${PortTab} task=${task} branches=${data.branches || []} busy=${busy} run=${run} />` : null}
+        ${tab === 'stats' ? html`<${StatsTab} runs=${runs} live=${data.live} />` : null}
         ${tab === 'activity' ? html`<${ActivityTab} taskId=${task.id} store=${buffer} />` : null}
       </div>
 
@@ -672,6 +676,212 @@ function ExecuteTab({ task, runs, busy, run, live }) {
             : html`<div class="muted">No runs yet.</div>`
         }
       </div>
+    </div>
+  `;
+}
+
+// A role that ran more than once is numbered, and the number is the run's
+// ordinal within its own role rather than its index in the list: two repairs
+// read as "repair (1)" and "repair (2)" whatever else ran between them. Numbering
+// by index would label the second repair "repair (5)" on a five-run task.
+function roleLabels(runs) {
+  const total = new Map();
+  for (const r of runs) total.set(r.role, (total.get(r.role) || 0) + 1);
+  const seen = new Map();
+  return runs.map((r) => {
+    const n = (seen.get(r.role) || 0) + 1;
+    seen.set(r.role, n);
+    return total.get(r.role) > 1 ? `${r.role} (${n})` : r.role;
+  });
+}
+
+// Compute task-level aggregates from the runs list. `live` is the run in flight:
+// its duration is not written to the row until the run closes, so its elapsed
+// time is added here. Without that the wall clock grows while the active time
+// stands still, and the difference is reported as waiting - during a run, which
+// is the one thing it is not.
+function taskStats(runs, live) {
+  const now = Date.now();
+  let totalCost = 0;
+  let totalTokens = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let activeDuration = 0;
+  let minStart = Infinity;
+  let maxEnd = 0;
+  let succeeded = 0;
+  let failed = 0;
+  let fallbacks = 0;
+
+  for (const r of runs) {
+    totalCost += Number(r.cost) || 0;
+    totalTokens += Number(r.tokens) || 0;
+    inputTokens += Number(r.input_tokens) || 0;
+    outputTokens += Number(r.output_tokens) || 0;
+    activeDuration += Number(r.duration_ms) || 0;
+
+    // A run's end is its own, read the way the timeline reads it: the closed
+    // row's timestamp, or its start plus what it measured. A row that never
+    // closed contributes no span here - the run in flight is added below, from
+    // its lease, where its real start is known.
+    const start = r.started_at ? Date.parse(r.started_at) : now;
+    const end = r.ended_at ? Date.parse(r.ended_at) : start + (Number(r.duration_ms) || 0);
+    minStart = Math.min(minStart, start);
+    maxEnd = Math.max(maxEnd, end);
+
+    if (r.status === 'succeeded') succeeded += 1;
+    else if (r.status === 'failed') failed += 1;
+    if (r.fallback_from) fallbacks += 1;
+  }
+
+  // The run in flight, measured from its start to now. Its own row contributes
+  // nothing above (duration_ms is still 0), which is exactly the gap this fills.
+  if (live && live.startedAt) {
+    const started = Date.parse(live.startedAt);
+    if (!Number.isNaN(started)) {
+      activeDuration += Math.max(0, now - started);
+      minStart = Math.min(minStart, started);
+      maxEnd = Math.max(maxEnd, now);
+    }
+  }
+
+  const wallClockDuration = minStart === Infinity ? 0 : Math.max(0, maxEnd - minStart);
+  const waitingDuration = Math.max(0, wallClockDuration - activeDuration);
+
+  return {
+    cost: totalCost,
+    tokens: totalTokens,
+    inputTokens,
+    outputTokens,
+    activeDuration,
+    wallClockDuration,
+    waitingDuration,
+    succeeded,
+    failed,
+    fallbacks,
+  };
+}
+
+function StatsTab({ runs, live }) {
+  if (!runs || !runs.length) {
+    return html`<${EmptyState} message="No runs yet." />`;
+  }
+
+  const stats = taskStats(runs, live);
+
+  // One bar per run, so a repeated role needs its ordinal to tell the two apart.
+  const labels = roleLabels(runs);
+  const costBars = runs.map((r, i) => ({ label: labels[i], value: Number(r.cost) || 0 }));
+  const tokenBars = runs.map((r, i) => ({ label: labels[i], value: Number(r.tokens) || 0 }));
+
+  // Data table columns and rows
+  const runColumns = [
+    { key: 'role', label: 'Role', sortable: true },
+    {
+      key: 'provider_model',
+      label: 'Provider / Model',
+      sortable: true,
+      // One column over two fields, so it sorts on the rendered pair rather than
+      // on a key no row carries.
+      sortValue: (r) => `${r.provider_id || ''} / ${r.model_id || ''}`,
+      render: (r) => `${r.provider_id || '—'} / ${r.model_id || '—'}`,
+    },
+    { key: 'status', label: 'Status', sortable: true, render: (r) => html`<${StatusBadge} status=${r.status} />` },
+    {
+      key: 'tokens',
+      label: 'Tokens',
+      sortable: true,
+      render: (r) => Number(r.tokens || 0).toLocaleString(),
+    },
+    {
+      key: 'cost',
+      label: 'Cost',
+      sortable: true,
+      render: (r) => `$${Number(r.cost || 0).toFixed(6)}`,
+    },
+    {
+      key: 'duration_ms',
+      label: 'Duration',
+      sortable: true,
+      render: (r) => formatDuration(r.duration_ms || 0),
+    },
+    {
+      key: 'started_at',
+      label: 'Started',
+      sortable: true,
+      render: (r) => (r.started_at ? new Date(r.started_at).toLocaleString() : '—'),
+    },
+  ];
+
+  const runNote = stats.waitingDuration > 0 ? `${formatDuration(stats.waitingDuration)} waiting` : '—';
+
+  return html`
+    <div class="stack">
+      <div class="metric-grid">
+        <div class="card metric-card">
+          <div class="metric-label muted">Total Cost</div>
+          <div class="metric-value">${formatCost(stats.cost)}</div>
+        </div>
+        <div class="card metric-card">
+          <div class="metric-label muted">Total Tokens</div>
+          <div class="metric-value">${Number(stats.tokens).toLocaleString()}</div>
+          <div class="metric-note muted">${formatTokens(stats.inputTokens)} in, ${formatTokens(stats.outputTokens)} out</div>
+        </div>
+        <div class="card metric-card">
+          <div class="metric-label muted">Active Time</div>
+          <div class="metric-value">${formatDuration(stats.activeDuration)}</div>
+        </div>
+        <div class="card metric-card">
+          <div class="metric-label muted">Wall-Clock Time</div>
+          <div class="metric-value">${formatDuration(stats.wallClockDuration)}</div>
+          <div class="metric-note muted">${runNote}</div>
+        </div>
+        <div class="card metric-card">
+          <div class="metric-label muted">Runs</div>
+          <div class="metric-value">${runs.length}</div>
+          <div class="metric-note muted">
+            ${stats.succeeded} succeeded${stats.failed ? `, ${stats.failed} failed` : ''}${stats.fallbacks ? `, ${stats.fallbacks} fallback(s)` : ''}
+          </div>
+        </div>
+      </div>
+
+      <figure class="section card chart-card">
+        <figcaption class="chart-head">
+          <h2>Run Timeline</h2>
+        </figcaption>
+        <${RunTimeline} runs=${runs} live=${live} />
+      </figure>
+
+      <figure class="section card chart-card">
+        <figcaption class="chart-head">
+          <h2>Cost per Run</h2>
+        </figcaption>
+        <${BarChart}
+          items=${costBars}
+          title="Cost per run"
+          ariaLabel=${`Cost per run: ${costBars.map((r) => `${r.label} ${formatCost(r.value)}`).join(', ') || 'no data'}.`}
+          formatValue=${formatCost}
+        />
+      </figure>
+
+      <figure class="section card chart-card">
+        <figcaption class="chart-head">
+          <h2>Tokens per Run</h2>
+        </figcaption>
+        <${BarChart}
+          items=${tokenBars}
+          title="Tokens per run"
+          ariaLabel=${`Tokens per run: ${tokenBars.map((r) => `${r.label} ${compactNumber(r.value)}`).join(', ') || 'no data'}.`}
+          formatValue=${compactNumber}
+        />
+      </figure>
+
+      <section class="section card">
+        <h2>Run Details</h2>
+        <div class="table-scroll">
+          <${DataTable} columns=${runColumns} rows=${runs} rowKey=${(r) => r.id} />
+        </div>
+      </section>
     </div>
   `;
 }
