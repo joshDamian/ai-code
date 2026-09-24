@@ -42,6 +42,12 @@ const sleep = (ms, signal) =>
     else signal.addEventListener('abort', onAbort, { once: true });
   });
 
+// The line the verification prompt opens with, and the only thing that tells the two
+// reviewer jobs apart from the mock's side. Spelled here rather than imported: agents
+// is the module the service imports, so a constant read back the other way is a cycle
+// at module-init time. A test asserts the prompt still opens with it.
+export const VERIFICATION_OPENS = 'Verify a repair, not the implementation.';
+
 // A provider that never leaves the machine. Used by the test suite and by any
 // install that has not configured a real provider yet.
 export async function* runMock(input) {
@@ -132,13 +138,21 @@ export async function* runMock(input) {
   }
   // An implementer's whole job is writing files. The check that follows its run
   // compares the worktree's dirty set against the plan's baseline, and a mock that
-  // cannot write leaves that comparison with nothing to compare. Only that role
-  // writes: a planner or reviewer that did would be the planning violation that
-  // check already exists to catch.
-  for (const file of (input.role === 'implementer' && input.mockWrites) || []) {
+  // cannot write leaves that comparison with nothing to compare. A repair writes for
+  // the same reason - it is the other role with write permission - and the review
+  // that follows one is scoped to exactly these files, so a mock repair that could
+  // not write could not exercise it. A planner or reviewer that wrote would be the
+  // violation those roles exist to catch.
+  //
+  // The two write different text so that a repair over an implementer's file is a
+  // change rather than a rewrite of the same bytes: identical content is what the
+  // workflow now reads as a repair that did nothing, and a mock that could not tell
+  // the two apart could not drive either answer.
+  const wrote = input.mockWriteText || (input.role === 'repair' ? '// repaired by the mock\n' : '// written by the mock implementer\n');
+  for (const file of ((input.role === 'implementer' || input.role === 'repair') && input.mockWrites) || []) {
     const dest = path.join(agentCwd(input), file);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, '// written by the mock implementer\n');
+    fs.writeFileSync(dest, wrote);
   }
   if (input.role === 'chat') {
     // Overridable like the planner's, and for a stronger reason: what a chat
@@ -153,7 +167,17 @@ export async function* runMock(input) {
     // no-op refine is deliberately not recorded as a revision at all.
     yield { type: 'message', data: input.mockPlanText || 'Proposed plan: inspect the relevant module, make the smallest change, add/update tests, run verification.' };
   } else if (input.role === 'reviewer') {
-    const text = input.mockReviewText || 'Review complete: compare implementation against the approved plan and test results.';
+    // The verification is answered separately, because it is the only shape the
+    // workflow has: a repair exists because a review failed, so the run after one is
+    // never the run before it. The prompt is what tells them apart, and this is the
+    // line the verification prompt opens with - pinned to service.mjs's
+    // `verificationPrompt` by a test, since a mock that stopped matching it would
+    // answer every review the same way and every test of the loop would pass for the
+    // wrong reason.
+    // Matched anywhere, not at the start: the prompt this sees is the assembled one,
+    // the role's own text sitting under TASK and INSTRUCTIONS rather than opening it.
+    const verifying = String(input.prompt || '').includes(VERIFICATION_OPENS);
+    const text = (verifying ? input.mockVerifyText : input.mockReviewText) || 'Review complete: compare implementation against the approved plan and test results.';
     yield { type: 'message', data: text };
     // The verdict rides on a result frame, which is where --json-schema puts it
     // for a real provider. A test therefore drives the decision through the same
@@ -162,7 +186,7 @@ export async function* runMock(input) {
     // finalText still resolves to the prose rather than to this frame.
     yield {
       type: 'result',
-      data: { structured_output: { verdict: input.mockReviewVerdict || 'PASS', review: text } },
+      data: { structured_output: { verdict: (verifying ? input.mockVerifyVerdict : input.mockReviewVerdict) || 'PASS', review: text } },
     };
   } else {
     yield { type: 'message', data: `${input.role} completed.` };
@@ -566,9 +590,12 @@ export async function* runAgent(provider, model, input) {
         mockStallMs: provider.config.stallMs || 0,
         mockReadPaths: provider.config.readPaths || [],
         mockWrites: provider.config.writes || [],
+        mockWriteText: provider.config.writeText || null,
         mockUsage: provider.config.usage || null,
         mockReviewText: provider.config.reviewText || null,
         mockReviewVerdict: provider.config.reviewVerdict || null,
+        mockVerifyText: provider.config.verifyText || null,
+        mockVerifyVerdict: provider.config.verifyVerdict || null,
         mockPlanText: provider.config.planText || null,
         mockChatText: provider.config.chatText || null,
         mockFailure: provider.config.failRoles?.includes(input.role) ? 'SIMULATED_FAILURE' : null,

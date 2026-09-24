@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,PLANNER_PROMPT,CHAT_PROMPT,reviewerPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,PLANNER_PROMPT,CHAT_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -43,6 +43,76 @@ test('a verdict outside the schema leaves the task reviewable rather than repair
   assert.equal(s.structuredOutput(planner.id),null,'a run with no structured output has no verdict');
   await assert.rejects(()=>s.execute(t.id),/no structured verdict/i);
   assert.equal(s.task(t.id).state,'REVIEWING');
+});
+
+// -- the review that follows a repair -------------------------------------
+//
+// The repair loop's second review used to be a second first review: the same
+// prompt over the same diff, with the findings the repair was acting on arriving
+// only as the context assembler's `review` section, which is the first rung
+// trimmed under a budget. These cover the narrower job and the case it exists to
+// stop - a repair that changed nothing, which a reviewer can only answer by
+// failing for the same findings again.
+
+test('the review that follows a repair verifies the findings rather than reviewing again',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  s.updateProvider('mock',{config:{writes:['app.mjs'],reviewText:'Item 3 is not implemented.',reviewVerdict:'FAIL',verifyText:'Item 3 is implemented now, and nothing else moved.',verifyVerdict:'PASS'}});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');
+  const prompts=[];const real=s.runRole.bind(s);
+  s.runRole=(task,role,prompt,...rest)=>{if(role==='reviewer')prompts.push(prompt);return real(task,role,prompt,...rest)};
+  s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  const reviewed=await s.execute(t.id);
+  assert.equal(reviewed.state,'REPAIRING');
+  const done=await s.repair(t.id);
+  assert.equal(prompts.length,2,'the repair is verified once, not reviewed twice');
+  assert.doesNotMatch(prompts[0],/Verify a repair/,'the first review is the full one');
+  assert.match(prompts[1],/Verify a repair/);
+  assert.match(prompts[1],/Item 3 is not implemented\./,'the verification is handed the findings it is checking');
+  assert.match(prompts[1],/^app\.mjs$/m,'and the files the repair changed');
+  assert.match(prompts[1],/passed\./,'and the test result it is judged on');
+  assert.equal(done.state,'COMPLETE');
+  assert.equal(done.review,'Item 3 is implemented now, and nothing else moved.');
+});
+
+test('a repair that changed nothing is not reviewed again',async()=>{
+  // The findings name files that are already dirty, so a repair can run to
+  // completion and leave the worktree exactly as it found it. A reviewer sent in
+  // would spend a whole review arriving at that, and fail for the same findings:
+  // that is a repair loop, not a repair. The task rests in REVIEWING, where one
+  // more Review click is the full review over the work as it stands.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  s.updateProvider('mock',{config:{reviewText:'Item 3 is not implemented.',reviewVerdict:'FAIL'}});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  await s.execute(t.id);
+  const done=await s.repair(t.id);
+  assert.equal(done.state,'REVIEWING');
+  assert.match(done.review,/changed nothing/);
+  assert.match(done.review,/Item 3 is not implemented\./,'the findings are still what a reader is sent to fix');
+  assert.equal(s.store.listRuns(t.id).filter(r=>r.role==='reviewer').length,1,'no second review was run');
+});
+
+test('the verification prompt carries what the reviewer has to check',()=>{
+  // The clauses the exchange rests on, pinned the way the planner's and the chat's
+  // are: the findings and the delta are in the prompt rather than in a section the
+  // assembler may drop, and the verdict is the validated field rather than a word
+  // read out of the reply.
+  const prompt=verificationPrompt({findings:'Item 3 is not implemented.',changed:['a.mjs','b.mjs'],test:'`npm test` passed.',diff:'--- a.mjs'});
+  assert.ok(prompt.startsWith(VERIFICATION_OPENS),'the mock tells a verification from a review by this line');
+  assert.match(prompt,/Item 3 is not implemented\./);
+  assert.match(prompt,/a\.mjs\nb\.mjs/);
+  assert.match(prompt,/`npm test` passed\./);
+  assert.match(prompt,/`verdict` field of your structured output/);
+  assert.doesNotMatch(prompt,/Review this implementation independently/);
+  assert.match(verificationPrompt({findings:'x',changed:['a.mjs'],test:null,diff:''}),/No test command is configured/);
+});
+
+test('the delta between two worktree snapshots counts a reverted file as a change',()=>{
+  assert.deepEqual(changedPaths({a:'1',b:'2'},{a:'1',b:'3',c:'4'}),['b','c'],'an edit and a new file');
+  assert.deepEqual(changedPaths({a:'1'},{}),['a'],'a repair that reverted a file did something');
+  assert.deepEqual(changedPaths({},{a:'1'}),['a']);
+  assert.deepEqual(changedPaths({a:'1'},{a:'1'}),[],'a rewrite that changed no bytes is not a change');
 });
 
 test('only the reviewer is asked for a structured verdict',()=>{

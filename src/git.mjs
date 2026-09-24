@@ -17,6 +17,35 @@ export function diffAgainst(dir,ref){return git(dir,['diff','--no-color',ref])}
 // rather than in the one a port wrote. Read from the repository rather than from a
 // worktree, because the branch outlives the directory it was cut into.
 export function diffBetween(root,from,to){return git(root,['diff','--no-color',from,to])}
+// The same diff, narrowed to named paths. What one agent's turn changed, told apart
+// from the work its predecessors left in the same worktree: a repair is verified
+// against its own part of the tree, and handing it the whole diff again is what made
+// the review that followed a repair a second review of everything. An untracked path
+// carries no diff at all, which is why the caller keeps the status lines - they are
+// the only thing that names a file the turn created.
+export function diffPaths(dir,ref,paths){return paths.length?git(dir,['diff','--no-color',ref,'--',...paths]):''}
+// The content of every path the worktree has changed, keyed by path. The dirty set
+// alone cannot say whether anything moved between two moments: the files a repair is
+// sent to fix are dirty before it starts, so a name list that reads the same
+// afterwards is exactly the state a repair that did nothing leaves behind. Hashes
+// rather than mtimes, because an editor rewrite that changes nothing is not a change.
+//
+// One `hash-object` for the whole set rather than one per file: a repair is bracketed
+// by two of these, and a worktree with a hundred dirty paths would otherwise pay two
+// hundred process spawns for a fact a single call answers.
+// NULL when git will not hash the set at all - a submodule path, a file removed
+// underneath the call - because one unhashable path fails the batch for every path
+// in it. The caller reads null as "not measured" and falls back to what it did
+// before there was a delta, rather than failing a repair that has already run.
+export function worktreeHashes(dir){
+const paths=dirtyPaths(dir);
+if(!paths.length)return{};
+try{const shas=git(dir,['hash-object','--',...paths]).split('\n');
+return Object.fromEntries(paths.map((p,i)=>[p,shas[i]]))}catch{return null}}
+// The difference between two of those, either way: a path the agent edited or
+// created, and one it reverted to HEAD. Both are it having done something, and both
+// belong in the delta a review of that turn reads.
+export function changedPaths(before,after){return[...new Set([...Object.keys(before),...Object.keys(after)])].filter((p)=>before[p]!==after[p]).sort()}
 // The porcelain tail that used to be appended to the diff. Kept separate because
 // it is not a diff: it is the only thing that names an untracked file at all,
 // since no diff carries one's contents.

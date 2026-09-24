@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { Store } from './store.mjs';
 import { inspect, writeContext, readDependencies, relevantFiles, buildTaskContext, contextConfig, estimateTokens, treeOnlyContext } from './context.mjs';
 import {
-  ensureGit, status, createWorktree, diffAgainst, diffBetween, statusPaths, untracked, dirtyPaths, head, changedBetween, protectAiCode,
+  ensureGit, status, createWorktree, diffAgainst, diffBetween, diffPaths, statusPaths, untracked, dirtyPaths, worktreeHashes, changedPaths, head, changedBetween, protectAiCode,
   currentBranch, revParse, isAncestor, mergeBase, findCommit, branches, checkedOut, mergeTree, commitTree, setBranch, commitAll, removeWorktree, commitDiff,
   landingCommit, commitRef,
 } from './git.mjs';
@@ -154,14 +154,19 @@ function recordPlanBase(store, root, task, runId, dirty) {
 // handed to a reviewer is a PASS on nothing at all. Against the base it is the same
 // string before and after a commit. The porcelain tail is kept because it is the
 // only thing that names an untracked file, since no diff carries one's contents.
-function worktreeDiff(dir, task) {
+// `paths` narrows the diff to those paths and leaves the status tail whole: they are
+// the files one agent's turn changed, which is what the review that follows a repair
+// verifies. The tail is not narrowed with them because it is where an untracked file
+// appears at all - a file the repair created has no diff to be in.
+function worktreeDiff(dir, task, paths = null) {
   // base_commit is the recorded cut point. merge-base is the fallback for when it
   // no longer resolves, and HEAD is the last resort - uncommitted work only, which
   // is what the index-relative read this replaces used to give.
   const base = task.base_commit && revParse(dir, task.base_commit)
     ? task.base_commit
     : mergeBase(dir, 'HEAD', task.branch) || 'HEAD';
-  return diffAgainst(dir, base) + '\n' + statusPaths(dir).join('\n');
+  const body = paths && paths.length ? diffPaths(dir, base, paths) : diffAgainst(dir, base);
+  return (body ? body + '\n' : '') + statusPaths(dir).join('\n');
 }
 
 // What a person still has to run for the work to reach the destination, derived from
@@ -364,6 +369,27 @@ const BUDGET_CODES = new Set(['TOOL_CALL_LIMIT', 'COST_LIMIT']);
 // having a test pin, and a prompt buried in a call site is not inspectable.
 export const reviewerPrompt = (diff) =>
   `Review this implementation independently. Return a clear verdict: PASS or FAIL. If FAIL, list concrete findings mapped to the approved plan and test evidence. Do not modify files. No tool that writes a file exists in this session, and the verdict is not read from your reply: it is the \`verdict\` field of your structured output, with the review itself in \`review\`.\n\nDIFF:\n${diff}`;
+
+// The reviewer's second job, which is smaller than its first. After a repair the
+// question is not whether the implementation is right - a review already answered
+// that and named what was wrong - but whether those findings were answered and
+// whether answering them broke something the review did not know about. Handing the
+// second review the first one's prompt made it a second first review: on 2026-09-24
+// the review that followed the repair of bb9ac058 cost $0.2573 and 393s against the
+// $0.0147 and 89s of the repair it was checking, re-deriving from the plan and the
+// whole diff what a paragraph of findings already said.
+//
+// The findings are written into the prompt rather than left to the assembler's
+// `review` section, which is where they come from today. That section is the first
+// rung trimmed under a token budget (src/context.mjs), so the one run whose entire
+// purpose is the findings can arrive without them and fall back to reviewing the
+// repository on nothing but the diff.
+//
+// Everything else about the exchange is the reviewer's: the same read-only session,
+// the same schema, the same verdict field. This is a prompt, not a second role - a
+// repair that judged its own fix would be the one thing the loop exists to prevent.
+export const verificationPrompt = ({ findings, changed, test, diff }) =>
+  `Verify a repair, not the implementation. A review found what is listed under FINDINGS and another agent changed the worktree to answer it. Say whether each finding is answered, and whether the repair broke something the review did not know about; do not re-review what the findings do not touch. Do not modify files. No tool that writes a file exists in this session, and the verdict is not read from your reply: it is the \`verdict\` field of your structured output, with the verification itself in \`review\`. PASS only if every finding is answered, FAIL if any is still open or the repair introduced a fault.\n\nFINDINGS:\n${findings}\n\nCHANGED SINCE THE FINDINGS WERE WRITTEN (${changed.length} file${changed.length === 1 ? '' : 's'}):\n${changed.join('\n')}\n\nTEST RESULT:\n${test || 'No test command is configured for this project.'}\n\nDIFF OF THOSE FILES (the rest of the worktree is unchanged since the review; an untracked file carries no diff at all, so read one whose change is not shown above rather than assuming it did not change):\n${diff}`;
 
 export const PLANNER_PROMPT =
   'Produce ONLY a concrete implementation plan. Do not modify source files, create files, run mutating commands, commit, or execute implementation. No tool that writes a file exists in this session - not to the repository, not to a scratch directory, not to a plans folder - and searching for one wastes a turn. The plan is the text of your reply. Identify exact files, intended changes, tests, and verification commands. The harness will reject source changes. If the task is already fully implemented in the current codebase, say so instead of planning work: name the files that already satisfy each requirement and say why no further changes are needed. Do not invent work that does not exist.';
@@ -1065,17 +1091,26 @@ export class Service {
     }
   }
 
-  async review(id) {
+  // `verification` is set by repair() and by nothing else: it is the findings that
+  // repair was answering, the paths it changed, and the test result - everything the
+  // second review has that the first one did not. A review called without it is the
+  // full one, which is what the CLI, the queue and a human's Review click all want.
+  async review(id, verification = null) {
     const t = this.task(id);
     if (t.state !== 'REVIEWING') throw new Error('Task must be in REVIEWING');
     // REVIEWING lasts for the whole review, so the state guard above admits a second
     // one. Two reviewers over one worktree race to write `review` and to move the
     // task, and the loser's transition comes out of a state the winner chose.
     this.#assertIdle(id, 'reviewing', { job: false });
-    const d = worktreeDiff(t.worktree, t);
+    const d = worktreeDiff(t.worktree, t, verification && verification.changed);
     const before = status(t.worktree);
     try {
-      const r = await this.runRole(t, 'reviewer', reviewerPrompt(d), t.worktree);
+      const r = await this.runRole(
+        t,
+        'reviewer',
+        verification ? verificationPrompt({ ...verification, diff: d }) : reviewerPrompt(d),
+        t.worktree
+      );
       const after = status(t.worktree);
       if (before !== after) this.store.updateTask(id, { review: 'REVIEW_VIOLATION: reviewer changed worktree state' });
       // The verdict is the field the harness validated, not a word in the reply.
@@ -1117,16 +1152,51 @@ export class Service {
     // edits are not measured for violations, so the second would write on top of the
     // first with neither aware of the other.
     this.#assertIdle(id, 'repairing', { job: false });
+    // What the repair actually did, measured rather than assumed. The findings it is
+    // working from name files that are already dirty, so a dirty set read again
+    // afterwards says nothing about whether it acted on them; hashes do. The two
+    // snapshots answer the case this workflow has no other answer for - a repair that
+    // changed nothing - and scope the review that follows to the repair's own part of
+    // the tree. NULL is git refusing to hash the tree at all, and reads as unmeasured:
+    // a repair is not failed over a measurement, and an unmeasured delta makes the
+    // review that follows the full one, which is what it was before there was a delta.
+    const before = worktreeHashes(t.worktree);
+    const findings = t.review || 'Review failed.';
     try {
-      await this.runRole(t, 'repair', `Repair the review findings in the worktree. Re-run relevant tests after fixing. Review findings:\n${t.review || 'Review failed.'}`, t.worktree);
+      await this.runRole(t, 'repair', `Repair the review findings in the worktree. Re-run relevant tests after fixing. Review findings:\n${findings}`, t.worktree);
     } catch (e) {
       if (e.code === 'CANCELLED') this.transition(id, 'REVIEWING');
       throw e;
     }
     this.transition(id, 'TESTING');
-    await this.test(this.task(id), t.worktree);
+    const command = this.project(t.project_id).commands.test;
+    const result = await this.test(this.task(id), t.worktree);
+    const after = worktreeHashes(t.worktree);
+    const changed = before && after ? changedPaths(before, after) : null;
+    if (changed && !changed.length) {
+      // Nothing changed, so nothing was answered. A reviewer sent in would spend a
+      // whole review arriving at that, and its verdict would be FAIL for the same
+      // findings - which is a repair loop, not a repair. The task rests where a test
+      // run leaves it, in REVIEWING and reviewable, and the reason is written down:
+      // one more Review click runs the full review over whatever the repair left.
+      this.transition(id, 'REVIEWING');
+      this.store.updateTask(id, {
+        review: `The repair changed nothing in the worktree, so these findings are unanswered and no review was run. Review again to review the work as it stands.\n\n${findings}`,
+      });
+      return this.task(id);
+    }
     this.transition(id, 'REVIEWING');
-    return this.review(id);
+    if (!changed) return this.review(id);
+    // The test command's own result is what the verification is given, not the
+    // trace: whether the suite passed is the evidence a repair is judged on, and a
+    // reviewer that has to infer it from a diff is a reviewer reading everything
+    // again. A failing suite never reaches here - test() throws and the task stays
+    // in TESTING.
+    return this.review(id, {
+      findings,
+      changed,
+      test: command && result.passed ? `\`${command}\` passed.` : null,
+    });
   }
 
   // -- porting --------------------------------------------------------------

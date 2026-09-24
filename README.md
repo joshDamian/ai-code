@@ -176,16 +176,24 @@ Background jobs are recorded in the `jobs` table and survive a restart as `inter
 
 `Ctrl-C` on the dashboard stops the queue, aborts every run in flight, and waits briefly for the detached agent processes to exit before closing. Without that the agents outlive the server with nothing watching them.
 
+### Review and repair
+
+A review that fails sends the task to repair, and the repair ends by asking the reviewer again — but not the same question. The second review is a verification: its prompt carries the findings the repair was acting on, the files that changed, and the result of the test command, and the diff is narrowed to those files. That is the whole difference from the first review, which has nothing to check the implementation against but the plan. The findings are named in the prompt rather than left to the context assembler's `review` section, which is the first thing trimmed under a token budget.
+
+The repair is measured rather than believed. The worktree is hashed before the repair and again after it, and a repair that changed no file is not reviewed at all: a reviewer sent in would spend a whole review arriving at that and fail for the same findings, which is a repair loop rather than a repair. The task rests in `REVIEWING` with the reason in its `review` field, where one more Review click runs the full review over the work as it stands. A repair that did change files leaves the task `COMPLETE` on a passing verification and `REPAIRING` on a failing one, as before.
+
 ### Per-role budgets
 
-Every role has a wall-clock timeout and two spend budgets, all set per role in `.ai-code/routing.json`:
+Every role has a wall-clock timeout, two spend budgets and a subagent exemption, all set per role in `.ai-code/routing.json`:
 
-| Role | `timeout` | `maxToolCalls` | `maxRunCost` |
-|---|---|---|---|
-| planner | 300s | 40 | $1.00 |
-| implementer | 600s | 200 | $5.00 |
-| reviewer | 300s | 40 | $1.00 |
-| repair | 600s | 200 | $5.00 |
+| Role | `timeout` | `maxToolCalls` | `maxRunCost` | `subagentWait` |
+|---|---|---|---|---|
+| planner | 900s | 40 | $1.00 | 600s |
+| implementer | 600s | 200 | $5.00 | 600s |
+| reviewer | 900s | 40 | $1.00 | 600s |
+| repair | 600s | 200 | $5.00 | 600s |
+
+`subagentWait` is the wall clock a run may spend inside subagent calls without being charged for it: the spawn is the agent's own decision, but what happens inside it is another agent's work on another lifetime, which the parent can neither see nor bound. It is a cap and not a discount, and it covers an agent spawn rather than a Bash command — a command the run is waiting on is its own tool call, counted against it already.
 
 A wall clock does not stop an agent that stays busy the whole time, which is how a planning run once spent three and a half minutes and $2.21 re-reading a codebase. The two spend budgets are checked as each event arrives, and the run is aborted the moment it crosses either. The provider is not penalised — it answered every call correctly — and no fallback is attempted, because the next provider would spend the same budget to reach the same place. A planning run that hits a budget leaves its task `FAILED`, ready to replan with a narrower description or a larger budget.
 
