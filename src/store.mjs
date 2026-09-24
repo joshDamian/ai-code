@@ -40,6 +40,26 @@ export class Store {
       -- finished jobs stay as history and thousands of them share a task id.
       CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL,error TEXT,created_at TEXT NOT NULL,started_at TEXT,ended_at TEXT);
       CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active ON jobs(task_id) WHERE state IN ('queued','running');
+      -- A direct conversation with the project, which is not a task: it has no
+      -- state machine, no plan, no worktree and no approval gate. Its own tables
+      -- rather than rows in the tasks table, because a task row is what every list
+      -- product filters on and a chat has no state to filter by.
+      CREATE TABLE IF NOT EXISTS chat_sessions(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,title TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      -- run_id on a user message names the run that will answer it; on an
+      -- assistant message it names the run that produced it. That pairing is the
+      -- whole of "is this question still waiting", and it is how a stream finds
+      -- the live run's events from the database rather than from one process's
+      -- memory. No foreign key: a question whose run never started still has to
+      -- be readable, and its own row is what says so.
+      CREATE TABLE IF NOT EXISTS chat_messages(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,run_id TEXT,created_at TEXT NOT NULL);
+      -- A chat turn's run row, which is not a task's run and so is not a row in
+      -- the runs table. Every surface that reads runs asks a task-keyed question
+      -- of it - the usage page, the runs list, a task's own history, the live-run
+      -- lookup - and a row there belonging to no task is a row each of them has to
+      -- know to exclude. The columns are the same set as runs, so the writer in
+      -- runRole hands the same row to either table; task_id becomes
+      -- chat_session_id, which is the conversation the turn belongs to.
+      CREATE TABLE IF NOT EXISTS chat_runs(id TEXT PRIMARY KEY,chat_session_id TEXT NOT NULL,role TEXT,provider_id TEXT,model_id TEXT,status TEXT,started_at TEXT,ended_at TEXT,error TEXT,fallback_from TEXT,tokens INTEGER DEFAULT 0,cost REAL DEFAULT 0,duration_ms INTEGER DEFAULT 0,session_id TEXT,input_tokens INTEGER DEFAULT 0,output_tokens INTEGER DEFAULT 0,cache_read_tokens INTEGER DEFAULT 0,cache_write_tokens INTEGER DEFAULT 0,cost_basis TEXT,context_tokens INTEGER DEFAULT 0,relevant_files INTEGER DEFAULT 0,context_budget INTEGER DEFAULT 0,context_state TEXT);
     `);
     for (const [table, columns] of Object.entries({
       tasks: [
@@ -144,12 +164,23 @@ export class Store {
   reapStaleRuns() {
     const cutoff = new Date(Date.now() - LEASE_STALE_MS).toISOString();
     this.db.prepare('DELETE FROM run_leases WHERE heartbeat_at < ?').run(cutoff);
+    const now = new Date().toISOString();
     this.db
       .prepare(
         `UPDATE runs SET status='interrupted',ended_at=?,error='Process interrupted'
          WHERE status='running' AND id NOT IN (SELECT run_id FROM run_leases)`
       )
-      .run(new Date().toISOString());
+      .run(now);
+    // The same reaping for a chat turn, which holds a lease of its own. The lease
+    // going stale is what says the process running it is gone, and the row is the
+    // turn's own record: left saying 'running' it reports a turn that is over as
+    // one still in flight.
+    this.db
+      .prepare(
+        `UPDATE chat_runs SET status='interrupted',ended_at=?,error='Process interrupted'
+         WHERE status='running' AND id NOT IN (SELECT run_id FROM run_leases)`
+      )
+      .run(now);
   }
 
   id() {
@@ -194,6 +225,14 @@ export class Store {
   liveRunIds() {
     const cutoff = new Date(Date.now() - LEASE_STALE_MS).toISOString();
     return this.db.prepare('SELECT run_id FROM run_leases WHERE heartbeat_at >= ?').all(cutoff).map((r) => r.run_id);
+  }
+
+  // Whether one run is still held. `liveRun` cannot answer this: it is keyed on a
+  // task id, and a chat run has no task to be keyed on. The chat stream is the
+  // caller - it watches a run by its id and needs to know when to stop.
+  hasLiveLease(runId) {
+    const cutoff = new Date(Date.now() - LEASE_STALE_MS).toISOString();
+    return !!this.db.prepare('SELECT 1 x FROM run_leases WHERE run_id=? AND heartbeat_at>=?').get(runId, cutoff);
   }
 
   requestCancel(taskId) {
@@ -464,12 +503,20 @@ export class Store {
   // slot forever.
   countRunningByProvider() {
     const cutoff = new Date(Date.now() - LEASE_STALE_MS).toISOString();
+    // A chat turn's run is counted too. It is an agent talking to the provider
+    // exactly as a task's is - which is what this limit is about, since a gateway
+    // fronting one subscription cannot serve two - so counting only `runs` would
+    // let a chat and an implementer both start against a provider that allows one.
     return this.db
       .prepare(
-        `SELECT r.provider_id pid,count(*) c FROM runs r
-         JOIN run_leases l ON l.run_id=r.id
-         WHERE l.heartbeat_at>=?
-         GROUP BY r.provider_id`
+        `SELECT provider_id pid,count(*) c FROM (
+           SELECT r.provider_id AS provider_id,l.heartbeat_at AS heartbeat_at FROM runs r
+             JOIN run_leases l ON l.run_id=r.id
+           UNION ALL
+           SELECT c.provider_id,l.heartbeat_at FROM chat_runs c
+             JOIN run_leases l ON l.run_id=c.id
+         ) WHERE heartbeat_at>=?
+         GROUP BY provider_id`
       )
       .all(cutoff);
   }
@@ -602,13 +649,18 @@ export class Store {
   }
 
   // Failures in the window that are the provider's fault, counted from the runs
-  // table. role<>'provider-test' keeps the "Test connection" button from ever
+  // tables. role<>'provider-test' keeps the "Test connection" button from ever
   // tripping the breaker it is trying to inspect.
+  //
+  // A chat turn's failure counts here too: the breaker exists to notice a provider
+  // that is refusing work, and a provider refusing chats is exactly that. The
+  // union is over the two tables rather than over `runs` alone because a chat run
+  // is not a task's run - see chat_runs.
   countRecentFailures(providerId, sinceIso, codes = COUNTED_CODES) {
     const clause = codes.map(() => 'error LIKE ?').join(' OR ');
     return this.db
       .prepare(
-        `SELECT count(*) c FROM runs
+        `SELECT count(*) c FROM (${this.failureRows()})
           WHERE provider_id=? AND status='failed' AND ended_at>=? AND role<>'provider-test'
             AND (${clause})`
       )
@@ -621,13 +673,21 @@ export class Store {
     const clause = codes.map(() => 'error LIKE ?').join(' OR ');
     const rows = this.db
       .prepare(
-        `SELECT provider_id, count(*) c FROM runs
+        `SELECT provider_id, count(*) c FROM (${this.failureRows()})
           WHERE status='failed' AND ended_at>=? AND role<>'provider-test'
             AND (${clause})
           GROUP BY provider_id`
       )
       .all(sinceIso, ...codes.map((c) => `${c} %`));
     return new Map(rows.map((r) => [r.provider_id, r.c]));
+  }
+
+  // The columns the failure window is counted from, over both tables that record
+  // an attempt. `chat_runs.role` is a literal so the two halves line up.
+  failureRows() {
+    return `SELECT provider_id,status,ended_at,error,role FROM runs
+            UNION ALL
+            SELECT provider_id,status,ended_at,error,'chat' AS role FROM chat_runs`;
   }
 
   // What routing should believe about every provider right now.
@@ -679,6 +739,140 @@ export class Store {
         h.last_failure_at ?? null, h.last_success_at ?? null
       );
     return h;
+  }
+
+  // -- chat -----------------------------------------------------------------
+  // A conversation is ordered by insertion, and `chat_messages.id` is a uuid, so
+  // the order is the rowid. It is returned as `seq` for the same reason `events`
+  // returns its autoincrement id: a stream that reconnects needs a cursor, and a
+  // uuid cannot be one. The `*` is expanded first so an explicit column list
+  // would shadow nothing - `seq` is the only added name.
+
+  createChatSession({ id, projectId, title }) {
+    const now = new Date().toISOString();
+    this.db.prepare('INSERT INTO chat_sessions(id,project_id,title,created_at,updated_at) VALUES(?,?,?,?,?)').run(id, projectId, title, now, now);
+    return this.getChatSession(id);
+  }
+
+  getChatSession(id) {
+    return this.db.prepare('SELECT * FROM chat_sessions WHERE id=?').get(id) || null;
+  }
+
+  listChatSessions(projectId) {
+    const q = projectId
+      ? 'SELECT * FROM chat_sessions WHERE project_id=? ORDER BY updated_at DESC'
+      : 'SELECT * FROM chat_sessions ORDER BY updated_at DESC';
+    return this.db.prepare(q).all(...(projectId ? [projectId] : []));
+  }
+
+  updateChatSession(id, patch) {
+    const s = this.getChatSession(id);
+    if (!s) return null;
+    const n = { ...s, ...patch, updated_at: new Date().toISOString() };
+    this.db.prepare('UPDATE chat_sessions SET title=?,updated_at=? WHERE id=?').run(n.title, n.updated_at, id);
+    return this.getChatSession(id);
+  }
+
+  getChatMessage(id) {
+    return this.db.prepare('SELECT rowid AS seq,* FROM chat_messages WHERE id=?').get(id) || null;
+  }
+
+  // Writing a message is also what makes its conversation current: the session
+  // list is ordered by `updated_at`, and a chat whose newest reply is an hour old
+  // would otherwise sort as though nothing had been said.
+  addChatMessage(m) {
+    const now = new Date().toISOString();
+    this.db.prepare('INSERT INTO chat_messages(id,session_id,role,content,run_id,created_at) VALUES(?,?,?,?,?,?)').run(m.id, m.sessionId, m.role, m.content, m.runId ?? null, now);
+    this.db.prepare('UPDATE chat_sessions SET updated_at=? WHERE id=?').run(now, m.sessionId);
+    return this.getChatMessage(m.id);
+  }
+
+  listChatMessages(sessionId, afterSeq = 0) {
+    return this.db.prepare('SELECT rowid AS seq,* FROM chat_messages WHERE session_id=? AND rowid>? ORDER BY rowid').all(sessionId, afterSeq);
+  }
+
+  // The question a run is about to answer, or null when every question has been
+  // answered. `IS` rather than `=` so the comparison is null-safe: a question
+  // written without a run id is waiting on nothing, and `= NULL` would make it
+  // invisible to this query rather than pending in it.
+  pendingChatMessage(sessionId) {
+    return (
+      this.db
+        .prepare(
+          `SELECT rowid AS seq,* FROM chat_messages m
+            WHERE m.session_id=? AND m.role='user'
+              AND NOT EXISTS (SELECT 1 FROM chat_messages a WHERE a.session_id=m.session_id AND a.role='assistant' AND a.run_id IS m.run_id)
+            ORDER BY m.rowid DESC LIMIT 1`
+        )
+        .get(sessionId) || null
+    );
+  }
+
+  // Points a waiting question at a different run. A run that fails and falls back
+  // hands the question over rather than answering it, and the question has to
+  // follow: the column is what pairs a reply with the question it answers, so a
+  // question left naming the run that died would be waiting forever for a reply
+  // that is stored against a different id.
+  retargetChatQuestion(sessionId, fromRunId, toRunId) {
+    return this.db
+      .prepare(`UPDATE chat_messages SET run_id=? WHERE session_id=? AND role='user' AND run_id=?`)
+      .run(toRunId, sessionId, fromRunId).changes;
+  }
+
+  // -- chat runs ------------------------------------------------------------
+  // The same writer shape as addRun/updateRun above, pointed at the chat table.
+  // They are two methods rather than one that takes a table name because the two
+  // rows mean different things: `runs.task_id` is the task the attempt belongs
+  // to, and `chat_runs.chat_session_id` is the conversation it answers.
+
+  addChatRun(r, chatSessionId) {
+    this.db
+      .prepare(
+        `INSERT INTO chat_runs(id,chat_session_id,role,provider_id,model_id,status,started_at,ended_at,error,fallback_from,
+           tokens,cost,duration_ms,session_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,
+           cost_basis,context_tokens,relevant_files,context_budget,context_state)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        r.id, chatSessionId, r.role, r.providerId, r.modelId, r.status, r.startedAt,
+        null, null, r.fallbackFrom ?? null,
+        0, 0, 0, null, 0, 0, 0, 0,
+        null,
+        r.contextTokens ?? 0, r.relevantFiles ?? 0, r.contextBudget ?? 0, r.contextState ?? null
+      );
+    return r;
+  }
+
+  updateChatRun(id, patch) {
+    const p = patch.status === 'succeeded' && !('error' in patch) ? { ...patch, error: null } : patch;
+    const r = this.db.prepare('SELECT * FROM chat_runs WHERE id=?').get(id);
+    if (!r) return null;
+    const n = { ...r, ...p };
+    this.db
+      .prepare(
+        `UPDATE chat_runs SET status=?,ended_at=?,error=?,fallback_from=?,tokens=?,cost=?,duration_ms=?,session_id=?,
+           input_tokens=?,output_tokens=?,cache_read_tokens=?,cache_write_tokens=?,cost_basis=?,
+           context_tokens=?,relevant_files=?,context_budget=?,context_state=? WHERE id=?`
+      )
+      .run(
+        n.status, n.ended_at ?? null, n.error ?? null, n.fallback_from ?? null, n.tokens ?? 0, n.cost ?? 0,
+        n.duration_ms ?? 0, n.session_id ?? null, n.input_tokens ?? 0, n.output_tokens ?? 0,
+        n.cache_read_tokens ?? 0, n.cache_write_tokens ?? 0, n.cost_basis ?? null,
+        n.context_tokens ?? 0, n.relevant_files ?? 0, n.context_budget ?? 0, n.context_state ?? null,
+        id
+      );
+    return n;
+  }
+
+  getChatRun(id) {
+    return this.db.prepare('SELECT * FROM chat_runs WHERE id=?').get(id) || null;
+  }
+
+  listChatRuns(sessionId) {
+    const q = sessionId
+      ? 'SELECT * FROM chat_runs WHERE chat_session_id=? ORDER BY started_at'
+      : 'SELECT * FROM chat_runs ORDER BY started_at';
+    return this.db.prepare(q).all(...(sessionId ? [sessionId] : []));
   }
 
   // -- events ---------------------------------------------------------------

@@ -33,7 +33,15 @@ export const transitions = {
 };
 
 // Which capability a role requires a model to declare.
-const capability = { planner: 'planning', implementer: 'coding', reviewer: 'review', repair: 'repair' };
+//
+// `chat` asks for `planning` rather than a capability of its own. The catalog's
+// capabilities are what a model *can do*, and every model that can plan a
+// repository can answer a question about it; a `chat` capability would be a
+// second name for the same ability, and one no model row carries - so routing
+// would find an empty chain and every question would fail with "no available
+// model capable of chat". It is the same read-only reasoning over the same tree,
+// which is why the planner's capability is the honest one to require.
+const capability = { planner: 'planning', implementer: 'coding', reviewer: 'review', repair: 'repair', chat: 'planning' };
 
 // The tools whose input names something the planner read. A file it opened is a
 // file whose uncommitted changes the plan may quietly rest on; a path it recorded
@@ -294,11 +302,19 @@ const reasoningFloor = {
   implementer: ['basic', 'moderate', 'strong', 'frontier'],
   reviewer: ['moderate', 'strong', 'frontier'],
   repair: ['basic', 'moderate', 'strong', 'frontier'],
+  // The planner's floor. Answering a question about a repository is the same
+  // reading job planning is, and a cheap model guessing at architecture it cannot
+  // follow is the failure this floor exists to prevent. It is a cost decision
+  // rather than a safety one, and it is overridable in routing.json's `chat`
+  // block like every other role's policy.
+  chat: ['strong', 'frontier'],
 };
 
 // A model that cannot call tools cannot edit files or run commands, which is the
 // whole of the implementer and repair jobs. Only these two roles need the gate;
-// a planner or reviewer is deliberately denied tools.
+// a planner or reviewer is deliberately denied tools, and a chat answers with the
+// read-only set the planner gets - so a model without tool use is still a usable
+// chat model, and everything it says comes from the context it was handed.
 const TOOL_ROLES = new Set(['implementer', 'repair']);
 
 // How often a running role redraws its spinner, refreshes its lease, and checks
@@ -351,6 +367,42 @@ export const reviewerPrompt = (diff) =>
 
 export const PLANNER_PROMPT =
   'Produce ONLY a concrete implementation plan. Do not modify source files, create files, run mutating commands, commit, or execute implementation. No tool that writes a file exists in this session - not to the repository, not to a scratch directory, not to a plans folder - and searching for one wastes a turn. The plan is the text of your reply. Identify exact files, intended changes, tests, and verification commands. The harness will reject source changes. If the task is already fully implemented in the current codebase, say so instead of planning work: name the files that already satisfy each requirement and say why no further changes are needed. Do not invent work that does not exist.';
+
+// A direct question about the project. Named and exported for the same reason
+// PLANNER_PROMPT is: it carries the harness's promises to the model, and a test
+// that pins them is the only thing that keeps them from being edited away.
+//
+// Two clauses are the planner's, and both are load-bearing here for the same
+// reasons. The file-writing one because a chat runs under the same plan mode,
+// whose system prompt asks for a plan file that the denied tools cannot write -
+// every question would pay for a doomed Write and a search for a tool to replace
+// it. The "do not invent work" one because "what should we do about X" is a
+// question the honest answer to is often "nothing", and a model with no way to
+// say so answers with a change nobody asked for.
+//
+// The last line is the one a question has that a plan does not: a plan is
+// measured against a task description, and a question can simply be vague.
+export const CHAT_PROMPT =
+  'Answer the question about this project. You are read-only: do not modify source files, create files, run mutating commands, or commit. No tool that writes a file exists in this session - not to the repository, not to a scratch directory, not to a plans folder - and searching for one wastes a turn. The answer is the text of your reply. Ground every claim in the files you were shown or in what you read with a tool, and name the paths you relied on, because a reader will check them. If the honest answer is that nothing needs to change, say so plainly and say why: do not invent work that does not exist, and do not propose a change nobody asked for. If the question is ambiguous, answer the reading you believe was meant and say which one you took.';
+
+// The question is the `TASK` half of the prompt runRole builds, so only what came
+// before it belongs here. A first question has no history and gets the prompt
+// alone rather than an empty section heading.
+function chatPrompt(history) {
+  return history ? `${CHAT_PROMPT}\n\nCONVERSATION SO FAR, oldest first:\n\n${history}` : CHAT_PROMPT;
+}
+
+// The first question names the conversation, so a list of them reads as its
+// subjects without the user having to name anything. A chat has no title field
+// in the UI, and "New chat" four times over is a list nobody can navigate.
+const DEFAULT_CHAT_TITLE = 'New chat';
+
+// How much of a conversation is replayed into the next question. A chat has no
+// natural end, so the whole history in every request is a cost that grows with
+// the conversation - and a long one would eventually be refused outright by the
+// context check rather than trimmed. Newest last, so the recency that matters is
+// the part that survives the cut.
+const CHAT_HISTORY_CHARS = 24000;
 
 // One assistant message can carry several tool calls at once, so the content
 // blocks are counted rather than the messages that contain them.
@@ -458,6 +510,10 @@ export class Service {
     // Assigned by the server once a Runner exists. Null everywhere else, which is
     // what makes `eligible()` behave exactly as it did before the queue existed.
     this.runner = null;
+    // The chat sessions this process is answering right now. A chat run carries
+    // no task id, so there is nothing in the lease table to key this on - an
+    // in-process guard on purpose, with the job row holding off a second server.
+    this.chatBusy = new Set();
     // Opening a store is also the only repair opportunity there is: the process
     // that abandoned a run is gone, and this is what picks up after it. Every
     // command does this, which is what makes the recovery reachable at all - and
@@ -769,6 +825,106 @@ export class Service {
     this.#assertIdle(id, 'editing the plan');
     this.#writePlan(id, plan, t.plan);
     return this.task(id);
+  }
+
+  // -- direct chat ----------------------------------------------------------
+
+  createChatSession(projectId, title) {
+    this.project(projectId);
+    return this.store.createChatSession({
+      id: this.store.id(),
+      projectId,
+      title: String(title || '').trim() || DEFAULT_CHAT_TITLE,
+    });
+  }
+
+  chatSession(id) {
+    const s = this.store.getChatSession(id);
+    if (!s) throw new Error('Chat session not found');
+    return s;
+  }
+
+  // The question, written down before anything runs, so a reload mid-answer shows
+  // what was asked and a reader can tell a question that is still waiting from one
+  // nobody ever asked.
+  //
+  // The run id is minted here rather than inside runRole, and that is the point of
+  // this method: the question carries the id of the run that will answer it, which
+  // is how any process - not just the one that started the run - can find the live
+  // run's events, and how "still waiting" is answered from the database alone.
+  askChat(sessionId, text) {
+    const session = this.chatSession(sessionId);
+    const runId = this.store.id();
+    const message = this.store.addChatMessage({ id: this.store.id(), sessionId, role: 'user', content: text, runId });
+    if (session.title === DEFAULT_CHAT_TITLE) this.store.updateChatSession(sessionId, { title: generateTitle(text) });
+    return message;
+  }
+
+  // One turn: the question waiting in this session, answered and stored.
+  //
+  // `message` is optional because there are two ways in and they must not be two
+  // code paths. The dashboard writes the question and queues a job, and the Runner
+  // calls this with nothing to say - the question is already in the table. A caller
+  // driving the turn itself (a test, a script) hands the text over and this writes
+  // it first.
+  async chat(sessionId, { message } = {}) {
+    if (message && message.trim()) this.askChat(sessionId, message.trim());
+    const session = this.chatSession(sessionId);
+    const pending = this.store.pendingChatMessage(sessionId);
+    if (!pending) throw new Error('This chat has no question waiting for an answer');
+    // A turn at a time per conversation. Two runs reading the same history and
+    // both appending to it is a duplicated answer at best, and a second question
+    // answered against the wrong transcript at worst.
+    if (this.chatBusy.has(sessionId)) throw new Error('This chat is already answering a question');
+    this.chatBusy.add(sessionId);
+    try {
+      const project = this.project(session.project_id);
+      const result = await this.runRole(
+        // A chat's run belongs to no task, and `runRole` writes it to `chat_runs`
+        // rather than to `runs` - see the chatSessionId option below. So this
+        // object is not a task row and is not read as one: it is what `runRole`
+        // reads for the prompt, which is the question as the task text.
+        {
+          id: null,
+          project_id: session.project_id,
+          title: pending.content,
+          description: pending.content,
+          // The prompt shape runRole builds has a plan section in it. A chat has
+          // none, and the honest text is why rather than a plan that does not exist.
+          plan: 'No plan: this is a direct question about the project, not a task. Nothing here has been approved for implementation.',
+        },
+        'chat',
+        chatPrompt(this.#chatHistory(sessionId, pending.run_id)),
+        // The project root and no worktree, named explicitly: `cwd` absent means
+        // "inherit the server's own directory", which is a different claim about
+        // the tree the agent may read.
+        project.path,
+        [],
+        // `chatSessionId` is what routes the run's rows to `chat_runs` instead of
+        // `runs`; `runId` is minted by askChat, because the question carries the id
+        // of the run that will answer it.
+        { runId: pending.run_id, chatSessionId: sessionId }
+      );
+      const answer = this.finalText(result.runId).trim() || 'The model returned no answer. Inspect the run events before asking again.';
+      return this.store.addChatMessage({ id: this.store.id(), sessionId, role: 'assistant', content: answer, runId: result.runId });
+    } finally {
+      this.chatBusy.delete(sessionId);
+    }
+  }
+
+  // The conversation so far, as the model will read it, oldest first. The question
+  // this run is about to answer is excluded - it is the `TASK` half of the prompt,
+  // and repeating it under `CONVERSATION` would have the model reading its own
+  // question twice and answering the copy.
+  #chatHistory(sessionId, runId) {
+    const prior = this.store.listChatMessages(sessionId).filter((m) => m.run_id !== runId);
+    const lines = prior.map((m) => `${m.role === 'user' ? 'USER' : 'ASSISTANT'}: ${m.content}`);
+    let text = '';
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (text.length + lines[i].length > CHAT_HISTORY_CHARS) break;
+      text = text ? `${lines[i]}\n\n${text}` : lines[i];
+    }
+    return text;
   }
 
   // -- execution ------------------------------------------------------------
@@ -1736,7 +1892,18 @@ export class Service {
   // Runs one agent role, walking the fallback chain until one attempt succeeds.
   // Every attempt is its own run row and its own lease, so a failure is recorded
   // rather than retried invisibly.
-  async runRole(task, role, prompt, cwd, excluded = []) {
+  // `options.runId` names the run before it exists. One caller needs that: a chat
+  // question is stored with the id of the run that will answer it, so the run id
+  // has to be known before the run starts. Nothing else passes it, and a caller
+  // that does not gets the id minted here as it always was. It names the first
+  // attempt only - a fallback is a run of its own, and the waiting question is
+  // moved onto it so the id it carries is always the run answering it.
+  //
+  // `options.chatSessionId` says this run answers a conversation rather than a
+  // task, which is what decides the table its row is written to. It is the one
+  // option that changes where the bookkeeping goes, so it is named for the thing
+  // the row belongs to rather than for the role, which is `chat` either way.
+  async runRole(task, role, prompt, cwd, excluded = [], options = {}) {
     let last;
     let previous = null;
     let resumeSession = this.resumeCandidate(task, role);
@@ -1744,6 +1911,17 @@ export class Service {
     // two runs sharing the server's stderr would interleave their spinners.
     const quiet = this.options.silent || this.quiet;
     const log = quiet ? () => {} : (m) => process.stderr.write(`  [${role}] ${m}\n`);
+    // Where this attempt's row goes. A chat turn is not a task's run, so its
+    // bookkeeping is written to `chat_runs` rather than to `runs` - the same row
+    // shape in the table of the conversation it answers. `options.chatSessionId`
+    // is what says so, and it is also what the row records, so a caller cannot
+    // route the writes somewhere the row does not name.
+    const chat = options.chatSessionId || null;
+    const addRun = (row) => (chat ? this.store.addChatRun(row, chat) : this.store.addRun(row));
+    const updateRun = (id, patch) => (chat ? this.store.updateChatRun(id, patch) : this.store.updateRun(id, patch));
+    // The run the conversation's waiting question names, kept current as one
+    // attempt hands the turn to the next.
+    let turnRunId = chat ? options.runId || null : null;
 
     for (let attempt = 0; attempt < 8; attempt++) {
       let p, m, healthForced;
@@ -1764,8 +1942,13 @@ export class Service {
       const maxRunCost = budgetOf(policy.maxRunCost);
       log(`${m.displayName || m.name} via ${p.name}${previous ? ' (fallback)' : ''}${healthForced ? ' (all providers unhealthy; retrying anyway)' : ''}`);
 
-      const run = this.store.addRun({
-        id: this.store.id(),
+      const run = addRun({
+        // The question a chat is answering carries the id of the run that will
+        // answer it, so the first attempt is that run. A fallback is a run of its
+        // own - its own row, its own lease, so the failure that caused it stays
+        // recorded rather than being overwritten - and the question is moved onto
+        // it below.
+        id: !previous && options.runId ? options.runId : this.store.id(),
         taskId: task.id,
         role,
         providerId: p.id,
@@ -1774,6 +1957,14 @@ export class Service {
         startedAt: new Date().toISOString(),
         fallbackFrom: previous,
       });
+      // A handover, in the same order it happened: this attempt owns the turn now,
+      // so the waiting question names it before the run can produce anything. The
+      // chat stream reads the column every tick, which is how a reader who was
+      // already watching follows the turn onto the fallback.
+      if (chat) {
+        if (turnRunId && turnRunId !== run.id) this.store.retargetChatQuestion(chat, turnRunId, run.id);
+        turnRunId = run.id;
+      }
       const started = Date.now();
       let sessionId = null;
       let approxTokens = 0;
@@ -1817,7 +2008,7 @@ export class Service {
         // What this attempt actually cost before the model said a word. Recorded
         // even when the run then fails, because the number is what the next
         // attempt's context check has to reason about.
-        this.store.updateRun(run.id, {
+        updateRun(run.id, {
           context_tokens: needTokens,
           relevant_files: context.manifest.files.length,
           context_budget: context.manifest.budget,
@@ -1968,7 +2159,7 @@ export class Service {
         // it reported none at all.
         const priced = this.price(m, usage, new Date(run.started_at || run.startedAt || new Date()).toISOString());
         const spent = this.#usagePatch(priced, usage, approxTokens);
-        this.store.updateRun(run.id, {
+        updateRun(run.id, {
           status: 'succeeded',
           ended_at: new Date().toISOString(),
           duration_ms: Date.now() - started,
@@ -2000,7 +2191,7 @@ export class Service {
         if (code === 'CANCELLED') {
           // A cancel is not a provider fault, so the provider is not penalised and
           // no fallback is attempted. The caller decides what the task state becomes.
-          this.store.updateRun(run.id, {
+          updateRun(run.id, {
             status: 'cancelled',
             ended_at: new Date().toISOString(),
             error: 'Cancelled by user',
@@ -2014,7 +2205,7 @@ export class Service {
           throw e;
         }
 
-        this.store.updateRun(run.id, {
+        updateRun(run.id, {
           status: 'failed',
           ended_at: new Date().toISOString(),
           error: `${code} ${e.message}`,

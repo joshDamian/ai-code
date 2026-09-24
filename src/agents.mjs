@@ -131,7 +131,13 @@ export async function* runMock(input) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, '// written by the mock implementer\n');
   }
-  if (input.role === 'planner') {
+  if (input.role === 'chat') {
+    // Overridable like the planner's, and for a stronger reason: what a chat
+    // answers is stored as the assistant's turn, so a fixed string would make
+    // every conversation's transcript identical and no test could tell a reply
+    // that was stored from one that was dropped.
+    yield { type: 'message', data: input.mockChatText || 'Chat answer: the files above are the ones that matter here.' };
+  } else if (input.role === 'planner') {
     // Overridable for the same reason the reviewer's verdict is: the plan a refine
     // returns has to be able to differ from the plan it was given, or nothing can test
     // what a revision is - the fixed string would make every refine a no-op, and a
@@ -203,15 +209,22 @@ export const REVIEWER_SCHEMA = {
   additionalProperties: false,
 };
 
-// The permission flags are the whole safety story: a planner or reviewer may not
-// write, and only an implementation role may run commands without prompting.
+// The permission flags are the whole safety story: a planner, a chat or a
+// reviewer may not write, and only an implementation role may run commands
+// without prompting.
 // Built here rather than inside runClaude so the argv is a value a test can read
 // without spawning an agent.
 export function claudeArgs(input) {
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
   if (input.model) args.push('--model', input.model);
   if (input.effort) args.push('--effort', input.effort);
-  if (input.role === 'planner') {
+  // The role list is an allowlist of read-only roles and the branch below is what
+  // makes it one: every role not named here lands on `--dangerously-skip-permissions`.
+  // So a new role added to the service is a role with write access until it is
+  // named here, which is the wrong default for the one that is only allowed to
+  // answer questions. A chat answers from the repository it may not change, so it
+  // is denied exactly what the planner is denied.
+  if (input.role === 'planner' || input.role === 'chat') {
     args.push('--permission-mode', 'plan', '--disallowedTools', 'Edit', 'Write', 'Bash');
     args.push('--append-system-prompt', READ_ONLY_NOTICE);
   } else if (input.role === 'reviewer') {
@@ -547,6 +560,7 @@ export async function* runAgent(provider, model, input) {
         mockReviewText: provider.config.reviewText || null,
         mockReviewVerdict: provider.config.reviewVerdict || null,
         mockPlanText: provider.config.planText || null,
+        mockChatText: provider.config.chatText || null,
         mockFailure: provider.config.failRoles?.includes(input.role) ? 'SIMULATED_FAILURE' : null,
       })
     );

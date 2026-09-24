@@ -135,6 +135,29 @@ test('the dashboard pins the markdown renderer and the sanitiser beside it',asyn
   }finally{s.stop()}
 });
 
+test('the chat view resolves the project the route does not hand it',async()=>{
+  // There is no DOM harness here - preact and htm arrive through the import map, so
+  // nothing in this suite can render a view - which is how a view that can never
+  // create anything stays green. Asserting the served asset says what it must is the
+  // check the markdown pin above makes, and this is the thing it has to say: a
+  // conversation belongs to a project, the route passes none down, so the view has
+  // to load the list itself or New Chat is a button that cannot fire.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-view-'));const s=await startServer(root);
+  try{
+    const r=await get(`${s.base}/views/chat.mjs`);
+    assert.equal(r.status,200);
+    assert.match(r.body,/\.projects\(\)/,'the view loads the projects it has to choose from');
+    assert.match(r.body,/api\.chatSessions\(projectId\)/,"and asks for that project's conversations, not every project's");
+    assert.match(r.body,/api\.createChatSession\(projectId/,'a conversation is created in the project that was chosen');
+    // And the route and the nav entry, without which the view is not reachable at all.
+    const app=await get(`${s.base}/app.mjs`);
+    assert.equal(app.status,200);
+    assert.match(app.body,/from '\.\/views\/chat\.mjs'/);
+    assert.match(app.body,/case 'chat-detail'/);
+    assert.match(app.body,/c: '#\/chat'/);
+  }finally{s.stop()}
+});
+
 test('a background job stops when cancelled from another process and the stream ends with it',async()=>{
   const {root,taskId}=seeded();
   const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
@@ -382,3 +405,62 @@ test('GET /api/tasks?state=CANCELLED returns closed tasks',async()=>{const root=
 test('close refuses a task with a run in flight',async()=>{const {root,taskId}=seeded();const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{await post(`${server.base}/api/tasks/${taskId}/plan`);await post(`${server.base}/api/tasks/${taskId}/approve`);const reading=stream(`${server.base}/api/tasks/${taskId}/stream`,25000);const queued=await post(`${server.base}/api/tasks/${taskId}/execute/background`);await new Promise(r=>setTimeout(r,500));const closeR=await post(`${server.base}/api/tasks/${taskId}/close`);assert.equal(closeR.status,400);assert.match(JSON.parse(closeR.body).error,/task cancel/);await post(`${server.base}/api/tasks/${taskId}/cancel`);const closeR2=await post(`${server.base}/api/tasks/${taskId}/close`);assert.equal(closeR2.status,200)}finally{server.stop()}});
 
 test('ai-code task close exits 0 and prints CANCELLED state',async()=>{const {root,taskId}=seeded();const r=await new Promise((res)=>{const p=spawn(process.execPath,[cliPath,'task','close',taskId],{cwd:root,stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});assert.equal(r.code,0);assert.match(r.out,/CANCELLED/)});
+
+test('POST /api/chat/sessions creates a new chat',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-'));git(root,['init','-q']);fs.writeFileSync(path.join(root,'README.md'),'x');git(root,['add','.']);git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);const s=new Service(root,{allowMock:true,silent:true});const p=s.initProject('p',root);const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{const r=await post(`${srv.base}/api/chat/sessions`,{projectId:p.id});assert.equal(r.status,201);const body=JSON.parse(r.body);assert.ok(body.id);assert.equal(body.project_id,p.id);assert.equal(body.title,'New chat')}finally{srv.stop()}});
+
+test('POST /api/chat/sessions/:id/messages queues a job and returns 202',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-msg-'));git(root,['init','-q']);fs.writeFileSync(path.join(root,'README.md'),'x');git(root,['add','.']);git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);const s=new Service(root,{allowMock:true,silent:true});const p=s.initProject('p',root);s.updateProvider('mock',{enabled:false});s.addProvider({id:'chat-provider',name:'Chat',kind:'mock',enabled:true,config:{routable:true,chatText:'Answer to the question.'}});s.addModel({id:'chat-m',providerId:'chat-provider',name:'chat',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{const createResp=await post(`${srv.base}/api/chat/sessions`,{projectId:p.id});const session=JSON.parse(createResp.body);const msgResp=await post(`${srv.base}/api/chat/sessions/${session.id}/messages`,{message:'What is in this repo?'});assert.equal(msgResp.status,202);const body=JSON.parse(msgResp.body);assert.ok(body.message);assert.equal(body.message.role,'user');assert.equal(body.message.content,'What is in this repo?');assert.ok(body.job);assert.equal(body.job.kind,'chat')}finally{srv.stop()}});
+
+
+test('POST /api/chat/sessions/:id/messages returns 409 while answering',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-busy-'));git(root,['init','-q']);fs.writeFileSync(path.join(root,'README.md'),'x');git(root,['add','.']);git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);const s=new Service(root,{allowMock:true,silent:true});const p=s.initProject('p',root);s.updateProvider('mock',{enabled:false});s.addProvider({id:'chat-provider',name:'Chat',kind:'mock',enabled:true,config:{routable:true,delayMs:500,chatText:'Slow answer.'}});s.addModel({id:'chat-m',providerId:'chat-provider',name:'chat',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{const createResp=await post(`${srv.base}/api/chat/sessions`,{projectId:p.id});const session=JSON.parse(createResp.body);await post(`${srv.base}/api/chat/sessions/${session.id}/messages`,{message:'First question?'});await new Promise(r=>setTimeout(r,100));const secondResp=await post(`${srv.base}/api/chat/sessions/${session.id}/messages`,{message:'Second question?'});assert.equal(secondResp.status,409);assert.match(JSON.parse(secondResp.body).error,/already answering/)}finally{srv.stop()}});
+
+// The whole turn over HTTP: a question posted, a stream open while it is answered,
+// the answer stored, and the bookkeeping kept out of the two surfaces a task's run
+// is counted on. The unit suite drives `Service.chat` directly, so nothing else
+// would notice a route that answered on one path and stored on another.
+test('a chat question is answered over HTTP, and its turn is not a task run',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-e2e-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'a task that is not this chat');
+  s.updateProvider('mock',{enabled:false});
+  // Slow enough that a 500ms stream tick lands inside the turn. The stream ends on
+  // `answering` going false after having been seen true, so a mock that answered in
+  // one tick would leave it waiting on a state it never observed.
+  s.addProvider({id:'chat-provider',name:'Chat',kind:'mock',enabled:true,config:{routable:true,delayMs:1200,chatText:'The queue lives in src/runner.mjs.'}});
+  s.addModel({id:'chat-m',providerId:'chat-provider',name:'chat',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const session=JSON.parse((await post(`${srv.base}/api/chat/sessions`,{projectId:p.id})).body);
+    // Opened before the question is asked, which is the browser's own order and the
+    // only one in which the stream can watch the turn arrive.
+    const reading=stream(`${srv.base}/api/chat/sessions/${session.id}/stream`,25000);
+    const asked=await post(`${srv.base}/api/chat/sessions/${session.id}/messages`,{message:'Where does the queue live?'});
+    assert.equal(asked.status,202);
+    const fr=frames((await reading).body);
+    const answer=fr.filter(f=>f.type==='message'&&f.data?.role==='assistant').pop();
+    assert.ok(answer,'the stream carries the answer it was opened for');
+    assert.equal(answer.data.content,'The queue lives in src/runner.mjs.');
+    assert.ok(fr.some(f=>f.type==='state'&&f.data.answering===true),'the stream reported the turn in flight before it ended');
+    // Stored through the HTTP path, which is what a reload reads back.
+    const shown=JSON.parse((await get(`${srv.base}/api/chat/sessions/${session.id}`)).body);
+    assert.deepEqual(shown.messages.map(m=>[m.role,m.content]),[['user','Where does the queue live?'],['assistant','The queue lives in src/runner.mjs.']]);
+    assert.equal(shown.session.title,'Where does the queue live?');
+    // The two surfaces the plan named, read over the API a browser reads them from:
+    // a chat turn is a run of no task, so neither counts it.
+    assert.deepEqual(JSON.parse((await get(`${srv.base}/api/runs`)).body),[]);
+    assert.deepEqual(JSON.parse((await get(`${srv.base}/api/runs?taskId=${t.id}`)).body),[]);
+    const usage=JSON.parse((await get(`${srv.base}/api/usage?period=all`)).body);
+    assert.equal(usage.totals.runs,0,'the usage page is the record of what tasks spent');
+    assert.equal(usage.by_role.some(r=>r.role==='chat'),false);
+    // And the turn is accounted for where the conversation reads it, so the spend
+    // is recorded rather than dropped on the floor by the move.
+    const turn=new Service(root,{allowMock:true,silent:true}).store.listChatRuns(session.id);
+    assert.equal(turn.length,1);
+    assert.equal(turn[0].role,'chat');
+    assert.equal(turn[0].status,'succeeded');
+  }finally{srv.stop()}
+});
