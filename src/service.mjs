@@ -28,7 +28,7 @@ export const transitions = {
   REVIEWING: ['COMPLETE', 'REPAIRING', 'FAILED', 'CANCELLED'],
   REPAIRING: ['TESTING', 'FAILED', 'REVIEWING', 'CANCELLED'],
   COMPLETE: [],
-  FAILED: ['PLANNING', 'CANCELLED'],
+  FAILED: ['PLANNING', 'TESTING', 'CANCELLED'],
   CANCELLED: [],
 };
 
@@ -834,6 +834,14 @@ export class Service {
     // the task would otherwise carry a baseline for a plan that no longer exists.
     this.store.updateTask(id, { plan: null, plan_prev: null, plan_at: null, review: null, worktree: null, branch: null, base_commit: null, plan_base: null });
     return this.transition(id, 'PLANNING');
+  }
+
+  retry(id) {
+    const t = this.task(id);
+    if (t.state !== 'FAILED') throw new Error('Can only retry when FAILED');
+    if (!t.worktree || !fs.existsSync(t.worktree)) throw new Error('No worktree to retry — use replan instead');
+    this.store.updateTask(id, { review: null });
+    return this.transition(id, 'TESTING');
   }
 
   async refine(id, feedback) {

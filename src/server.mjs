@@ -328,6 +328,7 @@ const server = http.createServer(async (req, res) => {
         : op === 'repair' ? await svc.repair(id)
         : op === 'reject' ? svc.reject(id)
         : op === 'replan' ? svc.replan(id)
+        : op === 'retry' ? svc.retry(id)
         : op === 'cancel' ? svc.cancelTask(id)
         : op === 'close' ? svc.closeTask(id)
         : null;

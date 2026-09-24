@@ -586,6 +586,7 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
         task.state === 'FAILED'
           ? html`
               <div class="row">
+                ${task.worktree ? html`<button class="btn" disabled=${busy} onClick=${() => run(() => api.taskRetry(task.id), 'Retrying...')}>Retry Tests</button>` : null}
                 <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskReplan(task.id), 'Replanning...')}>Replan</button>
               </div>
             `
@@ -623,7 +624,9 @@ function nextStep(task, live, ported) {
     case 'COMPLETE':
       return ported ? null : { tab: 'port', text: 'Review passed.', cta: 'Port this change' };
     case 'FAILED':
-      return { tab: 'plan', text: 'The last run failed.', cta: 'View details' };
+      return task.worktree
+        ? { tab: 'execute', text: 'Tests failed.', cta: 'Retry tests' }
+        : { tab: 'plan', text: 'The last run failed.', cta: 'View details' };
     default:
       return null;
   }

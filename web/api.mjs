@@ -65,6 +65,7 @@ export const api = {
   taskRepair: (id) => request(`/api/tasks/${id}/repair`, { method: 'POST' }),
   taskReject: (id) => request(`/api/tasks/${id}/reject`, { method: 'POST' }),
   taskReplan: (id) => request(`/api/tasks/${id}/replan`, { method: 'POST' }),
+  taskRetry: (id) => request(`/api/tasks/${id}/retry`, { method: 'POST' }),
   taskRefine: (id, feedback) => request(`/api/tasks/${id}/refine`, { method: 'POST', body: { feedback } }),
   taskCancel: (id) => request(`/api/tasks/${id}/cancel`, { method: 'POST' }),
   taskClose: (id) => request(`/api/tasks/${id}/close`, { method: 'POST' }),
