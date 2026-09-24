@@ -73,6 +73,11 @@ function shellEnv() {
   // all.
   env.TERM = 'xterm-256color';
   env.COLORTERM = 'truecolor';
+  // Shell integrations (Ghostty, iTerm2, etc.) key off TERM_PROGRAM to inject hooks
+  // that query the real terminal for colors, cursor shape, etc. xterm.js doesn't
+  // answer those queries, so the responses render as visible garbage.
+  delete env.TERM_PROGRAM;
+  delete env.TERM_PROGRAM_VERSION;
   return env;
 }
 
