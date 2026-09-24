@@ -7,6 +7,11 @@ STAMP="$(date +%Y%m%d%H%M%S)"
 RELEASE="$RELEASE_ROOT/$STAMP"
 mkdir -p "$DEST" "$RELEASE_ROOT" "$RELEASE"
 ( cd "$ROOT" && tar --exclude='./.ai-code' --exclude='./node_modules' --exclude='./.git' -cf - . ) | ( cd "$RELEASE" && tar -xf - )
+( cd "$RELEASE" && npm install --omit=dev --ignore-scripts && node -e "
+  const fs = require('fs'), p = require('path');
+  const h = p.join(__dirname, 'node_modules/node-pty/prebuilds', process.platform + '-' + process.arch, 'spawn-helper');
+  try { if (!(fs.statSync(h).mode & 0o111)) fs.chmodSync(h, 0o755); } catch {}
+" )
 cat > "$DEST/ai-code" <<SCRIPT
 #!/bin/sh
 exec node "$RELEASE/src/cli.mjs" "\$@"
