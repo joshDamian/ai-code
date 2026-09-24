@@ -561,3 +561,157 @@ function legendLabel(series, key) {
   const found = series.find((s) => s.key === key);
   return found ? found.label : key;
 }
+
+/* ------------------------------------------------------- run timeline */
+
+function formatDurationShort(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  return `${h}h`;
+}
+
+// A run label is "role · model", and it is drawn, not laid out: SVG text has no
+// ellipsis and no wrapping. 6.6px is the widest an average character of the 12px
+// .chart-cat face reaches, so the label is cut to the width it has. The cut is
+// display only - the row's own title and the tooltip carry the whole string.
+const CAT_CHAR = 6.6;
+function clipLabel(text, px) {
+  const max = Math.max(4, Math.floor(px / CAT_CHAR));
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+// One bar per run, positioned on a shared time axis: a bar's x is where the run
+// sat in the task's life and its width is how long it took, so the gaps between
+// runs read as plainly as the runs themselves - which is the one thing the run
+// list and the totals cannot show. The label sits above its bar the way
+// BarChart's does, because the bar's left edge is data and cannot double as a
+// fixed text gutter.
+//
+// Hovering or focusing a row reads it out - role, model, duration, cost, tokens,
+// and the provider it fell back from - so the bar's length never has to be
+// decoded from the axis alone. `live` is the run in flight, whose bar is drawn
+// from its start to now.
+export function RunTimeline({ runs = [], live = null, height = 22 }) {
+  const [ref, width] = useWidth(360);
+  const [hover, setHover] = useState(null);
+
+  if (!runs.length) return html`<div class="chart-figure" ref=${ref}><${NoData} /></div>`;
+
+  const now = Date.now();
+  const liveId = live && live.runId;
+
+  // A closed run carries both ends. The run in flight carries neither, so it is
+  // drawn to now - the one bar whose right edge is not on its row yet. A row
+  // with no end and no duration never closed at all (an interrupted run), and is
+  // drawn at its floor width rather than stretched across the axis to now.
+  const startOf = (r) => (r.started_at ? Date.parse(r.started_at) : now);
+  const endOf = (r, start) => {
+    if (liveId && r.id === liveId) return now;
+    if (r.ended_at) return Date.parse(r.ended_at);
+    return start + (Number(r.duration_ms) || 0);
+  };
+
+  const starts = runs.map(startOf);
+  const ends = runs.map((r, i) => Math.max(starts[i], endOf(r, starts[i])));
+  const minTime = Math.min(...starts);
+  const span = Math.max(...ends) - minTime;
+  const timeRange = Math.max(span, 1);
+
+  const padX = 4;
+  const plotW = Math.max(16, width - padX * 2);
+  const labelBand = 18; // the label line above each bar
+  const rowHeight = height + labelBand + 8;
+  const svgH = runs.length * rowHeight + 4;
+
+  const xs = starts.map((s) => padX + ((s - minTime) / timeRange) * plotW);
+  const ws = runs.map((r, i) => Math.max(3, ((ends[i] - starts[i]) / timeRange) * plotW));
+
+  // Colour follows the role, through the same slot table the legend charts use,
+  // so "repair" is one hue wherever it is drawn. A role past the last slot folds
+  // to "Other", which is why the lookup goes through keyOf rather than the role.
+  const { series: roleSeries, keyOf } = seriesSlots([...new Set(runs.map((r) => r.role))], (role) => role);
+  const slotColor = new Map(roleSeries.map((s) => [s.key, s.color]));
+  const colorOf = (role) => slotColor.get(keyOf.get(role)) || chartColor(0);
+
+  const labelOf = (run) => `${run.role}${run.model_id ? ` · ${run.model_id}` : ''}`;
+  const active = hover == null ? null : runs[hover];
+  const tipHalf = Math.min(120, Math.max(48, width / 2 - 4));
+  const tipX = active ? Math.min(Math.max(xs[hover] + ws[hover] / 2, tipHalf), Math.max(tipHalf, width - tipHalf)) : 0;
+  const tipTop = active ? hover * rowHeight : 0;
+
+  return html`
+    <div class="chart-figure" ref=${ref}>
+      <svg
+        width=${width}
+        height=${svgH}
+        viewBox="0 0 ${width} ${svgH}"
+        role="img"
+        aria-label=${`Run timeline: ${runs.length} run${runs.length === 1 ? '' : 's'} over ${formatDurationShort(span)}. ${runs.map(labelOf).join(', ')}.`}
+        class="chart-svg"
+      >
+        <title>Task run timeline</title>
+        ${runs.map((run, i) => {
+          const top = i * rowHeight;
+          const duration = ends[i] - starts[i];
+          const isLive = run.id === liveId;
+          const label = labelOf(run);
+
+          return html`
+            <g
+              key=${run.id}
+              class="run-timeline-row"
+              tabindex="0"
+              onMouseEnter=${() => setHover(i)}
+              onMouseMove=${() => setHover(i)}
+              onMouseLeave=${() => setHover(null)}
+              onFocus=${() => setHover(i)}
+              onBlur=${() => setHover(null)}
+            >
+              <title>${`${label}: ${formatDurationShort(duration)}${run.fallback_from ? `, fallback from ${run.fallback_from}` : ''}`}</title>
+              <rect class="chart-hit" x="0" y=${top} width=${width} height=${rowHeight} fill="transparent" />
+              <text x=${padX} y=${top + 13} class="chart-cat">${clipLabel(label, plotW)}</text>
+              <path
+                d=${barPath(xs[i], top + labelBand, ws[i], height, 4)}
+                style=${{ fill: colorOf(run.role), opacity: isLive ? 0.6 : 1 }}
+                class="chart-bar ${isLive ? 'run-timeline-bar--live' : ''}"
+              />
+              ${
+                run.fallback_from
+                  ? html`<line
+                      class="run-timeline-fallback"
+                      x1=${xs[i]}
+                      y1=${top + labelBand}
+                      x2=${xs[i]}
+                      y2=${top + labelBand + height}
+                      style=${{ stroke: AXIS }}
+                      stroke-width="2"
+                      stroke-dasharray="2,2"
+                    />`
+                  : null
+              }
+            </g>
+          `;
+        })}
+      </svg>
+
+      ${active
+        ? html`
+            <div class="chart-tip" style=${{ left: `${tipX}px`, top: `${tipTop}px` }}>
+              <div class="chart-tip-row">
+                <span class="chart-tip-key" style=${{ background: colorOf(active.role) }}></span>
+                <span class="chart-tip-value">${formatDurationShort(ends[hover] - starts[hover])}</span>
+              </div>
+              <div class="chart-tip-label">${labelOf(active)}</div>
+              <div class="chart-tip-label">
+                ${formatCost(active.cost)} · ${compactNumber(active.tokens)} tokens
+                ${active.fallback_from ? ` · ↩ fallback from ${active.fallback_from}` : ''}
+              </div>
+            </div>
+          `
+        : null}
+    </div>
+  `;
+}
