@@ -5,10 +5,24 @@ import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { TextArea, Select } from '../components/form.mjs';
 import { Markdown } from '../components/markdown.mjs';
+import { MemoryPanel } from './project.mjs';
 
 // A turn the queue is still holding. Read from the job row rather than from a local
 // flag, so a reload and a second tab see the same thing this one does.
 const IN_FLIGHT = new Set(['queued', 'running']);
+
+// Whether the conversation's project has something for the reader to decide. Intake
+// and the proposals pass both answer in a chat turn, and their drafts land on the
+// project - so the approval surface is rendered under the transcript that explains
+// what is being approved, and nowhere else. A conversation in a settled project
+// shows nothing, because there is nothing waiting in it.
+function toDecide(project) {
+  if (!project) return false;
+  // The intake's first spec: approving it is also what creates the folder and the
+  // repository, so it is offered even before any draft exists.
+  if (project.idea && !project.spec) return true;
+  return !!project.spec_draft || (project.drafts || []).length > 0;
+}
 
 // Where the composer stops growing and starts scrolling instead. The same number
 // the stylesheet caps the textarea at, because the two have to agree.
@@ -30,6 +44,9 @@ export function Chat({ id, navigate, onTitle }) {
   const [sessions, setSessions] = useState(null);
   const [session, setSession] = useState(null);
   const [messages, setMessages] = useState([]);
+  // The conversation's project, read for the approval panel below the transcript.
+  // Null in a conversation with nothing to decide, which is most of them.
+  const [project, setProject] = useState(null);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [streaming, setStreaming] = useState(false);
@@ -102,11 +119,27 @@ export function Chat({ id, navigate, onTitle }) {
     setMessages((m) => (m.some((x) => x.id === msg.id) ? m.map((x) => (x.id === msg.id ? msg : x)) : [...m, msg]));
   }, []);
 
+  // Read separately from the transcript and never awaited by it. The panel is an
+  // addition to a conversation, not a prerequisite for one: a project that has gone
+  // missing, or a fetch that fails, leaves the chat exactly as it renders today.
+  const loadProject = useCallback(async (projectId) => {
+    if (!projectId) {
+      setProject(null);
+      return;
+    }
+    try {
+      setProject(await api.project(projectId));
+    } catch {
+      setProject(null);
+    }
+  }, []);
+
   const load = useCallback(async () => {
     try {
       const d = await api.chatSession(id);
       setSession(d.session);
       setMessages(d.messages || []);
+      loadProject(d.session.project_id);
       onTitle?.(d.session.title);
       setError(turnFailure(d.job, d.messages || []));
       // A turn already in flight when the page opened - a reload mid-answer, or a
@@ -128,7 +161,7 @@ export function Chat({ id, navigate, onTitle }) {
     } catch (e) {
       setError(e.message);
     }
-  }, [id, onTitle]);
+  }, [id, onTitle, loadProject]);
 
   const openStream = useCallback(() => {
     closeStream();
@@ -211,6 +244,7 @@ export function Chat({ id, navigate, onTitle }) {
     if (!id) {
       setSession(null);
       setMessages([]);
+      setProject(null);
       setError(null);
       // The stream is closed on the way out of a conversation, but nothing else
       // clears the flag it was running under - so Back mid-answer used to leave the
@@ -359,6 +393,12 @@ export function Chat({ id, navigate, onTitle }) {
         </div>
         <div class="chat-hint">Enter to send · Shift+Enter for a new line</div>
       </div>
+
+      ${
+        toDecide(project)
+          ? html`<${MemoryPanel} project=${project} navigate=${navigate} onReload=${() => loadProject(project.id)} />`
+          : null
+      }
     </div>
   `;
 }

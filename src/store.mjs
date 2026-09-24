@@ -13,6 +13,20 @@ import { HEALTH_DEFAULTS, COUNTED_CODES, afterFailure, afterSuccess, blankHealth
 const HEARTBEAT_MS = 2000;
 const LEASE_STALE_MS = 15000;
 
+// A project's pending task drafts, as a list. A corrupt or half-written column must
+// not throw a SyntaxError out of the middle of a page render, and a draft queue that
+// cannot be read is a queue with nothing in it - which is exactly what a project that
+// has never had a proposal is, so the two degrade to the same thing.
+function mapDrafts(text) {
+  if (!text) return [];
+  try {
+    const rows = JSON.parse(text);
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
 export class Store {
   constructor(root = process.cwd()) {
     this.root = root;
@@ -60,8 +74,49 @@ export class Store {
       -- runRole hands the same row to either table; task_id becomes
       -- chat_session_id, which is the conversation the turn belongs to.
       CREATE TABLE IF NOT EXISTS chat_runs(id TEXT PRIMARY KEY,chat_session_id TEXT NOT NULL,role TEXT,provider_id TEXT,model_id TEXT,status TEXT,started_at TEXT,ended_at TEXT,error TEXT,fallback_from TEXT,tokens INTEGER DEFAULT 0,cost REAL DEFAULT 0,duration_ms INTEGER DEFAULT 0,session_id TEXT,input_tokens INTEGER DEFAULT 0,output_tokens INTEGER DEFAULT 0,cache_read_tokens INTEGER DEFAULT 0,cache_write_tokens INTEGER DEFAULT 0,cost_basis TEXT,context_tokens INTEGER DEFAULT 0,relevant_files INTEGER DEFAULT 0,context_budget INTEGER DEFAULT 0,context_state TEXT);
+      -- The decision log: what the project decided, in the words of the tasks that
+      -- decided it. A row is drafted by the agent that finished a task and lands in
+      -- the log only when a person approves it, which is why state is a column
+      -- rather than the row's existence - a rejected draft is a decision somebody
+      -- declined, and deleting it would lose the record of that. task_id is the
+      -- task the entry came from, which is the one thing a decision cannot be read
+      -- without: the same sentence is a different decision depending on what was
+      -- built when it was written. No foreign key, for the reason chat_messages has
+      -- none - the task row can be deleted and its decision still has to be readable.
+      CREATE TABLE IF NOT EXISTS decisions(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,task_id TEXT,content TEXT NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL,approved_at TEXT);
     `);
     for (const [table, columns] of Object.entries({
+      // The project's spec: what it is for, what it is not for, and the product
+      // decisions already taken. The same revision pair a task's plan carries, for
+      // the same reason - the only question ever asked is "what changed since the
+      // revision I was reading" - plus the draft pair, which is what stands in for
+      // the AWAITING_APPROVAL gate a task has and a project does not: a spec change
+      // is written to `spec_draft` and moves to `spec` only when a person approves
+      // it. `spec_at` is when the approved text landed, not when a draft was made.
+      projects: [
+        ['spec', 'TEXT'],
+        ['spec_prev', 'TEXT'],
+        ['spec_at', 'TEXT'],
+        ['spec_draft', 'TEXT'],
+        ['spec_draft_at', 'TEXT'],
+        // The idea note a project was started from, when it was started from one.
+        // NULL on every project added by path, which is most of them. It is kept on
+        // the row rather than reconstructed from the intake conversation because it
+        // is what becomes the repository's first commit, and a commit has to be
+        // reproducible from the project rather than from a chat log.
+        ['idea', 'TEXT'],
+        // Task drafts awaiting a person's approval, as a JSON array of
+        // `{id,title,description,source}`. A column rather than a table because a
+        // draft is not a row anything else joins to: it is a queue in front of the
+        // approvals, and the only two things done to it are "add a batch" and
+        // "remove the one that was approved". Both are whole-array writes.
+        //
+        // These are the intake's first tasks and the proposals pass's batches,
+        // which share this list rather than each having one: a draft is approved
+        // identically wherever it came from, and `source` is what tells a reader
+        // which pass drafted it.
+        ['task_drafts', 'TEXT'],
+      ],
       tasks: [
         ['description', 'TEXT'],
         // A cancel has to survive the gap between two steps of one task. The lease
@@ -266,10 +321,18 @@ export class Store {
 
   // -- projects -------------------------------------------------------------
 
+  // The column list is explicit, and the spec columns are deliberately not in it. A
+  // positional `VALUES(?,?,?,?,?,?,?)` writes whatever it is handed into whatever
+  // column happens to be there, so the day an eighth column was added every project
+  // insert would have been one value short with no error - and `INSERT OR REPLACE`
+  // would have taken the spec and its history down with the row it replaced. Named
+  // columns mean a column nobody names keeps its default, which for a spec is the
+  // only safe thing for a re-add to do. `idea` is named because it is written once,
+  // at creation, and there is no later write that could own it.
   addProject(p) {
-    this.db.prepare('INSERT OR REPLACE INTO projects VALUES(?,?,?,?,?,?,?)').run(
-      p.id, p.name, p.path, p.createdAt, p.language, p.framework, JSON.stringify(p.commands || {})
-    );
+    this.db
+      .prepare('INSERT OR REPLACE INTO projects(id,name,path,created_at,language,framework,commands,idea) VALUES(?,?,?,?,?,?,?,?)')
+      .run(p.id, p.name, p.path, p.createdAt, p.language, p.framework, JSON.stringify(p.commands || {}), p.idea ?? null);
     return this.getProject(p.id);
   }
 
@@ -288,7 +351,37 @@ export class Store {
   }
 
   mapProject(r) {
-    return { ...r, commands: JSON.parse(r.commands) };
+    return { ...r, commands: JSON.parse(r.commands), drafts: mapDrafts(r.task_drafts) };
+  }
+
+  // The columns a project row may move, and they are the ones a spec is not in:
+  // `updateProjectSpec` owns those, and the two writers being separate is what keeps
+  // a path edit from being able to clear a spec. The same append-only discipline as
+  // updateTask - a new column goes on the end of both lists, adjacent, and neither
+  // list is ever reordered.
+  updateProject(id, patch) {
+    const p = this.getProject(id);
+    if (!p) throw new Error('Project not found');
+    const n = { ...p, ...patch };
+    this.db
+      .prepare('UPDATE projects SET name=?,path=?,language=?,framework=?,commands=? WHERE id=?')
+      .run(n.name, n.path, n.language ?? null, n.framework ?? null, JSON.stringify(n.commands || {}), id);
+    return this.getProject(id);
+  }
+
+  updateProjectSpec(id, patch) {
+    const p = this.getProject(id);
+    if (!p) throw new Error('Project not found');
+    const n = { ...p, ...patch };
+    this.db
+      .prepare('UPDATE projects SET spec=?,spec_prev=?,spec_at=?,spec_draft=?,spec_draft_at=? WHERE id=?')
+      .run(n.spec ?? null, n.spec_prev ?? null, n.spec_at ?? null, n.spec_draft ?? null, n.spec_draft_at ?? null, id);
+    return this.getProject(id);
+  }
+
+  updateProjectDrafts(id, drafts) {
+    this.db.prepare('UPDATE projects SET task_drafts=? WHERE id=?').run(JSON.stringify(drafts || []), id);
+    return this.getProject(id);
   }
 
   // -- tasks ----------------------------------------------------------------
@@ -921,6 +1014,42 @@ export class Store {
       ? 'SELECT * FROM chat_runs WHERE chat_session_id=? ORDER BY started_at'
       : 'SELECT * FROM chat_runs ORDER BY started_at';
     return this.db.prepare(q).all(...(sessionId ? [sessionId] : []));
+  }
+
+  // -- decision log ---------------------------------------------------------
+
+  addDecision(d) {
+    this.db
+      .prepare('INSERT INTO decisions(id,project_id,task_id,content,state,created_at,approved_at) VALUES(?,?,?,?,?,?,?)')
+      .run(d.id, d.projectId, d.taskId ?? null, d.content, d.state, d.createdAt, d.approvedAt ?? null);
+    return this.getDecision(d.id);
+  }
+
+  getDecision(id) {
+    return this.db.prepare('SELECT * FROM decisions WHERE id=?').get(id) || null;
+  }
+
+  // `state` filters to one of draft|approved|rejected; absent it, everything the
+  // project has ever decided and declined. Oldest first, because a decision log is
+  // read as a history - what was decided before what - rather than as a feed.
+  listDecisions(projectId, state) {
+    const where = [];
+    const params = [];
+    if (projectId) { where.push('project_id=?'); params.push(projectId); }
+    if (state) { where.push('state=?'); params.push(state); }
+    const q = `SELECT * FROM decisions${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at`;
+    return this.db.prepare(q).all(...params);
+  }
+
+  // Only the two fields a person's approval moves. `content` is not among them: an
+  // approved entry is the text that was approved, and an edit of it after the fact
+  // would be a decision recorded in words nobody agreed to.
+  updateDecision(id, patch) {
+    const d = this.getDecision(id);
+    if (!d) throw new Error('Decision not found');
+    const n = { ...d, ...patch };
+    this.db.prepare('UPDATE decisions SET state=?,approved_at=? WHERE id=?').run(n.state, n.approved_at ?? null, id);
+    return this.getDecision(id);
   }
 
   // -- events ---------------------------------------------------------------

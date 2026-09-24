@@ -39,6 +39,35 @@ export const api = {
 
   projects: () => request('/api/projects'),
   createProject: (name, path) => request('/api/projects', { method: 'POST', body: { name, path } }),
+  // One project with its spec, its waiting drafts and its decision log. The panel
+  // renders all four, so they arrive together rather than a round trip apart.
+  project: (id) => request(`/api/projects/${id}`),
+
+  // Intake: an idea note becomes a project. The drafting turn is a chat turn, so
+  // the reply names the session to open - the conversation is where the draft is
+  // watched, and the project it belongs to is where it is approved.
+  startIntake: (idea, name) => request('/api/intake', { method: 'POST', body: { idea, name } }),
+
+  // The spec: what the project is for. A POST proposes a change and it waits; the
+  // two verbs below are the only writes that move it.
+  projectSpec: (id) => request(`/api/projects/${id}/spec`),
+  proposeSpec: (id, spec) => request(`/api/projects/${id}/spec`, { method: 'POST', body: { spec } }),
+  approveSpec: (id, path) => request(`/api/projects/${id}/spec/approve`, { method: 'POST', body: { path } }),
+  rejectSpec: (id) => request(`/api/projects/${id}/spec/reject`, { method: 'POST' }),
+
+  drafts: (id) => request(`/api/projects/${id}/drafts`),
+  approveDraft: (id, draftId) => request(`/api/projects/${id}/drafts/${draftId}/approve`, { method: 'POST' }),
+  dropDraft: (id, draftId) => request(`/api/projects/${id}/drafts/${draftId}`, { method: 'DELETE' }),
+  // Drafts a fresh batch against the stored spec and the open task list. The reply
+  // names the conversation the pass answers in.
+  proposeTasks: (id) => request(`/api/projects/${id}/proposals`, { method: 'POST' }),
+
+  decisions: (id, state) => request(`/api/projects/${id}/decisions${state ? `?state=${encodeURIComponent(state)}` : ''}`),
+  approveDecision: (id) => request(`/api/decisions/${id}/approve`, { method: 'POST' }),
+  rejectDecision: (id) => request(`/api/decisions/${id}/reject`, { method: 'POST' }),
+  // The retry for a decision pass that failed, and how a task completed before the
+  // log existed is asked for its entries.
+  draftDecisions: (id) => request(`/api/tasks/${id}/decisions`, { method: 'POST' }),
 
   tasks: (params = {}) => {
     const qs = new URLSearchParams();

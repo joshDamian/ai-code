@@ -45,9 +45,12 @@ export const CONTEXT_DEFAULTS = {
   // Paths listed in full. A tree is how the agent finds what the ranking did not
   // pick, but it is not free, and it grows with the repo rather than the task.
   tree: 400,
-  // Character caps for the two generated documents.
+  // Character caps for the two generated documents, and for the project's spec -
+  // which is not a generated document but is bounded here for the same reason they
+  // are: it is prose a person approved, and a person may approve a long one.
   architecture: 8000,
   conventions: 4000,
+  spec: 6000,
   // §5.3 step 2: the tokenizer's minimum length. 3 is the pre-phase-5 value; 2 is
   // the design's. It ships at 2 only because `dfHalf` ships above it: with the
   // weight off, dropping the floor measured 0.8181 macro against 0.8551, and with
@@ -1481,6 +1484,17 @@ function readDoc(projectPath, name, maxChars) {
   return text.length > maxChars ? `${text.slice(0, maxChars)}\n… (truncated)` : text;
 }
 
+// The project's spec, which is read from the project row rather than from
+// `.ai-code/context` like the two documents beside it: it is revisioned and approved
+// in the database, and a copy on disk would be a second version of the one document
+// whose whole point is that there is only one. Capped identically, so a long spec is
+// truncated rather than expensive.
+function readSpec(project, maxChars) {
+  const text = String(project?.spec || '').trim();
+  if (!text) return null;
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n… (truncated)` : text;
+}
+
 // What the previous attempt at this role left behind, so a retry does not repeat
 // the failure it already hit.
 function previousSummary(store, task, role) {
@@ -1548,6 +1562,11 @@ export function buildTaskContext(project, task, options = {}) {
   // matter, the approved plan, then whatever the last attempt in this role left.
   const architecture = readDoc(project.path, 'architecture.md', cfg.architecture);
   const conventions = readDoc(project.path, 'conventions.md', cfg.conventions);
+  // What the project is for, what it is explicitly not for, and the product
+  // decisions already taken - the standing description of the project, read beside
+  // the two generated documents for the same reason they are: a plan is written
+  // against it, and a review is a judgement about whether the work served it.
+  let spec = readSpec(project, cfg.spec);
   let review = role === 'repair' || role === 'reviewer' ? task.review || null : null;
   // A chat run belongs to no task, so `previousSummary` has no id to scope its
   // query by - `listRuns(null)` returns every run in the database, and the
@@ -1578,7 +1597,7 @@ export function buildTaskContext(project, task, options = {}) {
   const full = scanned.files;
   const unreadable = scanned.unreadable || [];
   let tree = [...new Set([...picked.paths, ...picked.tail, ...full])].slice(0, cfg.tree);
-  const size = () => estimateTokens(JSON.stringify({ tree, architecture: arch, conventions: conv, files, review, previous, parent }));
+  const size = () => estimateTokens(JSON.stringify({ tree, architecture: arch, conventions: conv, spec, files, review, previous, parent }));
   let total = size();
 
   // Trim order: the lowest-ranked file first, because it scored lowest against the
@@ -1599,6 +1618,16 @@ export function buildTaskContext(project, task, options = {}) {
   while (total > cfg.budget && arch) {
     arch = null;
     trimmed.push('architecture.md');
+    total = size();
+  }
+  // The spec goes after architecture.md and not before it, and the order is the
+  // point: both are standing descriptions of the project, but architecture.md is
+  // generated from the tree that is still in the context and the spec is what a
+  // person approved the project to be. A budget that has to give one up gives up the
+  // derived document, and the spec outlives it.
+  while (total > cfg.budget && spec) {
+    spec = null;
+    trimmed.push('spec');
     total = size();
   }
   if (total > cfg.budget && tree.length > picked.paths.length) {
@@ -1679,7 +1708,7 @@ export function buildTaskContext(project, task, options = {}) {
     files: files.map((f) => ({ path: f.path, tokens: f.tokens })),
     // The file list is cheap and is what tells the agent where things live.
     tree: tree.length,
-    sections: [arch && 'architecture', conv && 'conventions', task.plan && 'plan', review && 'review', previous && 'previous-run', parent && 'parent-task'].filter(Boolean),
+    sections: [arch && 'architecture', conv && 'conventions', spec && 'spec', task.plan && 'plan', review && 'review', previous && 'previous-run', parent && 'parent-task'].filter(Boolean),
     tokens: total,
     budget: cfg.budget,
     trimmed,
@@ -1721,6 +1750,7 @@ export function buildTaskContext(project, task, options = {}) {
     tree,
     architecture: arch,
     conventions: conv,
+    spec,
     files,
     review,
     previous,
@@ -1756,6 +1786,10 @@ export function treeOnlyContext(root, err) {
     tree,
     architecture: null,
     conventions: null,
+    // Null because this fallback is handed a root and no project row: the spec is a
+    // column, and a context that cannot name the project cannot read its spec. The
+    // key is here so the shape stays the shape the ladder bottoms out at.
+    spec: null,
     files: [],
     review: null,
     previous: null,

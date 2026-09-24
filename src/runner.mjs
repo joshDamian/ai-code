@@ -114,14 +114,18 @@ export class Runner {
   // Which service call a job kind names. Every kind is one step of the workflow,
   // so this table is also the list of things that can be run in the background.
   //
-  // `chat` is the one kind whose `task_id` is not a task: it is the id of the chat
-  // session, because that is what the job is bound to. The unique index on
-  // (task_id, active) is what makes it the right thing to put there - one turn of
+  // `chat` and `intake` are the kinds whose `task_id` is not a task: it is the id
+  // of the chat session, because that is what the job is bound to. The unique index
+  // on (task_id, active) is what makes it the right thing to put there - one turn of
   // one conversation at a time is exactly the constraint a conversation needs, and
-  // the database enforces it rather than a flag in the server.
+  // the database enforces it rather than a flag in the server. An intake is a
+  // conversation too (a chat with a different prompt and a payload to read), so it
+  // sits under the same constraint for the same reason.
   #step(job) {
     switch (job.kind) {
       case 'chat': return this.service.chat(job.task_id);
+      case 'intake': return this.service.draftIntake(job.task_id);
+      case 'proposals': return this.service.proposeTasks(job.task_id);
       case 'implement': return this.service.implement(job.task_id);
       case 'test': return this.service.runTests(job.task_id);
       case 'review': return this.service.review(job.task_id);

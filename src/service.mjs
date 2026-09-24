@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { Store } from './store.mjs';
 import { inspect, writeContext, readDependencies, relevantFiles, buildTaskContext, contextConfig, estimateTokens, treeOnlyContext } from './context.mjs';
 import {
-  ensureGit, status, createWorktree, diffAgainst, diffBetween, diffPaths, statusPaths, untracked, dirtyPaths, worktreeHashes, changedPaths, head, changedBetween, protectAiCode,
+  ensureGit, gitInit, hasCommits, commitInitial, status, createWorktree, diffAgainst, diffBetween, diffPaths, statusPaths, untracked, dirtyPaths, worktreeHashes, changedPaths, head, changedBetween, protectAiCode,
   currentBranch, revParse, isAncestor, mergeBase, findCommit, branches, checkedOut, mergeTree, commitTree, setBranch, commitAll, removeWorktree, commitDiff,
   landingCommit, commitRef,
 } from './git.mjs';
@@ -437,6 +437,111 @@ function chatPrompt(history) {
   return history ? `${CHAT_PROMPT}\n\nCONVERSATION SO FAR, oldest first:\n\n${history}` : CHAT_PROMPT;
 }
 
+// The payload half of every drafting prompt. Three prompts below ask a model for
+// something the harness has to read rather than a person has to - a spec, a batch of
+// tasks, a set of decisions - and the shape is the contract. Written once because a
+// contract stated three times is a contract that drifts: the parser reads the same
+// block whichever pass produced it, and a change to the fence is a change to how all
+// three are parsed.
+function payloadInstruction(shape) {
+  return `End your reply with a fenced json block holding exactly this shape, and nothing after it:\n\n\`\`\`json\n${shape}\n\`\`\`\n\nEverything you write outside the block is kept as prose for the person reading the turn and is not parsed, so put nothing there that only the block can carry.`;
+}
+
+// Whatever comes before the fence is read by a person, so the prompt asks for both:
+// a draft they can read and a block the harness can act on.
+export const INTAKE_PROMPT =
+  'Draft the specification for a project that is about to be created, and the first tasks worth doing in it. The idea note is the whole of what is known, and the folder is new: do not describe code you cannot read or files that do not exist yet, and do not invent requirements the note does not imply. You are read-only: do not modify source files, create files, run mutating commands, or commit. Write a short spec with three parts - goals, what this is explicitly not, and the product decisions the note already settles - then between one and five first tasks, each small enough to be planned and implemented on its own and ordered most important first.\n\n' +
+  payloadInstruction('{"spec":"<the whole spec, as markdown>","suggestedPath":"<a lowercase hyphenated directory name, two to four words>","tasks":[{"title":"<one line>","description":"<what done looks like, and how it would be checked>"}]}');
+
+// Asked for on demand - "what else should I build" - so the spec is given rather
+// than restated, and the tasks already open are named so the batch proposes work
+// that is not already on the list. `open` is the harness's own reading of that list,
+// which is the point: a model asked to remember what it proposed last time is
+// guessing, and a model handed the list is not.
+export const PROPOSALS_PROMPT = (spec, open) =>
+  `Propose the next tasks for this project. You are read-only: do not modify source files, create files, run mutating commands, or commit. Ground every proposal in the spec below and in the repository as it is - name the files a task would touch where you can see them. Propose only work that is not already open, and propose nothing you would not start next: three good tasks are worth more than ten plausible ones. If there is nothing worth building next, return an empty list and say so in your reply.\n\nSPEC:\n${spec || 'No spec has been written for this project yet. Propose tasks from the repository alone.'}\n\nALREADY OPEN (${open.length}):\n${open.length ? open.map((t) => `- ${t.state}: ${t.title}`).join('\n') : '(nothing)'}\n\n` +
+  payloadInstruction('{"tasks":[{"title":"<one line>","description":"<what done looks like, and how it would be checked>"}]}');
+
+// The question that opens a proposals conversation, and the text the waiting run is
+// bound to. It is what a person would have typed to ask for this, so the transcript
+// reads as a conversation rather than as an answer with no question above it.
+export const PROPOSALS_QUESTION = 'What else should I build?';
+
+// The decision log's source: the change a task made, and what its review said about
+// it. The prompt is deliberately narrow - a decision worth recording is a choice
+// somebody would have to know to work on this project later, and a diff carries
+// dozens of statements that are not choices ("this variable was renamed"). Naming
+// what is *not* wanted is the whole of the instruction, because a model asked for
+// decisions will otherwise return a summary of the diff.
+export const DECISIONS_PROMPT = (diff, review) =>
+  `Record the decisions this completed task made, for the project's decision log. You are read-only: do not modify source files, create files, run mutating commands, or commit. A decision is a choice a person working on this project later would need to know: a dependency taken, a format fixed, a boundary drawn, an approach rejected for a stated reason. Do not record what the code does - that is the code's job - and do not record routine edits, renames, or test additions. Most tasks produce one or two decisions and some produce none, which is a fine answer; return an empty list rather than padding one out. Each entry is one sentence of what was decided and one or two of why.\n\nREVIEW:\n${review || '(no review text was recorded)'}\n\nCHANGE:\n${cap(diff, DECISION_DIFF_CHARS)}\n\n` +
+  payloadInstruction('{"decisions":[{"title":"<what was decided, one line>","detail":"<why, and what it rules out>"}]}');
+
+// The diff a decision pass reads. Smaller than the reviewer's, which is uncapped:
+// the reviewer is judging the change and needs all of it, while this pass is looking
+// for the handful of statements in it that are choices, and a diff past this size is
+// a large task whose decisions are in its shape rather than its tail.
+const DECISION_DIFF_CHARS = 24000;
+
+// The payload out of a reply, or null when there is not one worth acting on. The
+// fenced block is what the prompt asks for and is looked for first; a bare object is
+// accepted too, because a model that answered with the JSON alone has still
+// answered, and refusing it would be a parse failure over a formatting preference.
+//
+// The last block wins. A draft that shows the shape by example and then answers puts
+// the answer last, and a parser that took the first would fill the spec with the
+// example. `pick` returns null for a payload of the wrong shape, which is what makes
+// this a search rather than a parse: the next candidate is tried rather than the
+// whole reply being thrown away.
+export function draftPayload(text, pick) {
+  const s = String(text || '');
+  const blocks = [...s.matchAll(/```(?:json)?\s*\n?([\s\S]*?)```/g)].map((m) => m[1]);
+  for (const body of [...blocks].reverse()) {
+    const parsed = parseObject(body);
+    const picked = parsed && pick(parsed);
+    if (picked) return picked;
+  }
+  const first = s.indexOf('{');
+  const last = s.lastIndexOf('}');
+  const parsed = first >= 0 && last > first ? parseObject(s.slice(first, last + 1)) : null;
+  return (parsed && pick(parsed)) || null;
+}
+
+function parseObject(text) {
+  try {
+    const x = JSON.parse(text);
+    return x && typeof x === 'object' && !Array.isArray(x) ? x : null;
+  } catch {
+    return null;
+  }
+}
+
+// The tasks of a payload, as drafts. A task with no title is not a task - there is
+// nothing for a person to approve and nothing to create - so it is dropped rather
+// than stored as an empty row, and the description falls back to the title so that
+// `createTask` is handed one text rather than two.
+function draftTasks(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((t) => ({ title: String(t?.title || '').replace(/\s+/g, ' ').trim(), description: String(t?.description || '').trim() }))
+    .filter((t) => t.title)
+    .map((t) => ({ ...t, description: t.description || t.title }));
+}
+
+// A directory name from a sentence. Lowercase and hyphenated, and short: this
+// prefills a field a person edits before anything is created, so the cost of a bad
+// one is a typo and the cost of a long one is a path nobody wants to read.
+// Non-ASCII letters are kept rather than stripped - a name that survives being typed
+// is worth more than one that is pure ASCII.
+export function slugify(text, words = 4) {
+  const s = String(text || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/^-+|-+$/g, '');
+  const out = s.split('-').filter(Boolean).slice(0, words).join('-');
+  return out.length > 60 ? out.slice(0, 60).replace(/-+$/, '') : out;
+}
+
 // The first question names the conversation, so a list of them reads as its
 // subjects without the user having to name anything. A chat has no title field
 // in the UI, and "New chat" four times over is a list nobody can navigate.
@@ -460,6 +565,19 @@ const CHAT_HISTORY_CHARS = 24000;
 const CHAT_TASK_PLAN_CHARS = 6000;
 const CHAT_TASK_DESCRIPTION_CHARS = 4000;
 const CHAT_TASK_REVIEW_CHARS = 3000;
+
+// How much of a spec is carried into the proposals prompt. The same size as the
+// architecture document the planner already reads, because it is the same kind of
+// text read for the same reason, and the spec in the context window is capped
+// separately - this is the prompt-side limit, and it exists because the column is
+// whatever a person approved it as.
+const SPEC_PROMPT_CHARS = 8000;
+
+// The states a task is done in. What "open" means to a proposals pass: a task that
+// is complete or cancelled is not work still in front of the project, and proposing
+// something the list already holds under a finished task is the batch repeating
+// itself.
+const CLOSED_STATES = new Set(['COMPLETE', 'CANCELLED']);
 
 // One string cap, with the same ellipsis the context assembler's doc reader uses,
 // so a truncated block reads as truncated rather than as text that ends mid-word.
@@ -645,10 +763,13 @@ export class Service {
     return t;
   }
 
-  initProject(name, root) {
-    root = fs.realpathSync(root);
-    ensureGit(root);
-    protectAiCode(root);
+  // `create` is what an intake passes and nothing else does: the folder may not exist
+  // yet (mkdir), and it may not be a repository (git init). Both are off by default,
+  // so every caller that names an existing repository keeps the refusal it has always
+  // had - a typo in a path stays an error that says so rather than a directory created
+  // next to it.
+  initProject(name, root, { create = false } = {}) {
+    root = this.#ensureRepo(root, { create });
     const existing = this.store.getProjectByPath(root);
     if (existing) return existing;
     const x = inspect(root);
@@ -661,6 +782,432 @@ export class Service {
       framework: x.framework,
       commands: x.commands,
     });
+  }
+
+  // The filesystem half of starting a project, and the only place a folder is created
+  // or a repository initialized. It returns the resolved path because `realpathSync`
+  // is what makes the unique index on `projects.path` mean anything: /tmp and
+  // /private/tmp are one directory, and two rows for one repository is a task whose
+  // worktree is cut from a path nobody is looking at.
+  #ensureRepo(root, { create = false } = {}) {
+    if (create && !fs.existsSync(root)) fs.mkdirSync(root, { recursive: true });
+    const resolved = fs.realpathSync(root);
+    try {
+      ensureGit(resolved);
+    } catch (e) {
+      // Not a repository. An intake asked for one and gets one; anything else is a
+      // caller naming a path that is not the repository it thinks it is.
+      if (!create) throw e;
+      gitInit(resolved);
+    }
+    protectAiCode(resolved);
+    return resolved;
+  }
+
+  // -- project memory: the spec ---------------------------------------------
+  //
+  // What the project is for, what it is explicitly not for, and the product
+  // decisions already taken. Revisioned like a plan (spec / spec_prev / spec_at) and
+  // gated like one: a change is written to `spec_draft` and becomes `spec` only when
+  // a person approves it. A project has no state machine to carry "awaiting
+  // approval", so the draft *is* the state - a row with one set is a project with a
+  // change on the table, and every surface reads it that way.
+
+  proposeSpec(projectId, text) {
+    const spec = String(text ?? '').trim();
+    if (!spec) throw new Error('A spec is required');
+    const p = this.project(projectId);
+    // A write that changes nothing is not a draft. The two compared against are the
+    // approved text and the draft already waiting, so re-proposing what is on the
+    // table neither resets the timestamp nor replaces a draft with a copy of itself.
+    if (p.spec === spec || p.spec_draft === spec) return p;
+    return this.store.updateProjectSpec(projectId, { spec_draft: spec, spec_draft_at: new Date().toISOString() });
+  }
+
+  // The promotion, and the only write that moves a spec. `spec_prev` is the text
+  // this one replaced, so the panel can diff the two - the same pair, for the same
+  // reason, as a task's plan revision.
+  //
+  // `path` is the field the intake form hands over. It is ignored for a project that
+  // did not come from an intake: an existing repository's path is what every task's
+  // worktree and every relative path in the database is relative to, and a form that
+  // could move it would be a form that could orphan the work.
+  approveSpec(projectId, { path: chosen } = {}) {
+    const project = this.project(projectId);
+    if (!project.spec_draft) throw new Error('No spec change is waiting for approval');
+    // An intake has not touched the filesystem yet, and this is the moment the idea
+    // becomes a project somebody agreed to build - so the folder, the repository and
+    // the idea note's first commit all happen here.
+    if (project.idea) this.finalizeIntake(projectId, { path: chosen });
+    const p = this.project(projectId);
+    const at = new Date().toISOString();
+    // Same no-op guard as #writePlan: a draft that matches what is already approved
+    // clears without announcing a revision that is word for word the old one.
+    if (p.spec_draft === p.spec) return this.store.updateProjectSpec(projectId, { spec_draft: null, spec_draft_at: null });
+    return this.store.updateProjectSpec(projectId, { spec: p.spec_draft, spec_prev: p.spec ?? null, spec_at: at, spec_draft: null, spec_draft_at: null });
+  }
+
+  // A draft nobody wants, which mirrors a plan's reject: the change goes, the
+  // approved text stays, and the project is exactly what it was before the draft.
+  rejectSpec(projectId) {
+    if (!this.project(projectId).spec_draft) throw new Error('No spec change is waiting for approval');
+    return this.store.updateProjectSpec(projectId, { spec_draft: null, spec_draft_at: null });
+  }
+
+  // What the spec panel renders. Computed here rather than in the view for the same
+  // reason a plan revision's diff is: both texts are already on the row, and a client
+  // asked to diff them would have to carry its own copy of unifiedDiff.
+  specRevision(project) {
+    const prev = project.spec || '';
+    const draft = project.spec_draft || '';
+    const changed = !!draft && draft !== prev;
+    return {
+      at: project.spec_at || null,
+      draftAt: project.spec_draft_at || null,
+      hasPrev: !!project.spec,
+      changed,
+      diff: changed ? unifiedDiff(prev, draft, { label: 'spec' }) : '',
+    };
+  }
+
+  // -- intake: an idea note becomes a project --------------------------------
+  //
+  // Intake is a chat, not a task. A chat has no state machine, no plan, no worktree
+  // and no approval gate, so nothing here can reach the task list before a person has
+  // approved it - and the drafted first tasks are rows on the project rather than
+  // task rows until then.
+  //
+  // What is not deferred to approval is the project row itself, and the schema is
+  // why: `chat_sessions.project_id` is NOT NULL, so the conversation has to have a
+  // project to belong to before its first message can be written. Creating it early
+  // costs nothing - a project with no tasks and no repository is a row nothing else
+  // reads - and it is what gives an approved draft a project id to be created under.
+  startIntake(idea, { name } = {}) {
+    const note = String(idea ?? '').trim();
+    if (!note) throw new Error('An idea note is required');
+    // A sibling of the root, which is where this install already puts what it
+    // creates (see createWorktree's default root). The path is a prefill a person
+    // edits before anything is created, so the worst case is a directory name they
+    // change.
+    const base = this.options.intakeRoot || path.dirname(this.root);
+    const project = this.store.addProject({
+      id: this.store.id(),
+      name: String(name || '').trim() || generateTitle(note),
+      path: this.#freePath(path.join(base, slugify(note) || 'new-project')),
+      createdAt: new Date().toISOString(),
+      language: null,
+      framework: null,
+      commands: {},
+      idea: note,
+    });
+    // The folder is made now; the repository is not. A draft pass runs an agent, and
+    // an agent runs in a directory - spawning one in a path that does not exist fails
+    // before the model is reached. An empty folder is the smallest thing that can
+    // exist to make an intake possible, and the alternative, running the agent in
+    // whatever directory happens to contain the project, would hand it the whole
+    // neighbourhood as context.
+    fs.mkdirSync(project.path, { recursive: true });
+    const session = this.createChatSession(project.id, 'Intake', null);
+    // Written with a run id so the note is *waiting*: the draft pass answers it, and
+    // that pairing is what every chat surface reads to tell a question nobody has
+    // answered from one nobody asked. Same shape as askChat.
+    const runId = this.store.id();
+    this.store.addChatMessage({ id: this.store.id(), sessionId: session.id, role: 'user', content: note, runId });
+    return { project: this.project(project.id), session, runId };
+  }
+
+  // A path nothing is using. Two projects cannot share one: `projects.path` is
+  // unique, and `INSERT OR REPLACE` on a collision replaces the project already
+  // there - which is a task list and a spec lost to a name somebody typed twice.
+  #freePath(root) {
+    if (!fs.existsSync(root) && !this.store.getProjectByPath(root)) return root;
+    for (let i = 2; i <= 99; i++) {
+      const next = `${root}-${i}`;
+      if (!fs.existsSync(next) && !this.store.getProjectByPath(next)) return next;
+    }
+    throw new Error(`No free directory next to ${root}`);
+  }
+
+  // The draft pass: one read-only turn that turns the idea note into a spec and a
+  // first set of tasks. Nothing is created here, so an abandoned draft leaves the
+  // project exactly as it was - the only writes are the turn's own text and the
+  // project's pending drafts.
+  //
+  // A reply whose payload cannot be read is not a failure of the intake. The text is
+  // still stored, and the project simply has no draft on the table: the person can
+  // read what the agent said, write the spec by hand, and carry on.
+  async draftIntake(sessionId) {
+    // The session is the argument because the queue binds a turn to one - the job's
+    // `task_id` is the session id, the same convention `chat` uses - and it is the
+    // session that names the project, so nothing has to be passed twice.
+    const session = this.chatSession(sessionId);
+    const project = this.project(session.project_id);
+    const projectId = project.id;
+    const pending = this.store.pendingChatMessage(sessionId);
+    // Nothing waiting means the draft has been written (or was never asked for), and
+    // a second pass over the same note would be a second spec and a second batch of
+    // tasks - so this is the guard that makes a dispatched job idempotent.
+    if (!pending) throw new Error('This intake has no idea note waiting to be drafted');
+    // A turn at a time per conversation, for the same reason chat() holds this: two
+    // passes reading the same note would each write a draft, and the second would
+    // overwrite what the first proposed.
+    if (this.chatBusy.has(sessionId)) throw new Error('This intake is already being drafted');
+    this.chatBusy.add(sessionId);
+    try {
+      const result = await this.runRole(
+        {
+          id: null,
+          project_id: projectId,
+          title: pending.content,
+          description: pending.content,
+          // The prompt shape has a plan section. An intake has none, and the honest
+          // text is why rather than a plan that does not exist.
+          plan: 'No plan: this is a project being started, not a task.',
+        },
+        'chat',
+        INTAKE_PROMPT,
+        // The folder startIntake made, which is empty. It is the agent's cwd and the
+        // tree the ranker walks, and both are the truth: there is nothing here yet.
+        project.path,
+        [],
+        { runId: pending.run_id, chatSessionId: sessionId }
+      );
+      return this.#recordIntake(sessionId, projectId, result.runId);
+    } finally {
+      this.chatBusy.delete(sessionId);
+    }
+  }
+
+  // The draft's landing: the reply stored, the spec pended, the path and the tasks
+  // read off it. Split out only so the turn above holds nothing but the run - every
+  // write here happens after the agent is done and none of it can fail the turn.
+  #recordIntake(sessionId, projectId, runId) {
+    const text = this.finalText(runId).trim();
+    const parsed = draftPayload(text, (x) => {
+      const spec = String(x.spec || '').trim();
+      const tasks = draftTasks(x.tasks);
+      return spec || tasks.length ? { spec, path: slugify(x.suggestedPath), tasks } : null;
+    });
+    this.store.addChatMessage({ id: this.store.id(), sessionId, role: 'assistant', content: text || 'The model returned no draft.', runId });
+    if (!parsed) return { project: this.project(projectId), session: this.chatSession(sessionId), draft: null };
+    if (parsed.spec) this.proposeSpec(projectId, parsed.spec);
+    // The name the agent gave the project prefills the path field better than the
+    // slug of a sentence does, and it is still only a prefill: nothing has been
+    // created at that path, and the person approves whatever ends up in the field.
+    if (parsed.path) {
+      const before = this.project(projectId).path;
+      const moved = this.#freePath(path.join(path.dirname(before), parsed.path));
+      if (moved !== before) {
+        this.store.updateProject(projectId, { path: moved });
+        // The directory startIntake made is empty by construction, so this is a
+        // rename of nothing: it is removed rather than left behind as a folder
+        // nobody asked for. A directory that is not empty is left alone.
+        try { fs.rmdirSync(before); } catch { /* not empty, or already gone */ }
+      }
+    }
+    const added = this.addDrafts(projectId, parsed.tasks, 'intake');
+    return { project: this.project(projectId), session: this.chatSession(sessionId), draft: { spec: parsed.spec, tasks: added } };
+  }
+
+  // The moment an idea becomes a repository. Called from approveSpec for a project
+  // that came from an intake, and idempotent so a second approval is not a second
+  // commit.
+  finalizeIntake(projectId, { path: chosen } = {}) {
+    const project = this.project(projectId);
+    const wanted = String(chosen || '').trim();
+    const root = this.#ensureRepo(wanted ? path.resolve(wanted) : project.path, { create: true });
+    // The idea note is the first commit, and the first commit is not a nicety: every
+    // task's worktree is cut from HEAD (createWorktree), and a repository with no
+    // commits has no HEAD - so without this the first approved task fails before a
+    // single file is written.
+    const note = path.join(root, 'IDEA.md');
+    if (project.idea && !fs.existsSync(note)) fs.writeFileSync(note, `# ${project.name}\n\n${project.idea}\n`);
+    if (!hasCommits(root)) commitInitial(root, `${project.name}: the idea this project started from`);
+    const x = inspect(root);
+    return this.store.updateProject(projectId, { path: root, language: x.language, framework: x.framework, commands: x.commands });
+  }
+
+  // -- drafted tasks ---------------------------------------------------------
+  //
+  // The intake's first tasks and the proposals pass's batches share one queue,
+  // because a draft is approved identically wherever it came from. Each carries the
+  // pass that wrote it, which is what a reader is told; nothing else about them
+  // differs.
+
+  drafts(projectId) {
+    return this.project(projectId).drafts || [];
+  }
+
+  addDrafts(projectId, tasks, source) {
+    const drafts = this.drafts(projectId);
+    const added = tasks.map((t) => ({ id: this.store.id(), title: t.title, description: t.description, source, at: new Date().toISOString() }));
+    this.store.updateProjectDrafts(projectId, [...drafts, ...added]);
+    return added;
+  }
+
+  // Approving a draft is the whole of "this task should exist": it creates the row
+  // and takes it out of the queue, through the same `createTask` and the same
+  // `prepare` a task typed into the dashboard goes through - so an approved draft
+  // lands in the normal plan -> approve -> execute flow with nothing special about
+  // it, and appears in the task list at the moment it is created.
+  approveDraft(projectId, draftId) {
+    const drafts = this.drafts(projectId);
+    const draft = drafts.find((d) => d.id === draftId);
+    if (!draft) throw new Error('Draft not found');
+    const task = this.createTask(projectId, draft.description || draft.title);
+    this.store.updateProjectDrafts(projectId, drafts.filter((d) => d.id !== draftId));
+    return { task: this.prepare(task.id), draft };
+  }
+
+  // A draft nobody wants. Dropping it is the only other thing that can happen to
+  // one, and the project is left without it - the batch it arrived in is not a unit
+  // anybody agreed to.
+  dropDraft(projectId, draftId) {
+    const drafts = this.drafts(projectId);
+    if (!drafts.some((d) => d.id === draftId)) throw new Error('Draft not found');
+    return this.store.updateProjectDrafts(projectId, drafts.filter((d) => d.id !== draftId));
+  }
+
+  // -- proposals on demand ---------------------------------------------------
+  //
+  // The same draft machinery as the intake, asked for later: read the stored spec
+  // and the tasks already open, and propose what is not on the list. The tasks
+  // already open are handed over rather than left to the model's memory of what it
+  // proposed last time, which is the difference between a batch that is new and a
+  // batch that repeats itself.
+  // The session is the argument, like the intake's, because a proposal is a turn in
+  // a conversation and the queue binds a turn to the session it belongs to.
+  async proposeTasks(sessionId) {
+    const session = this.chatSession(sessionId);
+    const project = this.project(session.project_id);
+    const pending = this.store.pendingChatMessage(sessionId);
+    if (!pending) throw new Error('This proposals chat has no question waiting to be answered');
+    if (this.chatBusy.has(sessionId)) throw new Error('This chat is already answering a question');
+    this.chatBusy.add(sessionId);
+    try {
+      const open = this.store.listTasks(project.id).filter((t) => !CLOSED_STATES.has(t.state));
+      const spec = cap(project.spec || '', SPEC_PROMPT_CHARS);
+      const result = await this.runRole(
+        {
+          id: null,
+          project_id: project.id,
+          title: pending.content,
+          description: pending.content,
+          plan: spec || 'No plan: this is a question about the project, not a task.',
+        },
+        'chat',
+        PROPOSALS_PROMPT(spec, open),
+        project.path,
+        [],
+        { runId: pending.run_id, chatSessionId: sessionId }
+      );
+      const text = this.finalText(result.runId).trim();
+      const parsed = draftPayload(text, (x) => {
+        const tasks = draftTasks(x.tasks);
+        return tasks.length ? { tasks } : null;
+      });
+      this.store.addChatMessage({ id: this.store.id(), sessionId, role: 'assistant', content: text || 'The model returned no proposals.', runId: result.runId });
+      return { project: this.project(project.id), session: this.chatSession(sessionId), tasks: parsed ? this.addDrafts(project.id, parsed.tasks, 'proposal') : [] };
+    } finally {
+      this.chatBusy.delete(sessionId);
+    }
+  }
+
+  // Opens the conversation a proposals pass answers in, and writes the question into
+  // it. The question is a real chat message with a run id - the same shape askChat
+  // writes - because that is what makes the turn watchable: the chat stream follows
+  // the run the waiting question names, so a proposal without one would land in the
+  // transcript with nothing having shown it arriving.
+  askProposals(projectId) {
+    const session = this.createChatSession(projectId, 'Task proposals', null);
+    const runId = this.store.id();
+    this.store.addChatMessage({ id: this.store.id(), sessionId: session.id, role: 'user', content: PROPOSALS_QUESTION, runId });
+    return this.chatSession(session.id);
+  }
+
+  // -- decision log ----------------------------------------------------------
+  //
+  // Drafted from the two records a completed task leaves behind - the change it made
+  // and what its review said - and landed only when a person approves them. A log
+  // written end to end by an agent is a summary of the diff; the approval step is
+  // what makes it a record of what was decided.
+
+  async draftDecisions(taskId) {
+    const t = this.task(taskId);
+    const project = this.project(t.project_id);
+    const diff = this.#finalDiff(t, project);
+    if (!diff.trim()) return [];
+    const result = await this.runRole(
+      t,
+      'chat',
+      DECISIONS_PROMPT(diff, t.review),
+      t.worktree && fs.existsSync(t.worktree) ? t.worktree : project.path
+    );
+    const text = this.finalText(result.runId).trim();
+    const parsed = draftPayload(text, (x) => {
+      const decisions = Array.isArray(x.decisions)
+        ? x.decisions.map((d) => ({ title: String(d?.title || '').replace(/\s+/g, ' ').trim(), detail: String(d?.detail || '').trim() })).filter((d) => d.title || d.detail)
+        : [];
+      return decisions.length ? { decisions } : null;
+    });
+    if (!parsed) return [];
+    const at = new Date().toISOString();
+    return parsed.decisions.map((d) =>
+      this.store.addDecision({
+        id: this.store.id(),
+        projectId: t.project_id,
+        // Which task a decision came from is the one thing the entry cannot be read
+        // without: the same sentence is a different decision depending on what was
+        // built when it was written.
+        taskId,
+        content: d.detail ? `${d.title}\n\n${d.detail}` : d.title,
+        state: 'draft',
+        createdAt: at,
+      })
+    );
+  }
+
+  // What the decisions pass reads. The worktree while it is still there, and the
+  // branch once it is not: a decision is drafted at completion, and a task whose
+  // worktree has been removed is a task whose work is on a branch. A read that fails
+  // is nothing to draft from rather than a failure of a completed task.
+  #finalDiff(t, project) {
+    try {
+      if (t.worktree && fs.existsSync(t.worktree)) return worktreeDiff(t.worktree, t);
+      const tip = revParse(project.path, t.branch);
+      return tip && t.base_commit ? diffBetween(project.path, t.base_commit, tip) : '';
+    } catch {
+      return '';
+    }
+  }
+
+  decide(id, state) {
+    const d = this.store.getDecision(id);
+    if (!d) throw new Error('Decision not found');
+    if (d.state !== 'draft') throw new Error(`This decision has already been ${d.state}`);
+    return this.store.updateDecision(id, { state, approved_at: state === 'approved' ? new Date().toISOString() : null });
+  }
+
+  approveDecision(id) {
+    return this.decide(id, 'approved');
+  }
+
+  rejectDecision(id) {
+    return this.decide(id, 'rejected');
+  }
+
+  // The completion-time draft, which must never fail the completion. The same posture
+  // as the ranker's fallback: this is a record a person will read and approve, and an
+  // exception out of it would take a task whose work is finished back out of the
+  // state that says so.
+  async #draftDecisionsQuietly(id) {
+    try {
+      return await this.draftDecisions(id);
+    } catch (e) {
+      const quiet = this.options.silent || this.quiet;
+      if (!quiet) process.stderr.write(`  [decisions] skipped: ${String(e.code || '')} ${String(e.message || e).split('\n')[0]}\n`);
+      return [];
+    }
   }
 
   contextInit(projectId) {
@@ -1444,7 +1991,13 @@ export class Service {
         return this.transition(id, 'REPAIRING');
       }
       this.store.updateTask(id, { review: text || 'PASS' });
-      return this.transition(id, 'COMPLETE');
+      const done = this.transition(id, 'COMPLETE');
+      // Drafted after the transition rather than before it: the task is complete
+      // whatever happens in the pass that follows, and this is a record a person
+      // will read and approve - a drafting failure that took finished work back out
+      // of COMPLETE would be the paperwork failing the work. See #draftDecisionsQuietly.
+      await this.#draftDecisionsQuietly(id);
+      return done;
     } catch (e) {
       if (e.code === 'CANCELLED' || e.code === 'NO_VERDICT') throw e;
       // A reviewer that crashed is itself a finding: hand the task to repair with

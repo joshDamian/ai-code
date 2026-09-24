@@ -51,7 +51,7 @@ const body = (req) =>
     });
   });
 
-const routeTask = /^\/api\/tasks\/([^/]+)\/(plan|approve|execute|implement|test|review|repair|reject|replan|retry|refine|diff|port|cancel|close|show|activity|link|feedback)$/;
+const routeTask = /^\/api\/tasks\/([^/]+)\/(plan|approve|execute|implement|test|review|repair|reject|replan|retry|refine|diff|port|cancel|close|show|activity|link|feedback|decisions)$/;
 // The one route that always queues rather than blocks. Matched before routeTask,
 // whose pattern has no room for the extra path segment.
 const routeBackground = /^\/api\/tasks\/([^/]+)\/execute\/background$/;
@@ -297,7 +297,76 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/api/projects') {
       if (req.method === 'GET') return json(res, svc.store.listProjects());
       const b = await body(req);
-      return json(res, svc.initProject(b.name, b.path), 201);
+      // `create` is the intake's flag and not the dashboard form's: a person adding
+      // a project they already have keeps the refusal that names the bad path.
+      return json(res, svc.initProject(b.name, b.path, { create: !!b.create }), 201);
+    }
+
+    // Intake. A chat, not a task - so it is started and then queued like one, and
+    // the client watches the drafting turn on the same conversation stream every
+    // other chat uses. Nothing reaches the task list from here.
+    if (u.pathname === '/api/intake') {
+      const b = await body(req);
+      const started = svc.startIntake(b.idea, { name: b.name });
+      return json(res, { ...started, job: runner.enqueue(started.session.id, 'intake') }, 202);
+    }
+
+    // The spec: what the project is for, revisioned and gated like a plan. A POST is
+    // the proposal of a change, which waits in `spec_draft` until one of the two
+    // verbs below moves it.
+    const sp = u.pathname.match(/^\/api\/projects\/([^/]+)\/spec(?:\/(approve|reject))?$/);
+    if (sp) {
+      const id = sp[1];
+      if (!sp[2]) {
+        if (req.method === 'GET') {
+          const project = svc.project(id);
+          return json(res, { spec: project.spec || null, draft: project.spec_draft || null, revision: svc.specRevision(project) });
+        }
+        const b = await body(req);
+        return json(res, svc.proposeSpec(id, b.spec), 201);
+      }
+      const b = await body(req);
+      // `path` only ever moves a project that came from an intake, and only on the
+      // write that creates the repository - see approveSpec.
+      return json(res, sp[2] === 'approve' ? svc.approveSpec(id, { path: b.path }) : svc.rejectSpec(id));
+    }
+
+    // The drafts waiting on a project, and the two things a person can do with one.
+    // Approving is the whole of "this task should exist": it creates the task and
+    // prepares it, so the draft lands in the normal plan -> approve -> execute flow.
+    const dr = u.pathname.match(/^\/api\/projects\/([^/]+)\/drafts(?:\/([^/]+)\/approve)?$/);
+    if (dr) {
+      if (!dr[2]) return json(res, svc.drafts(dr[1]));
+      return json(res, svc.approveDraft(dr[1], dr[2]), 201);
+    }
+    const dd = u.pathname.match(/^\/api\/projects\/([^/]+)\/drafts\/([^/]+)$/);
+    if (dd && req.method === 'DELETE') return json(res, svc.dropDraft(dd[1], dd[2]));
+
+    // Proposals on demand: a fresh batch drafted in a conversation of its own, so
+    // the turn is watchable and the batch has a transcript explaining it.
+    const pr = u.pathname.match(/^\/api\/projects\/([^/]+)\/proposals$/);
+    if (pr) {
+      const session = svc.askProposals(pr[1]);
+      return json(res, { session, job: runner.enqueue(session.id, 'proposals') }, 202);
+    }
+
+    const dc = u.pathname.match(/^\/api\/projects\/([^/]+)\/decisions$/);
+    if (dc) return json(res, svc.store.listDecisions(dc[1], u.searchParams.get('state') || undefined));
+
+    const dm = u.pathname.match(/^\/api\/decisions\/([^/]+)\/(approve|reject)$/);
+    if (dm) return json(res, dm[2] === 'approve' ? svc.approveDecision(dm[1]) : svc.rejectDecision(dm[1]));
+
+    // One project, with its spec revision, drafts and decision log on the same
+    // payload: the project surface renders all four, and a second and third fetch
+    // would render the drafts panel a round trip after the name above it.
+    const pj = u.pathname.match(/^\/api\/projects\/([^/]+)$/);
+    if (pj && req.method === 'GET') {
+      const project = svc.project(pj[1]);
+      return json(res, {
+        ...project,
+        revision: svc.specRevision(project),
+        decisions: svc.store.listDecisions(project.id),
+      });
     }
 
     if (u.pathname === '/api/tasks') {
@@ -372,6 +441,10 @@ const server = http.createServer(async (req, res) => {
       // Read-only, so its one option rides in the query string: the dashboard asks
       // this with a GET, unlike every other op here.
       if (op === 'diff') return json(res, svc.diff(id, { to: u.searchParams.get('to') || undefined }));
+      // Drafting the decision entries a completed task left behind. The review that
+      // completes a task drafts these already; this is the retry for a pass that
+      // failed, and it is what a task completed before the log existed is asked for.
+      if (op === 'decisions') return json(res, await svc.draftDecisions(id), 201);
       // The one verb here that moves a ref. Its options come from the body, and
       // everything it declines to do it declines without writing anything.
       if (op === 'port') {

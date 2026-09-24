@@ -4,6 +4,13 @@ import {execFileSync} from 'node:child_process';import fs from 'node:fs';import 
 // is something a person asks for by name rather than a string a reviewer skims.
 export function git(cwd,args){return execFileSync('git',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe'],maxBuffer:10*1024*1024}).trim()}
 export function ensureGit(root){return git(root,['rev-parse','--show-toplevel'])}
+// The other half of ensureGit: a folder that is not a repository yet becomes one.
+// `-q` because git's own "Initialized empty Git repository" line is written to
+// stdout, and every helper here returns its caller's stdout.
+export function gitInit(root){return git(root,['init','-q'])}
+// Whether this repository has a commit. `head` throws in one that does not, which is
+// the difference between a repository a worktree can be cut from and a bare init.
+export function hasCommits(root){try{return !!head(root)}catch{return false}}
 export function status(root){return git(root,['status','--porcelain']).split('\n').filter(x=>x && !x.trimEnd().endsWith('.ai-code')).join('\n')}
 export function protectAiCode(root){const f=path.join(root,'.git','info','exclude');fs.mkdirSync(path.dirname(f),{recursive:true});let s=fs.existsSync(f)?fs.readFileSync(f,'utf8'):'';if(!s.split('\n').some(x=>x.trim()==='.ai-code/'))fs.appendFileSync(f,(s.endsWith('\n')||!s?'':'\n')+'.ai-code/\n')}
 export function head(root){return git(root,['rev-parse','HEAD'])}
@@ -127,6 +134,21 @@ export function setBranch(root,name,ref){return git(root,['branch','-f',name,ref
 // called once the caller has established there is something to commit: `git
 // commit` with an empty index exits non-zero, and git() does not catch.
 export function commitAll(dir,msg){git(dir,['add','-A']);git(dir,['commit','-m',msg]);return head(dir)}
+// The first commit of a folder `git init` has just made, and the one commit the rest
+// of the workflow cannot do without: `createWorktree` cuts from HEAD, and a repository
+// with no commits has no HEAD to cut from.
+//
+// The identity is supplied only when git has none of its own - `git config user.email`
+// reads local, then global, then system, and exits non-zero when none of them sets one.
+// A person's own name is what a commit of their work should carry, so this is not a
+// default: it is what lets a machine with no git config at all still get a repository
+// rather than a dead end at the first task.
+export function commitInitial(dir,msg){
+git(dir,['add','-A']);
+const named=hasIdentity(dir);
+git(dir,[...(named?[]:['-c','user.email=ai-code@localhost','-c','user.name=AI Code']),'commit','-m',msg]);
+return head(dir)}
+function hasIdentity(dir){try{return !!git(dir,['config','user.email'])}catch{return false}}
 export function removeWorktree(root,dir){return git(root,['worktree','remove','--force',dir])}
 // The commit that first put a task's work into the destination. A fast-forward makes
 // that the task's own commit, because nothing separate was written to carry it; a merge

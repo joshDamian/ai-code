@@ -4753,3 +4753,301 @@ test('a session scoped to a task that is missing, or another project\'s, is refu
   assert.equal(answered.role,'assistant');
   assert.equal(s.store.pendingChatMessage(c.id),null,'the turn was answered rather than left waiting');
 });
+
+// -- project memory: the spec, intake, proposals, and the decision log --------
+//
+// Four parts of one layer, and the tests below follow the order they depend on
+// each other in: a spec is a revisioned, gated document on the project; intake is
+// the chat that drafts one for a project that does not exist yet; proposals are
+// the same drafting pass asked for later; the decision log is what a completed
+// task leaves behind. Every write that a person has to agree to is checked twice -
+// once for the draft landing, and once for what the approval moved.
+
+// A project root whose parent directory belongs to this test alone. Intake puts the
+// folder it creates *beside* the project root, so a root made by `repo()` would put
+// it in the shared temporary directory, where a directory a previous run left behind
+// changes the name this run is given.
+function holder() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'aicode-holder-'));
+  const root = path.join(d, 'app');
+  fs.mkdirSync(root);
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }));
+  fs.writeFileSync(path.join(root, 'README.md'), 'x');
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', 'commit', '-qm', 'init'], { cwd: root });
+  return root;
+}
+
+// The chat role's reply for the tests that drive a drafting pass. The payload is
+// what the harness reads; everything before the fence is the prose a person would
+// see in the transcript, and it is asserted on once, to pin that both halves
+// arrive.
+function chatPayload(obj) {
+  return `Here is the draft.\n\n\`\`\`json\n${JSON.stringify(obj)}\n\`\`\``;
+}
+
+// A service whose only routable provider answers the chat role with `text`. The
+// mock provider is disabled first, which is what every other test that installs
+// one does: the seeded mock is not routable, but leaving it enabled would make
+// which provider answers a question about the routing table rather than the test.
+function chatService(root, text, config = {}) {
+  const s = new Service(root, { allowMock: true, silent: true });
+  s.updateProvider('mock', { enabled: false });
+  s.addProvider({ id: 'draft-mock', name: 'Draft Mock', kind: 'mock', enabled: true, config: { routable: true, chatText: text, ...config } });
+  s.store.addModel({ id: 'draft-mock-m', providerId: 'draft-mock', name: 'draft-mock', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 10, cost: 0, quality: 10, contextLength: 100000 });
+  return s;
+}
+
+test('a project can be registered at a folder that does not exist yet, and it is created and initialized', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'aicode-init-'));
+  const root = path.join(base, 'brand-new');
+  assert.equal(fs.existsSync(root), false, 'the folder does not exist before the call');
+  const s = new Service(base, { allowMock: true, silent: true });
+  const p = s.initProject('brand-new', root, { create: true });
+  assert.ok(fs.existsSync(root), 'the folder was made');
+  assert.equal(p.path, fs.realpathSync(root));
+  assert.ok(fs.existsSync(path.join(p.path, '.git')), 'and it is a repository');
+  assert.equal(execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: p.path, encoding: 'utf8' }).trim(), p.path);
+  // Registered like any other project: a second call returns the same row rather
+  // than creating a second one for the same directory.
+  assert.equal(s.initProject('brand-new', root).id, p.id);
+});
+
+test('a folder that is not a repository is initialized only when the caller asked for one', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'aicode-init2-'));
+  const root = path.join(base, 'plain');
+  fs.mkdirSync(root);
+  fs.writeFileSync(path.join(root, 'notes.md'), 'x');
+  const s = new Service(base, { allowMock: true, silent: true });
+  // The refusal first, because it is the behaviour every existing caller depends
+  // on: a path that is not a repository is an error, not a folder git is asked to
+  // adopt - a typo in a path must not become a repository nobody meant to create.
+  assert.throws(() => s.initProject('plain', root), /not a git repository/);
+  assert.equal(fs.existsSync(path.join(root, '.git')), false, 'the refused call wrote nothing');
+  assert.throws(() => s.initProject('plain', path.join(base, 'also-missing')), /ENOENT/);
+  const p = s.initProject('plain', root, { create: true });
+  assert.ok(fs.existsSync(path.join(p.path, '.git')), 'asked for one, and it is a repository');
+  assert.equal(fs.readFileSync(path.join(p.path, 'notes.md'), 'utf8'), 'x', 'and the files already there are untouched');
+});
+
+test('a spec is revised like a plan: a proposal waits, and only approval moves it', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const first = '# Goals\n\nRename files in bulk.\n\n# Not goals\n\nA GUI.';
+  assert.equal(p.spec, null, 'a new project has no spec');
+  const drafted = s.proposeSpec(p.id, first);
+  assert.equal(drafted.spec, null, 'a proposal is not the spec');
+  assert.equal(drafted.spec_draft, first);
+  assert.ok(drafted.spec_draft_at);
+  assert.ok(!s.specRevision(drafted).hasPrev);
+  assert.equal(s.specRevision(drafted).changed, true, 'the panel shows the draft against the empty text it replaces');
+  const approved = s.approveSpec(p.id);
+  assert.equal(approved.spec, first);
+  assert.equal(approved.spec_draft, null, 'the draft is cleared in the same write that promoted it');
+  assert.equal(approved.spec_prev, null, 'nothing was replaced');
+  assert.ok(approved.spec_at);
+  // The second revision keeps the text it replaced, which is what the panel diffs.
+  const second = first.replace('A GUI.', 'A GUI, or a web service.');
+  s.proposeSpec(p.id, second);
+  assert.equal(s.project(p.id).spec, first, 'the approved text is untouched while a draft waits');
+  const again = s.approveSpec(p.id);
+  assert.equal(again.spec, second);
+  assert.equal(again.spec_prev, first);
+  const rev = s.specRevision(again);
+  assert.equal(rev.hasPrev, true);
+  assert.equal(rev.changed, false, 'nothing is waiting now');
+  // And a proposal nobody wants leaves the project as it was.
+  s.proposeSpec(p.id, 'Rewrite it as a spreadsheet.');
+  const rejected = s.rejectSpec(p.id);
+  assert.equal(rejected.spec, second);
+  assert.equal(rejected.spec_draft, null);
+  assert.throws(() => s.rejectSpec(p.id), /No spec change/);
+  assert.throws(() => s.approveSpec(p.id), /No spec change/);
+  // A proposal that changes nothing is not a draft at all: re-proposing the
+  // approved text would otherwise put a change on the table that says nothing.
+  assert.equal(s.proposeSpec(p.id, second).spec_draft, null);
+});
+
+test('the spec reaches the planner context, and architecture.md is dropped before it', () => {
+  const root = repo();
+  const dir = path.join(root, '.ai-code', 'context');
+  fs.mkdirSync(dir, { recursive: true });
+  // The generated document, at its cap: large enough that dropping it is a step
+  // the budget can be placed inside.
+  fs.writeFileSync(path.join(dir, 'architecture.md'), 'A'.repeat(20000));
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const spec = '# Goals\n\nRename files in bulk.\n\n# Not goals\n\nA GUI.';
+  s.proposeSpec(p.id, spec);
+  s.approveSpec(p.id);
+  const t = s.createTask(p.id, 'x');
+  const build = (config) => buildTaskContext(s.project(p.id), s.task(t.id), { config: contextConfig(config) });
+  const roomy = build({ budget: 1e9 });
+  assert.equal(roomy.spec, spec, 'the approved spec is in the context');
+  assert.ok(roomy.manifest.sections.includes('spec'), `named in the record: ${roomy.manifest.sections.join(', ')}`);
+  assert.ok(roomy.architecture, 'and so is the generated document, with room to spare');
+  // The generated document's own cost, measured by building the same context with
+  // its cap at one character - so the budget below can be placed inside the step
+  // that dropping it makes.
+  const withoutArch = build({ budget: 1e9, architecture: 1 });
+  const cost = roomy.manifest.tokens - withoutArch.manifest.tokens;
+  assert.ok(cost > 100, `architecture.md is worth dropping: ${cost} tokens`);
+  const tight = build({ budget: roomy.manifest.tokens - cost + 10, minBudget: 0 });
+  assert.ok(tight.manifest.tokens <= tight.manifest.budget, 'the budget is still a budget');
+  assert.ok(tight.manifest.trimmed.includes('architecture.md'), `the generated document went: ${tight.manifest.trimmed.join(', ')}`);
+  assert.ok(!tight.manifest.trimmed.includes('spec'), 'the approved text is not what was dropped for it');
+  assert.equal(tight.spec, spec);
+});
+
+test('an idea note becomes a project: the folder, the repository, and the idea as the first commit', async () => {
+  const root = holder();
+  const idea = 'Build a small CLI that renames files in bulk.';
+  const s = chatService(root, chatPayload({
+    spec: '# Goals\n\nRename files in bulk.\n\n# Not goals\n\nA GUI.',
+    suggestedPath: 'bulk-renamer',
+    tasks: [{ title: 'Walk a directory and print the plan', description: 'A dry run that prints old -> new, and changes nothing.' }],
+  }));
+  const started = s.startIntake(idea, { name: 'Bulk Renamer' });
+  const project = started.project;
+  assert.equal(project.idea, idea);
+  assert.equal(project.spec, null, 'nothing is drafted before the pass runs');
+  assert.equal(project.path, path.join(path.dirname(root), 'build-a-small-cli'), 'the path is prefilled from the note, beside this install');
+  assert.ok(fs.existsSync(project.path), 'the folder exists already, because an agent has to run in a directory');
+  assert.equal(fs.existsSync(path.join(project.path, '.git')), false, 'and it is not a repository until somebody approves the spec');
+  assert.equal(started.session.project_id, project.id, 'the conversation belongs to the project, not the other way round');
+  const question = s.store.pendingChatMessage(started.session.id);
+  assert.equal(question.content, idea, 'the note is the question the drafting pass answers');
+  assert.equal(question.run_id, started.runId);
+
+  const drafted = await s.draftIntake(started.session.id);
+  assert.ok(drafted.draft, 'the reply was read as a payload');
+  const after = s.project(project.id);
+  // The agent's own name for the folder replaces the slug of a sentence, which is a
+  // better prefill and is still only a prefill: nothing exists at either yet.
+  assert.equal(after.path, path.join(path.dirname(root), 'bulk-renamer'));
+  assert.equal(fs.existsSync(path.join(path.dirname(root), 'build-a-small-cli')), false, 'the folder the slug named is gone, not left behind empty');
+  assert.equal(after.spec, null, 'the spec is a draft: no task may be planned against it yet');
+  assert.match(after.spec_draft, /Rename files in bulk/);
+  assert.equal(s.store.pendingChatMessage(started.session.id), null, 'the note was answered');
+  const messages = s.store.listChatMessages(started.session.id);
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].role, 'assistant');
+  assert.match(messages[1].content, /Here is the draft/, 'the prose is stored for the person reading the turn');
+  assert.equal(s.drafts(project.id).length, 1);
+  assert.equal(s.drafts(project.id)[0].title, 'Walk a directory and print the plan');
+  assert.equal(s.drafts(project.id)[0].source, 'intake');
+  assert.equal(s.store.listTasks(project.id).length, 0, 'no task exists before a person approves one');
+
+  const approved = s.approveSpec(project.id, { path: after.path });
+  assert.match(approved.spec, /Rename files in bulk/);
+  assert.ok(fs.existsSync(path.join(approved.path, '.git')), 'approving the spec is what creates the repository');
+  const note = fs.readFileSync(path.join(approved.path, 'IDEA.md'), 'utf8');
+  assert.match(note, /^# Bulk Renamer/);
+  assert.match(note, /renames files in bulk/);
+  const subjects = execFileSync('git', ['log', '--format=%s'], { cwd: approved.path, encoding: 'utf8' }).trim().split('\n');
+  assert.equal(subjects.length, 1, 'the idea note is the first commit');
+  assert.match(subjects[0], /Bulk Renamer: the idea this project started from/);
+  // The first commit is what a task's worktree is cut from, so the proof is a
+  // worktree: an approved draft enters the normal flow and gets one.
+  const { task } = s.approveDraft(project.id, s.drafts(project.id)[0].id);
+  assert.equal(task.state, 'PLANNING', 'an approved draft is planned like any other task');
+  assert.equal(s.drafts(project.id).length, 0, 'and is no longer waiting');
+  await s.plan(task.id);
+  s.approve(task.id);
+  const done = await s.execute(task.id);
+  assert.equal(done.state, 'COMPLETE', 'the whole workflow runs on a project that began as an idea note');
+  assert.equal(s.store.listTasks(project.id).length, 1);
+});
+
+test('an idea note that drafts nothing leaves the project readable rather than broken', async () => {
+  const root = repo();
+  const s = chatService(root, 'I could not tell what you want to build. Tell me more about the files.');
+  const started = s.startIntake('Something about files.');
+  const drafted = await s.draftIntake(started.session.id);
+  assert.equal(drafted.draft, null);
+  assert.equal(s.project(started.project.id).spec_draft, null);
+  assert.equal(s.drafts(started.project.id).length, 0);
+  assert.match(s.store.listChatMessages(started.session.id)[1].content, /could not tell/, 'what the agent said is still the turn');
+  // A second dispatch is refused rather than drafting twice over the same note.
+  await assert.rejects(() => s.draftIntake(started.session.id), /no idea note waiting/);
+});
+
+test('proposals are drafted against the spec and the open tasks, and wait like intake drafts', async () => {
+  const root = repo();
+  const s = chatService(root, chatPayload({ tasks: [{ title: 'Add a --dry-run flag', description: 'Print the plan and exit 0.' }, { title: 'Refuse to overwrite an existing target', description: 'A rename that would clobber a file fails with a message naming it.' }] }));
+  const p = s.initProject('p', root);
+  s.proposeSpec(p.id, '# Goals\n\nRename files in bulk.');
+  s.approveSpec(p.id);
+  s.createTask(p.id, 'already on the list');
+  const session = s.askProposals(p.id);
+  assert.equal(s.store.pendingChatMessage(session.id).content, 'What else should I build?', 'the question is a real turn in the conversation');
+  const result = await s.proposeTasks(session.id);
+  assert.equal(result.tasks.length, 2);
+  assert.equal(s.drafts(p.id).length, 2);
+  assert.equal(s.drafts(p.id)[0].source, 'proposal');
+  assert.equal(s.store.listTasks(p.id).length, 1, 'nothing is created by proposing');
+  assert.equal(s.store.pendingChatMessage(session.id), null);
+  assert.match(s.store.listChatMessages(session.id)[1].content, /Here is the draft/);
+  // Approved on the same surface as an intake draft: the same call, the same flow.
+  const { task } = s.approveDraft(p.id, s.drafts(p.id)[0].id);
+  assert.equal(task.state, 'PLANNING');
+  assert.equal(s.store.listTasks(p.id).length, 2);
+  s.dropDraft(p.id, s.drafts(p.id)[0].id);
+  assert.equal(s.drafts(p.id).length, 0, 'the other is dropped');
+  assert.equal(s.store.listTasks(p.id).length, 2, 'and no task was created for it');
+  assert.throws(() => s.approveDraft(p.id, 'no-such-draft'), /Draft not found/);
+});
+
+test('a completed task drafts decision entries from its diff and its review, and a person lands them', async () => {
+  const root = repo();
+  const s = chatService(root, chatPayload({ decisions: [{ title: 'One module for the rename plan', detail: 'The plan is built before any file moves, so a dry run and a real run cannot disagree.' }] }), { writes: ['app.mjs'], reviewText: 'The implementation matches the plan.' });
+  const p = s.initProject('p', root);
+  const t = s.createTask(p.id, 'x');
+  s.prepare(t.id);
+  await s.plan(t.id);
+  s.approve(t.id);
+  const done = await s.execute(t.id);
+  assert.equal(done.state, 'COMPLETE');
+  const waiting = s.store.listDecisions(p.id, 'draft');
+  assert.equal(waiting.length, 1, 'completing the task drafted an entry');
+  assert.equal(waiting[0].task_id, t.id, 'and the entry names the task it came from');
+  assert.equal(waiting[0].state, 'draft');
+  assert.ok(waiting[0].approved_at === null);
+  assert.match(waiting[0].content, /One module for the rename plan/);
+  assert.match(waiting[0].content, /dry run and a real run/, 'the title and the why are one entry');
+  assert.equal(s.store.listDecisions(p.id, 'approved').length, 0, 'drafted is not landed');
+  assert.equal(s.store.listDecisions(p.id).length, 1);
+  const landed = s.approveDecision(waiting[0].id);
+  assert.equal(landed.state, 'approved');
+  assert.ok(landed.approved_at);
+  assert.equal(s.store.listDecisions(p.id, 'draft').length, 0);
+  assert.throws(() => s.approveDecision(waiting[0].id), /already been approved/);
+  assert.throws(() => s.rejectDecision('no-such-decision'), /Decision not found/);
+  // A rejected entry is kept rather than deleted: a decision somebody declined is
+  // part of the record of what the project decided.
+  assert.equal(s.store.listDecisions(p.id).length, 1, 'and the log is still the whole history');
+});
+
+test('a decision pass that fails does not take the completed task back out of COMPLETE', async () => {
+  const root = repo();
+  // The chat role is the one that fails, and it is the one the drafting pass runs
+  // as - so the review completes the task and the pass that follows it has nothing
+  // to route to.
+  const s = chatService(root, 'nothing', { writes: ['app.mjs'], failRoles: ['chat'] });
+  const p = s.initProject('p', root);
+  const t = s.createTask(p.id, 'x');
+  s.prepare(t.id);
+  await s.plan(t.id);
+  s.approve(t.id);
+  const done = await s.execute(t.id);
+  assert.equal(done.state, 'COMPLETE', 'the work is finished whatever the paperwork did');
+  assert.equal(s.store.listDecisions(p.id).length, 0);
+  // The retry is a call of its own, and it fails the same way - which is the point:
+  // the failure is the caller's when the caller asks for the pass directly, and
+  // swallowed only where it would otherwise take a finished task back out of the
+  // state that says it is finished.
+  await assert.rejects(() => s.draftDecisions(t.id));
+  assert.equal(s.task(t.id).state, 'COMPLETE');
+});

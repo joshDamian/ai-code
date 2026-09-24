@@ -6,6 +6,7 @@ import { CommandPalette } from './components/command-palette.mjs';
 import { requestPermission, notifyRunEnd } from './components/notify.mjs';
 import { Overview } from './views/overview.mjs';
 import { Projects } from './views/projects.mjs';
+import { Project } from './views/project.mjs';
 import { Tasks } from './views/tasks.mjs';
 import { TaskDetail } from './views/task-detail.mjs';
 import { Chat } from './views/chat.mjs';
@@ -23,6 +24,7 @@ function parseHash() {
   if (!parts.length) return { view: 'overview' };
   if (parts[0] === 'tasks' && parts[1]) return { view: 'task-detail', id: parts[1] };
   if (parts[0] === 'chat' && parts[1]) return { view: 'chat-detail', id: parts[1] };
+  if (parts[0] === 'project' && parts[1]) return { view: 'project', id: parts[1] };
   return { view: parts[0] };
 }
 
@@ -219,6 +221,9 @@ function App() {
     case 'projects':
       view = html`<${Projects} navigate=${navigate} />`;
       break;
+    case 'project':
+      view = html`<${Project} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
+      break;
     case 'tasks':
       view = html`<${Tasks} navigate=${navigate} />`;
       break;
@@ -250,8 +255,8 @@ function App() {
       view = html`<${Overview} navigate=${navigate} />`;
   }
 
-  const navRoute = route.view === 'task-detail' ? 'tasks' : route.view === 'chat-detail' ? 'chat' : route.view;
-  const title = route.view === 'task-detail' || route.view === 'chat-detail' ? pageTitle : null;
+  const navRoute = route.view === 'task-detail' ? 'tasks' : route.view === 'chat-detail' ? 'chat' : route.view === 'project' ? 'projects' : route.view;
+  const title = route.view === 'task-detail' || route.view === 'chat-detail' || route.view === 'project' ? pageTitle : null;
 
   return html`
     <${Fragment}>
