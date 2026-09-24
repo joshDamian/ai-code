@@ -16,7 +16,7 @@ import { Markdown } from '../components/markdown.mjs';
 const WORKING_STATES = new Set(['IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING']);
 const TABS = ['plan', 'execute', 'review', 'port', 'activity'];
 
-export function TaskDetail({ id, navigate }) {
+export function TaskDetail({ id, navigate, onTitle }) {
   const [data, setData] = useState(null);
   const [tab, setTab] = useState('plan');
   const [busy, setBusy] = useState(false);
@@ -56,6 +56,16 @@ export function TaskDetail({ id, navigate }) {
     actionRef.current = null;
     load();
   }, [id, load]);
+
+  // The header breadcrumb's subject. The shell owns the header and this page is the
+  // only thing that knows what it is showing, so the title is handed up rather than
+  // derived from the route there. Cleared on the way out: a task's title outliving
+  // the page it names would put the wrong subject over the next view.
+  useEffect(() => {
+    if (!onTitle) return undefined;
+    onTitle(data?.task?.title || null);
+    return () => onTitle(null);
+  }, [data?.task?.title, onTitle]);
 
   // The one event stream on the page. It used to live in the activity tab, which tore
   // it down on every tab switch: a refine that landed while the user was reading the
@@ -153,6 +163,9 @@ export function TaskDetail({ id, navigate }) {
   const live = data?.live || null;
   const liveOn = !!live;
   const working = data ? WORKING_STATES.has(data.task.state) : false;
+  // Read from the task and the server's live run, never from the current tab, so the
+  // banner below and the dot on the tabs bar always name the same step.
+  const step = data ? nextStep(data.task, live) : null;
 
   useEffect(() => {
     if (!liveOn && !working) return;
@@ -207,15 +220,33 @@ export function TaskDetail({ id, navigate }) {
       </div>
 
       <div class="tabs">
-        ${TABS.map(
-          (t) => html`
+        ${TABS.map((t) => {
+          // Two things light a tab the user is not on: a plan revision that landed
+          // under them, and the step the workflow is waiting for.
+          const revised = t === 'plan' && !!revisedAt;
+          const dot = tab !== t && (revised || t === step?.tab);
+          return html`
             <button key=${t} class="tab ${tab === t ? 'active' : ''}" onClick=${() => setTab(t)}>
               ${t.toUpperCase()}
-              ${t === 'plan' && revisedAt && tab !== 'plan' ? html`<span class="tab-dot" role="img" aria-label="Plan revised"></span>` : null}
+              ${dot ? html`<span class="tab-dot" role="img" aria-label=${revised ? 'Plan revised' : 'Next step'}></span>` : null}
             </button>
-          `
-        )}
+          `;
+        })}
       </div>
+
+      ${
+        // The step is named on the page it happens on, so it is only shown from
+        // elsewhere. Switching tabs is all this does: the button that starts the work
+        // is that tab's own, and pressing this one is not a way to press that one.
+        step && step.tab !== tab
+          ? html`
+              <div class="next-step-banner">
+                <span>${step.text}</span>
+                <button class="btn" onClick=${() => setTab(step.tab)}>${step.cta} →</button>
+              </div>
+            `
+          : null
+      }
 
       <div class="tab-content">
         ${tab === 'plan' ? html`<${PlanTab} task=${task} busy=${busy} run=${run} live=${live} revision=${data.revision} revisedAt=${revisedAt} readAction=${readAction} onAcknowledge=${acknowledgeRevision} lastRun=${runs[runs.length - 1] || null} />` : null}
@@ -500,6 +531,37 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
       }
     </div>
   `;
+}
+
+// What the workflow wants next, and which tab it happens on.
+//
+// The state machine (src/service.mjs's `transitions`) moves a task one way through
+// the tabs, and three of its transitions land while the user is looking at a tab
+// that has nothing left to do: approving a plan takes the action row off the plan
+// tab, a finished execution starts waiting for a review nobody asked for, and a
+// passed review leaves the port unmentioned. Each of those is a real action on a
+// tab that is not the current one, so it is named here rather than discovered by
+// clicking through the tabs.
+//
+// Two states return null on purpose. A live run is its own nudge - the action bar
+// is already offering Cancel - and PLANNING with no planner running is owned by the
+// plan tab's own "Start Planning" button, which is on the tab the user starts on.
+function nextStep(task, live) {
+  if (live) return null;
+  switch (task.state) {
+    case 'APPROVED':
+      return { tab: 'execute', text: 'Plan approved.', cta: 'Start execution' };
+    case 'REVIEWING':
+      return { tab: 'review', text: 'Execution finished.', cta: 'Start review' };
+    case 'REPAIRING':
+      return { tab: 'review', text: 'Review requested changes.', cta: 'Repair' };
+    case 'COMPLETE':
+      return { tab: 'port', text: 'Review passed.', cta: 'Port this change' };
+    case 'FAILED':
+      return { tab: 'plan', text: 'The last run failed.', cta: 'View details' };
+    default:
+      return null;
+  }
 }
 
 // What the tree looked like when the plan was written, recorded by plan() so the

@@ -6,6 +6,7 @@
 import { html } from '../lib.mjs';
 
 export const SHORTCUTS = [
+  { keys: ['⌘', 'K'], label: 'Command palette' },
   { keys: ['g', 'o'], label: 'Go to overview' },
   { keys: ['g', 't'], label: 'Go to tasks' },
   { keys: ['g', 'p'], label: 'Go to providers' },

@@ -1,8 +1,8 @@
 import { html, useState, useEffect } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
-import { Spinner } from '../components/spinner.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
+import { SkeletonCards, SkeletonRows } from '../components/skeleton.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
 import { Sparkline } from '../components/chart.mjs';
 
@@ -81,7 +81,15 @@ export function Overview() {
     };
   }, []);
 
-  if (loading && !data) return html`<${Spinner} message="Loading overview..." />`;
+  if (loading && !data) {
+    return html`
+      <div class="view-overview">
+        <${SkeletonCards} count=${4} />
+        <section class="section"><h2>Active Tasks</h2><${SkeletonRows} count=${4} /></section>
+        <section class="section"><h2>Provider Health</h2><${SkeletonRows} count=${3} /></section>
+      </div>
+    `;
+  }
   if (!data) return html`<${EmptyState} message="Could not load overview." />`;
 
   const activeTasks = data.tasks.filter((t) => ACTIVE_STATES.has(t.state));
