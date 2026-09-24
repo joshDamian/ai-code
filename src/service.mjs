@@ -24,7 +24,7 @@ export const transitions = {
   AWAITING_APPROVAL: ['APPROVED', 'PLANNING', 'CANCELLED'],
   APPROVED: ['IMPLEMENTING', 'CANCELLED'],
   IMPLEMENTING: ['TESTING', 'FAILED', 'APPROVED', 'CANCELLED'],
-  TESTING: ['REVIEWING', 'FAILED', 'CANCELLED'],
+  TESTING: ['REVIEWING', 'REPAIRING', 'FAILED', 'CANCELLED'],
   REVIEWING: ['COMPLETE', 'REPAIRING', 'FAILED', 'CANCELLED'],
   REPAIRING: ['TESTING', 'FAILED', 'REVIEWING', 'CANCELLED'],
   COMPLETE: [],
@@ -842,7 +842,14 @@ export class Service {
     if (!t.worktree || !fs.existsSync(t.worktree)) throw new Error('No worktree to retry — use replan instead');
     this.store.updateTask(id, { review: null });
     this.transition(id, 'TESTING');
-    await this.runTests(id);
+    try {
+      await this.test(this.task(id), t.worktree);
+    } catch (e) {
+      this.store.updateTask(id, { review: `TEST_FAILED:\n${e.message}` });
+      this.transition(id, 'REPAIRING');
+      return this.repair(id);
+    }
+    this.transition(id, 'REVIEWING');
     return this.review(id);
   }
 
