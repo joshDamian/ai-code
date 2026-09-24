@@ -513,7 +513,11 @@ async function* runProcess(cmd, args, { cwd, env, role, signal }) {
 // A claude-code provider must not inherit the ambient Anthropic routing a user
 // may have set for their own terminal, or a subscription login silently bills a
 // third-party endpoint instead.
-const AMBIENT_ROUTING_VARS = [
+//
+// Exported because the interactive terminal in src/terminal.mjs starts a shell in
+// which a person types `claude` by hand, and it has to strip exactly the same set.
+// Two copies of this list is two answers to what "ambient routing" means.
+export const AMBIENT_ROUTING_VARS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_BASE_URL',

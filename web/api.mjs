@@ -105,3 +105,13 @@ export function taskStreamUrl(id) {
 export function chatStreamUrl(id) {
   return `/api/chat/sessions/${id}/stream`;
 }
+
+// The one URL here that is not an http path: the terminal is a WebSocket, because
+// keystrokes go up it as well as output coming down. Absolute rather than relative
+// because the WebSocket constructor has no notion of a base - and the scheme is
+// derived from the page's, so a dashboard served over TLS upgrades to wss rather
+// than being refused as mixed content.
+export function terminalSocketUrl(taskId, target) {
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${scheme}//${location.host}/api/tasks/${taskId}/terminal?target=${encodeURIComponent(target)}`;
+}
