@@ -1157,7 +1157,7 @@ function row(label, value) {
 // - landing a branch needs a real `git merge`, and working out why a run failed needs
 // a claude session you can talk to - and neither fits a button.
 //
-// The picker chooses between them rather than showing both at once, because only one
+// The tabs choose between them rather than showing both at once, because only one
 // terminal can hold the keyboard, and a second one on screen is a pane that swallows
 // whatever is typed into it.
 function TerminalTab({ task, live, terminal }) {
@@ -1188,15 +1188,22 @@ function TerminalTab({ task, live, terminal }) {
           : null
       }
 
-      <div class="card">
-        <${Select}
-          label="Directory"
-          value=${spec?.id || ''}
-          options=${targets.map((t) => ({ value: t.id, label: t.label }))}
-          onChange=${setChosen}
-        />
-        ${spec?.dir ? html`<p class="muted"><code>${spec.dir}</code></p>` : null}
+      <div class="tabs">
+        ${targets.map(
+          (t) => html`
+            <button
+              key=${t.id}
+              class="tab ${spec?.id === t.id ? 'active' : ''}"
+              disabled=${!t.available}
+              title=${t.available ? '' : t.reason || ''}
+              onClick=${() => setChosen(t.id)}
+            >
+              ${t.label}
+            </button>
+          `
+        )}
       </div>
+      ${spec?.dir ? html`<p class="muted"><code>${spec.dir}</code></p>` : null}
 
       ${
         spec?.available
