@@ -4,7 +4,7 @@ import { api, taskStreamUrl } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
-import { TextArea, Select } from '../components/form.mjs';
+import { TextArea, Select, TextInput } from '../components/form.mjs';
 import { DiffViewer } from '../components/diff-viewer.mjs';
 import { EventStream } from '../components/event-stream.mjs';
 import { Markdown } from '../components/markdown.mjs';
@@ -29,6 +29,15 @@ export function TaskDetail({ id, navigate, onTitle }) {
   // revision that arrived while the user was looking at another tab: the marker means
   // "this changed under you", not "this plan has a predecessor".
   const [revisedAt, setRevisedAt] = useState(null);
+  // The parent-task editor, closed until it is asked for: linking is a rare edit
+  // and the header is where a task is read, not where it is changed.
+  const [linkingParent, setLinkingParent] = useState(false);
+  const [parentDraft, setParentDraft] = useState('');
+  // Bumped to reopen the event stream. The stream is closed when a task reaches
+  // COMPLETE, which used to be the end of the task; a feedback re-opens the
+  // workflow, so it has to re-open the stream too or the repair, its test run and
+  // its verification review would all happen off screen.
+  const [streamGen, setStreamGen] = useState(0);
   // The plan timestamp the user has seen. `undefined` until the first payload, because
   // a revision that landed before this page opened is not news.
   const seenPlanAtRef = useRef(undefined);
@@ -135,7 +144,9 @@ export function TaskDetail({ id, navigate, onTitle }) {
           if (tabRef.current !== 'plan') showToast('Plan revised.', 'success');
         }
         // One update per frame rather than one per field, so the task, the live run
-        // and the revision marker all describe the same instant.
+        // and the revision marker all describe the same instant. `parent` rides
+        // along untouched: it is set when the page loads and by a link, not by the
+        // stream, whose frame carries the task alone.
         setData((d) => (d ? { ...d, task: frame.task, live: next } : d));
         // A finished task is the one case the browser must not reconnect on. Every
         // other stream ending is the tick cap closing a resting task, and the next
@@ -153,13 +164,17 @@ export function TaskDetail({ id, navigate, onTitle }) {
       if (es) es.close();
       buffer.stop();
     };
-  }, [id, buffer, load]);
+  }, [id, buffer, load, streamGen]);
 
   // Acting on the revision is the acknowledgement. Opening the tab is not: the dot
   // says "this changed under you", and clearing it on arrival would mean the sentence
   // it was pointing at had already been dismissed by the time it was read.
   const readAction = useCallback(() => actionRef.current, []);
   const acknowledgeRevision = useCallback(() => setRevisedAt(null), []);
+  // A stream the client ended is not one the browser retries, so anything that
+  // takes a task out of a terminal state has to open a new one. Only the feedback
+  // path does, and it is what the repair that follows is watched through.
+  const reopenStream = useCallback(() => setStreamGen((n) => n + 1), []);
 
   // The server's answer, not a scan of the runs table: a run row sits at 'running'
   // for as long as it takes something to notice the process that owned it is gone,
@@ -217,8 +232,65 @@ export function TaskDetail({ id, navigate, onTitle }) {
             <span>${task.id}</span>
             <span>· ${task.project_id}</span>
             <span>· created ${task.created_at ? new Date(task.created_at).toLocaleString() : '—'}</span>
+            ${
+              // The title from the parent row the server sent on this payload, and the
+              // id when that row is gone - a link to a task that no longer exists still
+              // says which task this one was built on.
+              task.parent_id
+                ? html`<span>
+                    · builds on
+                    <a class="link" href=${`#/tasks/${task.parent_id}`}>${data.parent?.title || task.parent_id}</a>
+                    ${data.parent ? html`<span class="muted">(${data.parent.state})</span>` : null}
+                  </span>`
+                : null
+            }
           </div>
           ${task.description && task.description !== task.title ? html`<p class="task-description">${task.description}</p>` : null}
+          ${
+            linkingParent
+              ? html`
+                  <div class="card">
+                    <${TextInput}
+                      label="Parent task id"
+                      value=${parentDraft}
+                      onInput=${setParentDraft}
+                      placeholder="Paste the id of the task this one builds on"
+                      loading=${busy}
+                    />
+                    <div class="row">
+                      <button
+                        class="btn"
+                        disabled=${busy || !parentDraft.trim()}
+                        onClick=${() =>
+                          run(async () => {
+                            await api.taskLink(task.id, parentDraft.trim());
+                            setLinkingParent(false);
+                            setParentDraft('');
+                          }, 'Parent linked.')}
+                      >
+                        Link
+                      </button>
+                      ${task.parent_id
+                        ? html`<button class="btn secondary" disabled=${busy} onClick=${() => run(() => api.taskLink(task.id, null), 'Parent cleared.')}>Clear</button>`
+                        : null}
+                      <button class="btn secondary" onClick=${() => { setLinkingParent(false); setParentDraft(''); }}>Cancel</button>
+                    </div>
+                  </div>
+                `
+              : html`
+                  <div class="row">
+                    <button
+                      class="btn secondary"
+                      onClick=${() => {
+                        setParentDraft(task.parent_id || '');
+                        setLinkingParent(true);
+                      }}
+                    >
+                      ${task.parent_id ? 'Change parent' : 'Link parent'}
+                    </button>
+                  </div>
+                `
+          }
         </div>
         <a href="#/tasks" class="link">← Back to tasks</a>
       </div>
@@ -255,7 +327,7 @@ export function TaskDetail({ id, navigate, onTitle }) {
       <div class="tab-content">
         ${tab === 'plan' ? html`<${PlanTab} task=${task} busy=${busy} run=${run} live=${live} revision=${data.revision} revisedAt=${revisedAt} readAction=${readAction} onAcknowledge=${acknowledgeRevision} lastRun=${runs[runs.length - 1] || null} />` : null}
         ${tab === 'execute' ? html`<${ExecuteTab} task=${task} runs=${runs} busy=${busy} run=${run} live=${live} />` : null}
-        ${tab === 'review' ? html`<${ReviewTab} task=${task} busy=${busy} run=${run} live=${live} />` : null}
+        ${tab === 'review' ? html`<${ReviewTab} task=${task} busy=${busy} run=${run} live=${live} navigate=${navigate} onReopen=${reopenStream} />` : null}
         ${tab === 'port' ? html`<${PortTab} task=${task} branches=${data.branches || []} busy=${busy} run=${run} />` : null}
         ${tab === 'terminal' ? html`<${TerminalTab} task=${task} live=${live} terminal=${data.terminal} />` : null}
         ${tab === 'stats' ? html`<${StatsTab} runs=${runs} live=${data.live} />` : null}
@@ -1217,13 +1289,21 @@ function TerminalTab({ task, live, terminal }) {
   `;
 }
 
-function ReviewTab({ task, busy, run, live }) {
+function ReviewTab({ task, busy, run, live, navigate, onReopen }) {
+  const [note, setNote] = useState('');
+  const [asking, setAsking] = useState(false);
   // REPAIRING is set by a FAIL verdict and stays set while the repair agent runs,
   // so the live run's role is what tells "repair needed" from "repair running".
   // `live` is the server's lease-backed answer, so a reload mid-repair sees it too.
   const repairing = live?.role === 'repair';
   if (task.state === 'REVIEWING' || repairing) {
-    if (live || busy) return html`<${Spinner} message=${repairing ? 'Repair in progress...' : 'Review in progress...'} />`;
+    if (live || busy)
+      return html`
+        <div class="stack">
+          <${Spinner} message=${repairing ? 'Repair in progress...' : 'Review in progress...'} />
+          ${task.feedback ? html`<p class="muted">Repairing with your feedback: ${task.feedback}</p>` : null}
+        </div>
+      `;
     return html`
       <div class="stack">
         <p class="muted">This task is in review, but no reviewer is running.</p>
@@ -1236,6 +1316,25 @@ function ReviewTab({ task, busy, run, live }) {
   const review = task.review || '';
   const kind = bodyKind(review);
 
+  // The two things a person has to say about a task that has passed its review and
+  // has not been ported yet. One re-opens the loop - the text becomes the repair's
+  // findings and the review after it checks the work against the same words - and
+  // the other does not: a question asked with the task's plan and review in hand,
+  // which is a chat scoped to this task rather than a message in this page.
+  const completed = task.state === 'COMPLETE';
+
+  async function askQuestions() {
+    setAsking(true);
+    try {
+      const session = await api.createChatSession(task.project_id, null, task.id);
+      navigate(`#/chat/${session.id}`);
+    } catch (e) {
+      showToast(e.message, 'error');
+    } finally {
+      setAsking(false);
+    }
+  }
+
   return html`
     <div class="stack">
       ${
@@ -1246,10 +1345,50 @@ function ReviewTab({ task, busy, run, live }) {
             : html`<${Markdown} text=${review} />`
       }
       ${
+        // Set for the length of the repair it started, and cleared when that cycle
+        // ends - so a note still on the row here is one the repair has not run yet,
+        // which is exactly what the button below it does.
+        task.feedback ? html`<p class="muted">Feedback waiting to be repaired: ${task.feedback}</p>` : null
+      }
+      ${
         task.state === 'REPAIRING'
           ? html`
               <div class="row">
                 <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskRepair(task.id), 'Repair started.')}>Repair</button>
+              </div>
+            `
+          : null
+      }
+      ${
+        completed
+          ? html`
+              <div class="card">
+                <${TextArea}
+                  label="Feedback"
+                  value=${note}
+                  onInput=${setNote}
+                  rows=${4}
+                  placeholder="What should change? This re-opens the repair → review loop before the work is ported."
+                  loading=${busy}
+                />
+                <div class="row">
+                  <button
+                    class="btn"
+                    disabled=${busy || !note.trim()}
+                    onClick=${() =>
+                      run(async () => {
+                        const r = await api.taskFeedback(task.id, note.trim());
+                        setNote('');
+                        onReopen();
+                        return r;
+                      }, 'Feedback sent — repair started.')}
+                  >
+                    Send feedback
+                  </button>
+                  <button class="btn secondary" disabled=${busy || asking} onClick=${askQuestions}>
+                    ${asking ? 'Opening…' : 'Ask questions'}
+                  </button>
+                </div>
               </div>
             `
           : null

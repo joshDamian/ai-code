@@ -4,7 +4,7 @@ import { showToast } from '../components/toast.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
 import { SkeletonRows } from '../components/skeleton.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
-import { TextArea, Select } from '../components/form.mjs';
+import { TextArea, Select, TextInput } from '../components/form.mjs';
 
 const TABS = [
   { id: 'all', label: 'All', states: null },
@@ -24,6 +24,10 @@ export function Tasks({ navigate }) {
   const [showForm, setShowForm] = useState(false);
   const [projectId, setProjectId] = useState('');
   const [title, setTitle] = useState('');
+  // Optional, and by id: the parent has to be named before there is anything on
+  // screen that could offer it as a choice, and the id is what a person has when
+  // they are creating the follow-on to a task they were just reading.
+  const [parentId, setParentId] = useState('');
   const [saving, setSaving] = useState(false);
 
   async function load() {
@@ -76,9 +80,10 @@ export function Tasks({ navigate }) {
     }
     setSaving(true);
     try {
-      const t = await api.createTask(projectId, title.trim());
+      const t = await api.createTask(projectId, title.trim(), parentId.trim() || undefined);
       showToast('Task created.', 'success');
       setTitle('');
+      setParentId('');
       setShowForm(false);
       await load();
       navigate(`#/tasks/${t.id}`);
@@ -150,6 +155,13 @@ export function Tasks({ navigate }) {
                       submit(e);
                     }
                   }}
+                />
+                <${TextInput}
+                  label="Parent task id (optional)"
+                  value=${parentId}
+                  onInput=${setParentId}
+                  placeholder="Paste the id of the task this one builds on"
+                  loading=${saving}
                 />
                 <button class="btn" type="submit" disabled=${saving || !projects.length}>${saving ? 'Creating…' : 'Create task'}</button>
                 ${!projects.length ? html`<div class="muted">Add a project first.</div>` : null}

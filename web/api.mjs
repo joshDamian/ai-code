@@ -47,7 +47,9 @@ export const api = {
     const s = qs.toString();
     return request(`/api/tasks${s ? `?${s}` : ''}`);
   },
-  createTask: (projectId, title) => request('/api/tasks', { method: 'POST', body: { projectId, title } }),
+  // `parentId` is optional: a task created without one is a task with no parent,
+  // which is what every task was before the field existed.
+  createTask: (projectId, title, parentId) => request('/api/tasks', { method: 'POST', body: { projectId, title, parentId } }),
   taskShow: (id) => request(`/api/tasks/${id}/show`),
   // Without `before` this returns the newest window; with it, the window ending
   // just before that event id. Callers that render the result must bound it.
@@ -67,6 +69,12 @@ export const api = {
   taskReplan: (id) => request(`/api/tasks/${id}/replan`, { method: 'POST' }),
   taskRetry: (id) => request(`/api/tasks/${id}/retry`, { method: 'POST' }),
   taskRefine: (id, feedback) => request(`/api/tasks/${id}/refine`, { method: 'POST', body: { feedback } }),
+  // A task's parent, set or cleared. `null` is the clear, so an accidental link is
+  // removable with the same call that made it.
+  taskLink: (id, parentId) => request(`/api/tasks/${id}/link`, { method: 'POST', body: { parentId } }),
+  // Re-opens a COMPLETE task with a human's instruction. The call is blocking: the
+  // repair, its tests and the verification review all run before it answers.
+  taskFeedback: (id, text) => request(`/api/tasks/${id}/feedback`, { method: 'POST', body: { text } }),
   taskCancel: (id) => request(`/api/tasks/${id}/cancel`, { method: 'POST' }),
   taskClose: (id) => request(`/api/tasks/${id}/close`, { method: 'POST' }),
   // `to` is a query parameter because this is a read: which branch the port would
@@ -98,7 +106,10 @@ export const api = {
   updateAutomation: (id, body) => request(`/api/automations/${id}`, { method: 'PATCH', body }),
 
   chatSessions: (projectId) => request(`/api/chat/sessions${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
-  createChatSession: (projectId, title) => request('/api/chat/sessions', { method: 'POST', body: { projectId, title } }),
+  // `taskId` scopes the conversation to a task, so the agent answering it is handed
+  // that task's plan and review. Omitted, this is the project-wide chat it has
+  // always been.
+  createChatSession: (projectId, title, taskId) => request('/api/chat/sessions', { method: 'POST', body: { projectId, title, taskId } }),
   chatSession: (id) => request(`/api/chat/sessions/${id}`),
   sendChatMessage: (sessionId, message) => request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', body: { message } }),
 };

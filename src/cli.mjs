@@ -16,7 +16,7 @@ Context
   context init <project-id>
   context enrich <project-id>
 Task
-  task create <project-id> <title>
+  task create <project-id> <title> [--parent <task-id>]
   task list [project-id] [--state <STATE>]
   task show <id>
   task status <id>
@@ -30,6 +30,8 @@ Task
   task port <id> [--to <branch>] [--dry-run] [--clean]
   task cancel <id>
   task close <id>
+  task link <id> [<parent-id>]
+  task feedback <id> <text>
 Providers
   provider list
   provider add-claude
@@ -117,7 +119,7 @@ const CATALOGS = {
 
 // Commands the task namespace accepts. `execute` and the planning verbs are async;
 // the state-machine verbs are not.
-const TASK_OPS = ['plan', 'approve', 'execute', 'implement', 'test', 'review', 'repair', 'reject', 'replan', 'retry', 'refine', 'diff', 'port', 'cancel', 'close'];
+const TASK_OPS = ['plan', 'approve', 'execute', 'implement', 'test', 'review', 'repair', 'reject', 'replan', 'retry', 'refine', 'diff', 'port', 'cancel', 'close', 'link', 'feedback'];
 // The steps the server will run as a background job. `port` is not one: a job
 // carries no options, so a target branch would need a column on `jobs` and a step
 // in the runner, and a merge is a decision rather than a long agent run.
@@ -148,7 +150,16 @@ async function enqueueRemote(taskId, kind) {
 
 async function taskCommand(sub, rest) {
   if (sub === 'create') {
-    const t = s.createTask(rest[0], rest.slice(1).join(' '));
+    // Scanned and stripped before the text is joined, so a description is the words
+    // around the flag rather than whatever survived it. Scanned over `words` rather
+    // than `rest` so the indices are relative to the text and the project id - which
+    // is always rest[0] - is never one of the two that come out.
+    const words = rest.slice(1);
+    const pi = words.indexOf('--parent');
+    const parentId = pi >= 0 ? words[pi + 1] : undefined;
+    if (pi >= 0 && (!parentId || parentId.startsWith('--'))) throw new Error('--parent needs a task id');
+    const text = (pi >= 0 ? words.filter((_, i) => i !== pi && i !== pi + 1) : words).join(' ');
+    const t = s.createTask(rest[0], text, { parentId });
     return out(s.prepare(t.id));
   }
   if (sub === 'list') {
@@ -164,7 +175,10 @@ async function taskCommand(sub, rest) {
   // changed. Both are null or empty on a task that has neither.
   if (sub === 'show') {
     const task = s.task(rest[0]);
-    return out({ task, runs: s.store.listRuns(rest[0]), live: s.liveRun(rest[0]), revision: s.revision(task) });
+    // The parent row rather than only its id, for the same reason the server's
+    // `show` carries it: the id alone is not what a reader wants to see next to a
+    // task, and resolving it is one lookup this end already has.
+    return out({ task, runs: s.store.listRuns(rest[0]), live: s.liveRun(rest[0]), revision: s.revision(task), parent: task.parent_id ? s.store.getTask(task.parent_id) || null : null });
   }
   // What a background job is doing, which the run rows alone do not answer: a
   // queued job has no run yet, and the job is what says so.
@@ -211,6 +225,9 @@ async function taskCommand(sub, rest) {
     : sub === 'port' ? await s.port(id, { to, dryRun, clean })
     : sub === 'cancel' ? s.cancelTask(id)
     : sub === 'close' ? s.closeTask(id)
+    // No second argument is the clear, which is how a link nobody meant is removed.
+    : sub === 'link' ? s.linkTask(id, rest[1] || null)
+    : sub === 'feedback' ? await s.feedback(id, rest.slice(1).join(' '))
     // Named rather than left to the last arm. This chain used to end in cancelTask,
     // so any verb added to TASK_OPS without a line here cancelled the task.
     : (() => { throw new Error(`Unhandled task operation: ${sub}`); })();

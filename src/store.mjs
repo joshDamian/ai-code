@@ -85,6 +85,17 @@ export class Store {
         // available. NULL means route normally, which is what every task written
         // before this column existed gets.
         ['plan_model', 'TEXT'],
+        // The task this one builds on, when a person has drawn that line. One level
+        // only - the context builder reads the parent's own row and not its parent's
+        // - so this is a reference rather than a tree, and a cycle costs nothing
+        // beyond a summary the planner did not need.
+        ['parent_id', 'TEXT'],
+        // A human's instruction on a completed task, set while the repair that
+        // answers it runs and cleared once it has. It is a column rather than a
+        // message table because it is read in exactly one place - the repair's
+        // findings - and the review after it has the same text through the same
+        // argument.
+        ['feedback', 'TEXT'],
       ],
       models: [
         ['provider_model_id', 'TEXT'],
@@ -126,6 +137,10 @@ export class Store {
         // would invent a measurement.
         ['context_state', 'TEXT'],
       ],
+      // A conversation can be scoped to a task, which is how a question about a
+      // completed task is asked with that task's plan and review in hand. NULL is
+      // the project-scoped chat every session written before this column was.
+      chat_sessions: [['task_id', 'TEXT']],
     })) {
       for (const [column, type] of columns) this.ensureColumn(table, column, type);
     }
@@ -281,9 +296,9 @@ export class Store {
   addTask(t) {
     this.db
       .prepare(
-        'INSERT INTO tasks(id,project_id,title,description,state,plan,context,review,created_at,updated_at,worktree,branch,base_commit) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)'
+        'INSERT INTO tasks(id,project_id,title,description,state,plan,context,review,created_at,updated_at,worktree,branch,base_commit,parent_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
       )
-      .run(t.id, t.projectId, t.title, t.description ?? null, t.state, t.plan ?? null, t.context ?? null, t.review ?? null, t.createdAt, t.updatedAt, null, null, null);
+      .run(t.id, t.projectId, t.title, t.description ?? null, t.state, t.plan ?? null, t.context ?? null, t.review ?? null, t.createdAt, t.updatedAt, null, null, null, t.parentId ?? null);
     return this.getTask(t.id);
   }
 
@@ -310,8 +325,8 @@ export class Store {
     const task = this.getTask(id);
     const n = { ...task, ...patch, updated_at: new Date().toISOString() };
     this.db
-      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=?,plan_prev=?,plan_at=?,plan_model=? WHERE id=?')
-      .run(n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, n.plan_prev ?? null, n.plan_at ?? null, n.plan_model ?? null, id);
+      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=?,plan_prev=?,plan_at=?,plan_model=?,parent_id=?,feedback=? WHERE id=?')
+      .run(n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, n.plan_prev ?? null, n.plan_at ?? null, n.plan_model ?? null, n.parent_id ?? null, n.feedback ?? null, id);
     return this.getTask(id);
   }
 
@@ -760,9 +775,9 @@ export class Store {
   // uuid cannot be one. The `*` is expanded first so an explicit column list
   // would shadow nothing - `seq` is the only added name.
 
-  createChatSession({ id, projectId, title }) {
+  createChatSession({ id, projectId, title, taskId }) {
     const now = new Date().toISOString();
-    this.db.prepare('INSERT INTO chat_sessions(id,project_id,title,created_at,updated_at) VALUES(?,?,?,?,?)').run(id, projectId, title, now, now);
+    this.db.prepare('INSERT INTO chat_sessions(id,project_id,title,created_at,updated_at,task_id) VALUES(?,?,?,?,?,?)').run(id, projectId, title, now, now, taskId ?? null);
     return this.getChatSession(id);
   }
 
@@ -777,11 +792,29 @@ export class Store {
     return this.db.prepare(q).all(...(projectId ? [projectId] : []));
   }
 
+  // The timestamp a write to a conversation lands on, which has to be strictly
+  // later than the one already on the row. Timestamps are millisecond-resolution
+  // and a conversation is created and first written to in the same millisecond as
+  // often as not, so a plain `new Date()` there leaves `updated_at` equal to
+  // `created_at` - and `listChatSessions` orders by `updated_at`, so "newest
+  // reply first" would quietly be creation order for exactly the conversations
+  // that are moving. One millisecond past the value already there is the smallest
+  // step that keeps that order honest: this column is a position in a list, and
+  // the clock is only how the first one is seeded.
+  #touch(previous) {
+    const now = new Date().toISOString();
+    if (!previous || now > previous) return now;
+    const next = Date.parse(previous) + 1;
+    // A timestamp that will not parse is not a position to step past: the clock is
+    // a worse answer than a tie and a better one than a RangeError out of a write.
+    return Number.isNaN(next) ? now : new Date(next).toISOString();
+  }
+
   updateChatSession(id, patch) {
     const s = this.getChatSession(id);
     if (!s) return null;
-    const n = { ...s, ...patch, updated_at: new Date().toISOString() };
-    this.db.prepare('UPDATE chat_sessions SET title=?,updated_at=? WHERE id=?').run(n.title, n.updated_at, id);
+    const n = { ...s, ...patch, updated_at: this.#touch(s.updated_at) };
+    this.db.prepare('UPDATE chat_sessions SET title=?,updated_at=?,task_id=? WHERE id=?').run(n.title, n.updated_at, n.task_id ?? null, id);
     return this.getChatSession(id);
   }
 
@@ -791,11 +824,14 @@ export class Store {
 
   // Writing a message is also what makes its conversation current: the session
   // list is ordered by `updated_at`, and a chat whose newest reply is an hour old
-  // would otherwise sort as though nothing had been said.
+  // would otherwise sort as though nothing had been said. The row is read back for
+  // its timestamp because the step is off *that* value rather than off the clock -
+  // see `#touch`.
   addChatMessage(m) {
     const now = new Date().toISOString();
     this.db.prepare('INSERT INTO chat_messages(id,session_id,role,content,run_id,created_at) VALUES(?,?,?,?,?,?)').run(m.id, m.sessionId, m.role, m.content, m.runId ?? null, now);
-    this.db.prepare('UPDATE chat_sessions SET updated_at=? WHERE id=?').run(now, m.sessionId);
+    const s = this.getChatSession(m.sessionId);
+    this.db.prepare('UPDATE chat_sessions SET updated_at=? WHERE id=?').run(this.#touch(s && s.updated_at), m.sessionId);
     return this.getChatMessage(m.id);
   }
 

@@ -154,6 +154,12 @@ export function createApi(baseUrl) {
     reject: (id) => post(`/api/tasks/${id}/reject`),
     replan: (id) => post(`/api/tasks/${id}/replan`),
     refine: (id, feedback) => post(`/api/tasks/${id}/refine`, { feedback }),
+    // A task's parent: an id sets or replaces it, null clears it. Blocking, like
+    // every other verb here, because the link is what the next planner run reads.
+    link: (id, parentId) => post(`/api/tasks/${id}/link`, { parentId }),
+    // Re-opens a COMPLETE task with a human's instruction. Blocking: the repair, its
+    // tests and the verification review all run before this answers.
+    feedback: (id, text) => post(`/api/tasks/${id}/feedback`, { text }),
     cancel: (id) => post(`/api/tasks/${id}/cancel`),
     close: (id) => post(`/api/tasks/${id}/close`),
     updatePlan: (id, plan) => patch(`/api/tasks/${id}/plan`, { plan }),

@@ -27,7 +27,14 @@ export const transitions = {
   TESTING: ['REVIEWING', 'REPAIRING', 'FAILED', 'CANCELLED'],
   REVIEWING: ['COMPLETE', 'REPAIRING', 'FAILED', 'CANCELLED'],
   REPAIRING: ['TESTING', 'FAILED', 'REVIEWING', 'CANCELLED'],
-  COMPLETE: [],
+  // Not terminal, and deliberately so. A review that passed means the agent's work
+  // survived its own loop, which is not the same as the work being what the person
+  // wanted; the port is human-triggered, so the moment between the two is where a
+  // human reads the result. `feedback` is what re-opens the task from here, into
+  // the repair cycle the reviewer already drives. Nothing else may leave COMPLETE:
+  // a plan, a test or an implement from here would be a second run over work that
+  // has already been approved once.
+  COMPLETE: ['REPAIRING'],
   FAILED: ['PLANNING', 'TESTING', 'CANCELLED'],
   CANCELLED: [],
 };
@@ -442,6 +449,38 @@ const DEFAULT_CHAT_TITLE = 'New chat';
 // the part that survives the cut.
 const CHAT_HISTORY_CHARS = 24000;
 
+// What a task-scoped question is handed about the task it is asking about. The
+// assembler caps file bodies and the review section, but the plan and this
+// attachment are the service's own strings and would otherwise be unbounded: a
+// plan can run to tens of thousands of characters and a review is prose. The plan
+// is worth the largest cap of the three - it is the document that records what the
+// work was supposed to be, which is what most questions about a finished task are
+// actually about - and the description is capped smallest because the question
+// usually repeats enough of it to be readable without.
+const CHAT_TASK_PLAN_CHARS = 6000;
+const CHAT_TASK_DESCRIPTION_CHARS = 4000;
+const CHAT_TASK_REVIEW_CHARS = 3000;
+
+// One string cap, with the same ellipsis the context assembler's doc reader uses,
+// so a truncated block reads as truncated rather than as text that ends mid-word.
+function cap(text, max) {
+  const s = String(text ?? '');
+  return s.length > max ? `${s.slice(0, max)}\n… (truncated)` : s;
+}
+
+// The task a scoped question is about, as the prompt reads it. Title and state
+// first because the state is half the answer to "is this finished" - and the
+// review last because it is the longest and the least often quoted.
+function taskSubject(task) {
+  return [
+    `TASK BEING ASKED ABOUT: ${task.title}`,
+    `id: ${task.id}`,
+    `state: ${task.state}`,
+    `description: ${cap(task.description || '—', CHAT_TASK_DESCRIPTION_CHARS)}`,
+    `review: ${cap(task.review || '—', CHAT_TASK_REVIEW_CHARS)}`,
+  ].join('\n');
+}
+
 // One assistant message can carry several tool calls at once, so the content
 // blocks are counted rather than the messages that contain them.
 // The calls made inside a subagent are not the calling agent's calls, and a frame
@@ -628,8 +667,9 @@ export class Service {
     return writeContext(this.project(projectId));
   }
 
-  createTask(projectId, text) {
+  createTask(projectId, text, { parentId } = {}) {
     this.project(projectId);
+    if (parentId) this.#checkParent(projectId, parentId);
     const now = new Date().toISOString();
     return this.store.addTask({
       id: this.store.id(),
@@ -637,9 +677,34 @@ export class Service {
       title: generateTitle(text),
       description: text,
       state: 'CREATED',
+      parentId: parentId || null,
       createdAt: now,
       updatedAt: now,
     });
+  }
+
+  // The task a task builds on, set after the fact as well as at creation. A
+  // reference like this is drawn by a person who has just read both tasks, which is
+  // rarely the moment the second one was created - "loop this one into what that
+  // one did" is the whole case, and it arrives late. Any state is allowed on either
+  // end: a parent that is still running is a parent, and the summary says so.
+  linkTask(id, parentId) {
+    const t = this.task(id);
+    const next = parentId || null;
+    if (next === id) throw new Error('A task cannot be its own parent');
+    if (next) this.#checkParent(t.project_id, next);
+    // `null` clears, which is the same call with nothing named. A reference nobody
+    // meant to draw has to be removable by the person who drew it.
+    return this.store.updateTask(id, { parent_id: next });
+  }
+
+  // A parent is only ever read, never walked, so the check is one row and its
+  // project. Cross-project is refused because the two tasks then share no tree: the
+  // planner would be handed a summary of work in a repository it cannot read.
+  #checkParent(projectId, parentId) {
+    const p = this.store.getTask(parentId);
+    if (!p) throw new Error(`Parent task not found: ${parentId}`);
+    if (p.project_id !== projectId) throw new Error('Parent task belongs to another project');
   }
 
   prepare(id) {
@@ -928,12 +993,30 @@ export class Service {
 
   // -- direct chat ----------------------------------------------------------
 
-  createChatSession(projectId, title) {
+  // `taskId` scopes the conversation to a task, which is how a question about one
+  // is asked with that task's own record in hand. Optional, and null is the
+  // project-wide chat every session without it has always been - the two are one
+  // feature with one difference in the prompt, not two surfaces.
+  createChatSession(projectId, title, taskId) {
     this.project(projectId);
+    let scoped = null;
+    if (taskId) {
+      scoped = this.store.getTask(taskId);
+      if (!scoped) throw new Error(`Task not found: ${taskId}`);
+      // The same rule the parent link has, for the same reason: a session scoped
+      // to another project's task would attach a record the agent cannot read the
+      // tree for, and the question would be answered against the wrong repository.
+      if (scoped.project_id !== projectId) throw new Error('Task belongs to another project');
+    }
     return this.store.createChatSession({
       id: this.store.id(),
       projectId,
-      title: String(title || '').trim() || DEFAULT_CHAT_TITLE,
+      // A scoped session is named for its subject, so a list of conversations reads
+      // as what was asked about. It is deliberately not DEFAULT_CHAT_TITLE: the
+      // first question renames a session carrying that title, and a conversation
+      // about task 632ed54a should not lose the name of the task it is about.
+      title: String(title || '').trim() || (scoped ? `Questions about ${scoped.title}` : DEFAULT_CHAT_TITLE),
+      taskId: scoped ? scoped.id : null,
     });
   }
 
@@ -978,6 +1061,18 @@ export class Service {
     this.chatBusy.add(sessionId);
     try {
       const project = this.project(session.project_id);
+      // A scoped session is answered with the task in front of it. The question is
+      // still the `TASK` half of the prompt - it is a question, not a task - and the
+      // subject rides on the same object, which is what puts it in the prompt the
+      // agent reads. "What did the review find" is unanswerable from the project
+      // tree alone, and the plan is what a decision recorded at the time it was
+      // made. The task's own terms also pull the file ranking toward the files it
+      // touched, which is a wanted effect rather than a side one.
+      //
+      // A scoped task that has since been deleted degrades to the project-wide
+      // answer rather than refusing: the conversation outlives the task, and a chat
+      // that cannot answer because its subject is gone is a chat nobody can use.
+      const subject = session.task_id ? this.store.getTask(session.task_id) || null : null;
       const result = await this.runRole(
         // A chat's run belongs to no task, and `runRole` writes it to `chat_runs`
         // rather than to `runs` - see the chatSessionId option below. So this
@@ -987,10 +1082,15 @@ export class Service {
           id: null,
           project_id: session.project_id,
           title: pending.content,
-          description: pending.content,
-          // The prompt shape runRole builds has a plan section in it. A chat has
-          // none, and the honest text is why rather than a plan that does not exist.
-          plan: 'No plan: this is a direct question about the project, not a task. Nothing here has been approved for implementation.',
+          description: subject ? `${pending.content}\n\n${taskSubject(subject)}` : pending.content,
+          // The prompt shape runRole builds has a plan section in it, and a scoped
+          // conversation puts the task's real plan there: the plan is read-only
+          // context a question is answered against, which is exactly what this
+          // slot is for. An unscoped chat has none, and the honest text is why
+          // rather than a plan that does not exist.
+          plan: subject
+            ? cap(subject.plan || 'No plan was recorded for this task.', CHAT_TASK_PLAN_CHARS)
+            : 'No plan: this is a direct question about the project, not a task. Nothing here has been approved for implementation.',
         },
         'chat',
         chatPrompt(this.#chatHistory(sessionId, pending.run_id)),
@@ -1370,7 +1470,12 @@ export class Service {
     // a repair is not failed over a measurement, and an unmeasured delta makes the
     // review that follows the full one, which is what it was before there was a delta.
     const before = worktreeHashes(t.worktree);
-    const findings = t.review || 'Review failed.';
+    // A human's feedback is composed in front of the reviewer's findings rather
+    // than kept in a channel of its own, so the repair acts on one text and the
+    // verification after it checks the same text - the reviewer's own words are
+    // still there underneath, because the human is answering that review and a
+    // repair that could not read it would be fixing half the story.
+    const findings = (t.feedback ? `Human feedback:\n${t.feedback}\n\n` : '') + (t.review || 'Review failed.');
     try {
       await this.runRole(t, 'repair', `Repair the review findings in the worktree. Re-run relevant tests after fixing. Review findings:\n${findings}`, t.worktree);
     } catch (e) {
@@ -1406,6 +1511,44 @@ export class Service {
       changed,
       test: command && result.passed ? `\`${command}\` passed.` : null,
     });
+  }
+
+  // Re-opens a completed task with a human's instruction in hand.
+  //
+  // COMPLETE is where a review that passed leaves the work, and the port is a
+  // person's decision rather than the harness's, so this is the write for the step
+  // between the two. The note is stored on the task before the transition, because
+  // `repair` reads its findings off the row, and it is cleared once the cycle has
+  // run: a feedback answers one review, and a later review-FAIL repair finding the
+  // same sentence still on the row would be answering it a second time.
+  //
+  // What follows is repair's own chain - REPAIRING, the test command, then the
+  // verification review - which is what makes a human's instruction and a
+  // reviewer's finding the same kind of thing: text a repair acts on and a review
+  // then checks. No new state, and no new place for the workflow to be wrong.
+  async feedback(id, text) {
+    const t = this.task(id);
+    if (t.state !== 'COMPLETE') throw new Error('Task must be in COMPLETE to give feedback');
+    // The same guard every other verb here has, and it matters most for this one:
+    // the task is COMPLETE while a port, a diff or a terminal session may be
+    // reading the worktree, and a repair started under one of those is an edit the
+    // reader never agreed to.
+    this.#assertIdle(id, 'giving feedback');
+    const note = String(text || '').trim();
+    if (!note) throw new Error('Feedback is required');
+    this.store.updateTask(id, { feedback: note });
+    try {
+      this.transition(id, 'REPAIRING');
+      return await this.repair(id);
+    } finally {
+      // Cleared even when the cycle threw. A run that failed leaves the task where
+      // its failure left it, and the note's whole life is the repair it was written
+      // for - so it is spent either way. What the task keeps is the review the
+      // cycle ended on, which is written in light of the note; the note itself is
+      // not kept, because a sentence answering one review is not context for the
+      // next one.
+      this.store.updateTask(id, { feedback: null });
+    }
   }
 
   // -- porting --------------------------------------------------------------

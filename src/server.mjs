@@ -51,7 +51,7 @@ const body = (req) =>
     });
   });
 
-const routeTask = /^\/api\/tasks\/([^/]+)\/(plan|approve|execute|implement|test|review|repair|reject|replan|retry|refine|diff|port|cancel|close|show|activity)$/;
+const routeTask = /^\/api\/tasks\/([^/]+)\/(plan|approve|execute|implement|test|review|repair|reject|replan|retry|refine|diff|port|cancel|close|show|activity|link|feedback)$/;
 // The one route that always queues rather than blocks. Matched before routeTask,
 // whose pattern has no room for the extra path segment.
 const routeBackground = /^\/api\/tasks\/([^/]+)\/execute\/background$/;
@@ -308,7 +308,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, tasks);
       }
       const b = await body(req);
-      const t = svc.createTask(b.projectId, b.title);
+      const t = svc.createTask(b.projectId, b.title, { parentId: b.parentId });
       return json(res, svc.prepare(t.id), 201);
     }
 
@@ -342,11 +342,32 @@ const server = http.createServer(async (req, res) => {
         // whether the worktree directory is still there is a read of the filesystem
         // the client cannot do. It is answered by the same function the upgrade
         // handler below uses, so a target offered here is a target accepted there.
-        return json(res, { task, runs: svc.store.listRuns(id), branches: svc.destinations(id), revision: svc.revision(task), live: svc.liveRun(id), ported: svc.ported(id), terminal: { enabled: terminalEnabled, targets: terminalTargets(task, repoOf(task)) } });
+        // The parent row rides on the same payload for the reason `branches` does:
+        // the header renders the parent's *title*, and a second fetch to turn the
+        // id the task carries into that title would render the link as a uuid for
+        // one round trip every time. Null when there is no link, and null when the
+        // linked row has since been deleted, which the view reads as "no parent".
+        return json(res, { task, runs: svc.store.listRuns(id), branches: svc.destinations(id), revision: svc.revision(task), live: svc.liveRun(id), ported: svc.ported(id), parent: task.parent_id ? svc.store.getTask(task.parent_id) || null : null, terminal: { enabled: terminalEnabled, targets: terminalTargets(task, repoOf(task)) } });
       }
       if (op === 'refine') {
         const b = await body(req);
         return json(res, await svc.refine(id, b.feedback));
+      }
+      // The link is set and cleared through the same route: `parentId` null or
+      // absent is the clear, which is what makes an accidental reference removable.
+      if (op === 'link') {
+        const b = await body(req);
+        return json(res, svc.linkTask(id, b.parentId ?? null));
+      }
+      // Blocking, like execute and for the same reason: the repair cycle it starts
+      // is what the caller asked for, and the button that says so waits for it.
+      if (op === 'feedback') {
+        const b = await body(req);
+        const text = String(b.text || '').trim();
+        // Refused here as well as in the service, because a 400 with a reason is a
+        // better answer to an empty box than a run that fails after the transition.
+        if (!text) return json(res, { error: 'text is required' }, 400);
+        return json(res, await svc.feedback(id, text));
       }
       // Read-only, so its one option rides in the query string: the dashboard asks
       // this with a GET, unlike every other op here.
@@ -405,7 +426,9 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/api/chat/sessions') {
       if (req.method === 'GET') return json(res, svc.store.listChatSessions(u.searchParams.get('projectId') || undefined));
       const b = await body(req);
-      return json(res, svc.createChatSession(b.projectId, b.title), 201);
+      // `taskId` scopes the conversation to a task, which is how a question about a
+      // finished one is asked with its plan and review in hand.
+      return json(res, svc.createChatSession(b.projectId, b.title, b.taskId), 201);
     }
 
     const chat = u.pathname.match(/^\/api\/chat\/sessions\/([^/]+)(?:\/(messages|stream))?$/);

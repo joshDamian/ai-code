@@ -928,3 +928,168 @@ test('the dashboard pins the terminal emulator beside the other CDN modules',asy
     assert.match(view.body,/'terminal'/);
   }finally{s.stop()}
 });
+
+// A task naming the task it builds on, over HTTP. The link is one field written
+// through two routes - at creation and afterwards - and the header that renders it
+// reads the parent's *title*, which is why `show` carries the row and not the id.
+test('POST /api/tasks carries a parent, and /link sets and clears it',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-parent-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const parent=s.createTask(p.id,'move the queue into runner.mjs');
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const created=await post(`${srv.base}/api/tasks`,{projectId:p.id,title:'make it survive a restart',parentId:parent.id});
+    assert.equal(created.status,201);
+    const child=JSON.parse(created.body);
+    assert.equal(child.parent_id,parent.id,'the parent is set on the row the response carries');
+    assert.equal(s.task(child.id).parent_id,parent.id);
+    const show=JSON.parse((await get(`${srv.base}/api/tasks/${child.id}/show`)).body);
+    assert.equal(show.parent.id,parent.id,'the show payload resolves the row, not only the id');
+    assert.equal(show.parent.title,'move the queue into runner.mjs');
+    // The task with no link says so with null rather than with an absent key, so a
+    // client can tell "no parent" from "this server does not know about parents".
+    const alone=JSON.parse((await post(`${srv.base}/api/tasks`,{projectId:p.id,title:'unrelated'})).body);
+    assert.equal(alone.parent_id,null);
+    assert.equal(JSON.parse((await get(`${srv.base}/api/tasks/${alone.id}/show`)).body).parent,null);
+    // Set after the fact, then cleared by naming nothing.
+    assert.equal(JSON.parse((await post(`${srv.base}/api/tasks/${alone.id}/link`,{parentId:parent.id})).body).parent_id,parent.id);
+    assert.equal(s.task(alone.id).parent_id,parent.id);
+    assert.equal(JSON.parse((await post(`${srv.base}/api/tasks/${alone.id}/link`,{})).body).parent_id,null);
+    assert.equal(s.task(alone.id).parent_id,null);
+    // A parent that is not there is a 400 with the reason, not a 500.
+    const bad=await post(`${srv.base}/api/tasks/${alone.id}/link`,{parentId:'no-such-task'});
+    assert.equal(bad.status,400);
+    assert.match(JSON.parse(bad.body).error,/not found/);
+    assert.equal(s.task(alone.id).parent_id,null);
+  }finally{srv.stop()}
+});
+
+// Feedback on a completed task, which is the one write that takes a task back out
+// of COMPLETE. Over HTTP because that is where the empty box is refused: a 400 with
+// a reason is a better answer to it than a run that fails after the transition.
+test('POST /api/tasks/:id/feedback re-opens a completed task, and refuses an empty note',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-feedback-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  // A mock that writes, so the repair changes the tree. One that did not would be
+  // read as a repair that answered nothing, and the cycle would stop in REVIEWING
+  // instead of running the verification this test is about.
+  s.updateProvider('mock',{config:{writes:['app.mjs']}});
+  const t=s.createTask(p.id,'build the queue');
+  s.prepare(t.id);
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    assert.equal((await post(`${srv.base}/api/tasks/${t.id}/plan`)).status,200);
+    assert.equal((await post(`${srv.base}/api/tasks/${t.id}/approve`)).status,200);
+    assert.equal(JSON.parse((await post(`${srv.base}/api/tasks/${t.id}/execute`,{})).body).state,'COMPLETE');
+    const empty=await post(`${srv.base}/api/tasks/${t.id}/feedback`,{text:'   '});
+    assert.equal(empty.status,400);
+    assert.match(JSON.parse(empty.body).error,/text is required/);
+    assert.equal(s.task(t.id).state,'COMPLETE','a refused note leaves the task where it was');
+    const back=await post(`${srv.base}/api/tasks/${t.id}/feedback`,{text:'The retry path needs a test.'});
+    assert.equal(back.status,200);
+    // The whole cycle ran inside the request: repair, the test command, and the
+    // verification that signed the work off again.
+    assert.equal(s.task(t.id).state,'COMPLETE');
+    assert.equal(s.task(t.id).feedback,null,'the note is spent on the repair it was written for');
+    const runs=s.store.listRuns(t.id);
+    assert.equal(runs.filter(r=>r.role==='repair').length,1,'the repair the note was written for ran');
+    assert.equal(runs.filter(r=>r.role==='reviewer').length,2,'and the verification after it, which is what the cycle ends on');
+  }finally{srv.stop()}
+});
+
+// A conversation scoped to a task: how a question about a finished one is asked
+// with that task's plan and review in hand, rather than against the tree alone.
+test('POST /api/chat/sessions accepts a task to scope the conversation to',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-task-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'move the queue into runner.mjs');
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const r=await post(`${srv.base}/api/chat/sessions`,{projectId:p.id,taskId:t.id});
+    assert.equal(r.status,201);
+    const body=JSON.parse(r.body);
+    assert.equal(body.task_id,t.id);
+    assert.equal(body.title,'Questions about move the queue into runner.mjs');
+    // The unscoped session is the project-wide chat it has always been, down to the
+    // column being null rather than absent.
+    const plain=JSON.parse((await post(`${srv.base}/api/chat/sessions`,{projectId:p.id})).body);
+    assert.equal(plain.task_id,null);
+    assert.equal(plain.title,'New chat');
+    // A subject that is not there is a 400, like every other reference this API
+    // refuses, rather than a session scoped to nothing.
+    const bad=await post(`${srv.base}/api/chat/sessions`,{projectId:p.id,taskId:'no-such-task'});
+    assert.equal(bad.status,400);
+    assert.match(JSON.parse(bad.body).error,/not found/);
+  }finally{srv.stop()}
+});
+
+// The CLI's own handling of the two new verbs, which is where the flag scanning
+// lives: `--parent` has to come out of the description before the words are joined,
+// and it has to come out of the words after the project id rather than out of all of
+// them, or the project id is what gets eaten.
+test('ai-code task create takes --parent without eating the description or the project',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-cli-parent-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const run=(args)=>new Promise((res)=>{const proc=spawn(process.execPath,[cliPath,'task',...args],{cwd:root,stdio:['ignore','pipe','pipe']});let out='',err='';proc.stdout.on('data',c=>out+=c);proc.stderr.on('data',c=>err+=c);proc.on('close',code=>res({code,out,err}))});
+  const parent=JSON.parse((await run(['create',p.id,'move the queue into runner.mjs'])).out);
+  const created=await run(['create',p.id,'make','it','survive','a','restart','--parent',parent.id]);
+  assert.equal(created.code,0,created.err);
+  const child=JSON.parse(created.out);
+  assert.equal(child.parent_id,parent.id);
+  assert.equal(child.description,'make it survive a restart','the flag and its value are not part of the text');
+  assert.equal(child.project_id,p.id,'and the project id is not one of the two words that came out');
+  // A flag with nothing after it is refused rather than silently read as an empty
+  // parent, which would be a task created with the flag still in its description.
+  const dangling=await run(['create',p.id,'x','--parent']);
+  assert.equal(dangling.code,1);
+  assert.match(dangling.err,/--parent needs a task id/);
+  // The link set after the fact, then cleared by naming nothing.
+  const other=JSON.parse((await run(['create',p.id,'a second candidate'])).out);
+  assert.equal(JSON.parse((await run(['link',child.id,other.id])).out).parent_id,other.id);
+  assert.equal(JSON.parse((await run(['link',child.id])).out).parent_id,null);
+  // `show` reports the parent row, which is the only way a person reads the link
+  // from the CLI without a second command to resolve the id.
+  await run(['link',child.id,parent.id]);
+  const shown=JSON.parse((await run(['show',child.id])).out);
+  assert.equal(shown.parent.id,parent.id);
+  assert.equal(shown.parent.title,'move the queue into runner.mjs');
+});
+
+// The dispatch arm, not the cycle: this task is not COMPLETE, so the refusal is the
+// proof the verb reached the service. An unwired arm answers with the
+// "Unhandled task operation" a verb missing from the chain falls through to.
+test('ai-code task feedback reaches the service rather than falling through the chain',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-cli-feedback-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'build the queue');
+  const r=await new Promise((res)=>{const proc=spawn(process.execPath,[cliPath,'task','feedback',t.id,'do','it','differently'],{cwd:root,stdio:['ignore','pipe','pipe']});let out='',err='';proc.stdout.on('data',c=>out+=c);proc.stderr.on('data',c=>err+=c);proc.on('close',code=>res({code,out,err}))});
+  assert.equal(r.code,1);
+  assert.match(r.err,/COMPLETE/);
+  assert.doesNotMatch(r.err,/Unhandled task operation/);
+  assert.equal(s.task(t.id).state,'CREATED');
+});

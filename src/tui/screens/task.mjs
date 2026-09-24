@@ -71,6 +71,19 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
   const [refining, setRefining] = useState(false);
   const [editing, setEditing] = useState(false);
   const [feedback, setFeedback] = useState('');
+  // The task this one builds on, as the row rather than the id: the header names
+  // it, and an id alone is not a name.
+  const [parent, setParent] = useState(null);
+  const [linking, setLinking] = useState(false);
+  const [parentDraft, setParentDraft] = useState('');
+  // Feedback on a completed task is a different input from the refine above: one
+  // edits a plan that has not been approved, the other re-opens work that has.
+  const [sendingFeedback, setSendingFeedback] = useState(false);
+  const [noteDraft, setNoteDraft] = useState('');
+  // Bumped to reopen the event stream. The server ends it when a task reaches
+  // COMPLETE, and feedback is what takes a task back out of COMPLETE - so without
+  // this the repair that follows would run with nothing watching it.
+  const [streamGen, setStreamGen] = useState(0);
   const [selected, setSelected] = useState(0);
   const [pickingModel, setPickingModel] = useState(false);
   const [modelChoices, setModelChoices] = useState([]);
@@ -88,6 +101,7 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
       const d = await api.taskShow(taskId);
       setTask(d.task);
       setRuns(d.runs);
+      setParent(d.parent || null);
       for (const r of d.runs) seenRunRef.current.add(r.id);
     } catch (err) {
       onError?.(err.message);
@@ -137,11 +151,11 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
       live = false;
       stream.close();
     };
-  }, [taskId]);
+  }, [taskId, streamGen]);
 
   useEffect(() => {
-    setTyping?.(refining || editing || pickingModel);
-  }, [refining, editing, pickingModel]);
+    setTyping?.(refining || editing || pickingModel || linking || sendingFeedback);
+  }, [refining, editing, pickingModel, linking, sendingFeedback]);
 
   // Ink refcounts raw mode across every active useInput, and the App-level
   // handler never deactivates, so the count only drops to zero if this screen
@@ -253,6 +267,27 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
     setFeedback('');
   };
 
+  const submitParent = async (value) => {
+    setLinking(false);
+    // An empty id is the clear, not an abandoned prompt: the link is one field, so
+    // the way to remove it is to empty it.
+    const id = value.trim() || null;
+    await run(id ? 'Link parent' : 'Clear parent', () => api.link(taskId, id));
+    setParentDraft('');
+  };
+
+  const submitNote = async (value) => {
+    setSendingFeedback(false);
+    const text = value.trim();
+    if (!text) return;
+    await run('Feedback', () => api.feedback(taskId, text));
+    setNoteDraft('');
+    // Reopened whether or not the call moved the task: a stream opened on a task
+    // that is still COMPLETE ends on its first tick, which costs one connection and
+    // leaves the screen exactly as it was.
+    setStreamGen((n) => n + 1);
+  };
+
   // The models a planner could run on, read when the picker opens rather than at
   // mount: the registry changes when somebody edits it on another screen, and a
   // stale list is the one thing that would offer a model the server now refuses.
@@ -288,6 +323,8 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
     if (task) {
       if (activeRun) binds.push(['c', 'cancel']);
       if (!activeRun && task.state !== 'COMPLETE' && task.state !== 'CANCELLED') binds.push(['x', 'close']);
+      if (!activeRun) binds.push(['L', task.parent_id ? 'change parent' : 'link parent']);
+      if (tab === 'review' && !activeRun && task.state === 'COMPLETE') binds.push(['f', 'feedback']);
       if (tab === 'plan') {
         if (PLAN_TAB_STATES.has(task.state)) binds.push(['m', 'planning model']);
         if (task.state === 'PLANNING' && !activeRun) binds.push(['p', 'start planning']);
@@ -313,6 +350,17 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
         if (key.escape) setPickingModel(false);
         return;
       }
+      // The two text prompts own the keyboard the same way the refine prompt does,
+      // and for the same reason: TextInput reads stdin itself, so this screen's keys
+      // - Esc included, which is otherwise "back" - must not also fire.
+      if (linking) {
+        if (key.escape) setLinking(false);
+        return;
+      }
+      if (sendingFeedback) {
+        if (key.escape) setSendingFeedback(false);
+        return;
+      }
       if (key.escape || key.backspace) return onBack();
       const tabMatch = TABS.find((t) => t.key === input);
       if (tabMatch) return setTab(tabMatch.id);
@@ -322,6 +370,19 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
       // gated on the task state for the same reason the footer bind is not.
       if (input === 'c' && activeRun) return run('Cancel', () => api.cancel(taskId));
       if (input === 'x' && !activeRun && task.state !== 'COMPLETE' && task.state !== 'CANCELLED') return run('Close', () => api.close(taskId));
+      // The parent link is not a step of the workflow, so it is not bound to a tab:
+      // it is available wherever the task is being read, and never while an agent is
+      // working, since a repair can be reading the summary it feeds.
+      if (input === 'L' && !activeRun) {
+        setParentDraft(task.parent_id || '');
+        setLinking(true);
+        return;
+      }
+      if (tab === 'review' && input === 'f' && !activeRun && task.state === 'COMPLETE') {
+        setNoteDraft('');
+        setSendingFeedback(true);
+        return;
+      }
 
       if (tab === 'plan') {
         if (input === 'm' && PLAN_TAB_STATES.has(task.state)) return openModelPicker();
@@ -365,6 +426,12 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
       e(Box, { flexDirection: 'row' }, e(StatusBadge, { state: task.state }), e(Text, { color: 'gray' }, `  ${String(task.id).slice(0, 8)}`)),
     ),
     desc ? e(Box, { marginTop: 1 }, e(Text, { color: 'gray', wrap: 'wrap' }, desc)) : null,
+    // The parent by name, not by id: the id is what the link is stored as, and the
+    // title is what a reader recognises. `state` matters as much as either - a
+    // parent still running is context the planner is being handed as unfinished.
+    parent
+      ? e(Box, { marginTop: 1 }, e(Text, { color: 'gray' }, `builds on ${parent.title} (${parent.state})`))
+      : null,
     e(Box, { height: 1 }),
     e(
       Box,
@@ -386,8 +453,20 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
     e(Box, { height: 1 }),
     tab === 'plan' && renderPlan(task, refining, editing, feedback, setFeedback, submitFeedback),
     tab === 'execute' && renderExecute(task, runs, selected),
-    tab === 'review' && renderReview(task),
+    tab === 'review' && renderReview(task, sendingFeedback, noteDraft, setNoteDraft, submitNote),
     tab === 'activity' && renderActivity(events),
+    // Under the tab body, like the model picker: linking is available from every
+    // tab, so it cannot belong to any one of them. An empty id clears the link,
+    // which is the same call with nothing named.
+    linking
+      ? e(
+          Box,
+          { flexDirection: 'column', borderStyle: 'round', borderColor: 'blue', paddingX: 1 },
+          e(Text, { bold: true }, `Parent task — now ${task.parent_id ? String(task.parent_id).slice(0, 8) : 'none'}`),
+          e(TextInput, { value: parentDraft, onChange: setParentDraft, onSubmit: submitParent }),
+          e(Text, { color: 'gray' }, 'Enter to link (empty clears it), Esc to cancel'),
+        )
+      : null,
     // Under the tab body rather than inside renderPlan, so it covers every state
     // the plan tab can be in - including the ones whose body is a hint to press a
     // key, which is where the planner a preference applies to has not run yet.
@@ -480,7 +559,16 @@ function renderExecute(task, runs, selected) {
   );
 }
 
-function renderReview(task) {
+function renderReview(task, sendingFeedback, noteDraft, setNoteDraft, submitNote) {
+  if (sendingFeedback) {
+    return e(
+      Box,
+      { flexDirection: 'column', borderStyle: 'round', borderColor: 'blue', paddingX: 1 },
+      e(Text, { bold: true }, 'Feedback on this task — what should change?'),
+      e(TextInput, { value: noteDraft, onChange: setNoteDraft, onSubmit: submitNote }),
+      e(Text, { color: 'gray' }, 'Enter to send and reopen the task, Esc to cancel'),
+    );
+  }
   if (task.state === 'REPAIRING') {
     return e(
       Box,
@@ -491,7 +579,20 @@ function renderReview(task) {
     );
   }
   if (!task.review) return e(Text, { color: 'gray' }, 'No review yet.');
-  return e(Box, { flexDirection: 'column' }, ...wrap(task.review).map((line, i) => e(Text, { key: i }, line)));
+  const body = wrap(task.review).map((line, i) => e(Text, { key: i }, line));
+  // COMPLETE is where the verdict is read after the fact, and the hint belongs
+  // under it: this is the only screen that shows the review a human would be
+  // answering, so it is the only place the key can be offered without a detour.
+  if (task.state === 'COMPLETE') {
+    return e(
+      Box,
+      { flexDirection: 'column' },
+      ...body,
+      e(Box, { height: 1 }),
+      e(Text, { color: 'gray' }, 'Press f to send feedback and reopen this task.'),
+    );
+  }
+  return e(Box, { flexDirection: 'column' }, ...body);
 }
 
 // Ink's colour names, by the kind `describeEvent` reports. The quiet kinds are the

@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,PLANNER_PROMPT,CHAT_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -4307,13 +4307,40 @@ test('a chat keeps its transcript in order and names the question it still owes 
   assert.equal(s.store.pendingChatMessage(c.id).id,second.id);
   // Writing a turn is what makes a conversation current: the list is ordered by
   // `updated_at`, so a chat whose newest reply is an hour old would otherwise
-  // sort as though nothing had been said.
+  // sort as though nothing had been said. Strictly after `created_at`, which is
+  // the part a millisecond clock cannot answer on its own - see the test below.
   const listed=s.store.listChatSessions(p.id);
   assert.deepEqual(listed.map(x=>x.id),[c.id]);
   assert.ok(listed[0].updated_at>c.created_at);
   // A second question does not retitle a session that already has a subject.
   assert.equal(s.chatSession(c.id).title,'Where does the queue live?');
   assert.equal(s.store.pendingChatMessage('no-such-session'),null);
+});
+
+test('a conversation written to in the millisecond it was created still sorts as the newest',()=>{
+  // The ordering above is not "later than the clock says" but "later than the
+  // value it replaced", and the difference only shows when a session is created
+  // and written to inside one millisecond - which is what a conversation opened
+  // and asked its first question in the same breath does, and what this test does
+  // deterministically. `new Date()` twice would tie, and a tied session sorts by
+  // creation among every other session written in that same millisecond: exactly
+  // the conversations that are moving.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const c=s.createChatSession(p.id);
+  assert.equal(c.updated_at,c.created_at,'a session is created with one timestamp');
+  let previous=c.created_at;
+  // Both writers, in a row: a turn, and the retitle `askChat` does on the first
+  // question of a session that still has the default name.
+  for(const write of [
+    ()=>s.store.addChatMessage({id:s.store.id(),sessionId:c.id,role:'user',content:'Where does the queue live?'}),
+    ()=>s.store.updateChatSession(c.id,{title:'Where does the queue live?'}),
+  ]){
+    write();
+    const after=s.chatSession(c.id);
+    assert.ok(after.updated_at>previous,'every write has to land strictly after the timestamp it replaced');
+    previous=after.updated_at;
+  }
 });
 
 test('a chat answers as a planning-capable model, because reading a repository is the job',()=>{
@@ -4461,4 +4488,268 @@ test('a chat a provider refuses is answered by the fallback that took the turn o
   // waiting forever for an answer that is already stored.
   assert.equal(s.store.pendingChatMessage(c.id),null,'the answered question is not still waiting');
   assert.equal(s.store.getChatMessage(question.id).run_id,answered.id);
+});
+
+// -- parent references -------------------------------------------------------
+
+test('a task names the task it builds on, at creation or afterwards',()=>{
+  // The link is drawn at whatever moment a person notices the two tasks are
+  // related, which is usually while reading the second one rather than while
+  // writing it. Both entries are therefore the same field, written twice.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const parent=s.createTask(p.id,'move the queue into runner.mjs');
+  const child=s.createTask(p.id,'make the queue survive a restart',{parentId:parent.id});
+  assert.equal(child.parent_id,parent.id);
+  assert.equal(s.task(child.id).parent_id,parent.id,'stored, not echoed back from the argument');
+  // A task with no parent is a task with no parent, not a task with the empty
+  // string as one: `parent_id` null is what every task written before this column
+  // existed has, and the context builder reads it as "nothing to say".
+  const alone=s.createTask(p.id,'unrelated work');
+  assert.equal(alone.parent_id,null);
+  const linked=s.linkTask(alone.id,parent.id);
+  assert.equal(linked.parent_id,parent.id);
+  assert.equal(s.task(alone.id).parent_id,parent.id);
+  // Null clears. A reference nobody meant to draw has to be removable by the
+  // person who drew it, and clearing is the same call with nothing named.
+  assert.equal(s.linkTask(alone.id,null).parent_id,null);
+  assert.equal(s.task(alone.id).parent_id,null);
+  // Re-linking replaces rather than accumulates: this is a reference, not a set.
+  const other=s.createTask(p.id,'a second candidate parent');
+  s.linkTask(alone.id,parent.id);
+  assert.equal(s.linkTask(alone.id,other.id).parent_id,other.id);
+});
+
+test('a parent has to exist, be in the same project, and not be the task itself',()=>{
+  const rootA=repo(),rootB=repo();
+  const s=new Service(rootA,{allowMock:true,silent:true});
+  const pa=s.initProject('pa',rootA);
+  const pb=s.initProject('pb',rootB);
+  const mine=s.createTask(pa.id,'in project a');
+  const theirs=s.createTask(pb.id,'in project b');
+  // The two ends of the link share a tree or the link is meaningless: the planner
+  // for the child would be handed a summary of work in a repository it cannot read.
+  assert.throws(()=>s.createTask(pa.id,'x',{parentId:theirs.id}),/another project/);
+  assert.throws(()=>s.linkTask(mine.id,theirs.id),/another project/);
+  assert.throws(()=>s.createTask(pa.id,'x',{parentId:'no-such-task'}),/not found/);
+  assert.throws(()=>s.linkTask(mine.id,'no-such-task'),/not found/);
+  // A cycle is one level deep and read no further, so a task naming itself is
+  // refused rather than tolerated: it is the one shape that says nothing at all.
+  assert.throws(()=>s.linkTask(mine.id,mine.id),/own parent/);
+  assert.equal(s.task(mine.id).parent_id,null,'a refused link writes nothing');
+});
+
+test('the context hands the planner a capped summary of the parent task',()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const parent=s.createTask(p.id,'move the queue into runner.mjs');
+  s.store.updateTask(parent.id,{state:'COMPLETE',description:'d'.repeat(2000),review:'The retry path was never exercised by a test.'});
+  const child=s.createTask(p.id,'continue that work',{parentId:parent.id});
+  const ctx=buildTaskContext(s.project(p.id),s.task(child.id),{role:'planner',store:s.store});
+  assert.equal(ctx.parent.id,parent.id);
+  assert.equal(ctx.parent.title,'move the queue into runner.mjs');
+  // The state is half of what makes the summary readable: a parent that is COMPLETE
+  // is work to build on, and one still PLANNING is work that has not happened yet.
+  assert.equal(ctx.parent.state,'COMPLETE');
+  assert.equal(ctx.parent.review,'The retry path was never exercised by a test.');
+  assert.match(ctx.parent.description,/^d+$/m,'the head of the description survives');
+  assert.match(ctx.parent.description,/… \(truncated\)/);
+  assert.ok(ctx.parent.description.length<820,`${ctx.parent.description.length} chars is the cap, not the field`);
+  assert.ok(ctx.manifest.sections.includes('parent-task'),'the manifest names the section the prompt carries');
+  // No link, nothing said - and the context of a task with no parent is what every
+  // context was before the column existed.
+  const alone=s.createTask(p.id,'unrelated work');
+  const bare=buildTaskContext(s.project(p.id),s.task(alone.id),{role:'planner',store:s.store});
+  assert.equal(bare.parent,null);
+  assert.equal(bare.manifest.sections.includes('parent-task'),false);
+  // A parent row that is gone is nothing to say rather than a failure: a link is a
+  // human's annotation, and losing one must not cost a run.
+  s.store.db.prepare('DELETE FROM tasks WHERE id=?').run(parent.id);
+  const orphaned=buildTaskContext(s.project(p.id),s.task(child.id),{role:'planner',store:s.store});
+  assert.equal(orphaned.parent,null);
+  assert.equal(s.task(child.id).parent_id,parent.id,'the dangling id stays on the row; the builder is what declines to read it');
+});
+
+test('the parent is the last of the droppable sections to go',()=>{
+  // The ladder's last three rungs, ordered by how much the run needs them: the
+  // previous attempt is a retry signal, the review is what a repair is acting on,
+  // and the parent is background about a different task. A budget under the
+  // skeleton's own size takes every rung, which is what makes the order they are
+  // taken in readable off the record - the reviewer's role, because it is the one
+  // that is handed the review at all.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const parent=s.createTask(p.id,'the earlier work');
+  s.store.updateTask(parent.id,{state:'COMPLETE',review:'Reviewed and signed off.'});
+  const child=s.createTask(p.id,'the follow-on',{parentId:parent.id});
+  s.store.updateTask(child.id,{plan:'Step 1. Step 2.',review:'r'.repeat(600)});
+  // A previous attempt at the same role, so its rung has something to drop.
+  s.store.addRun({id:'prev',taskId:child.id,role:'reviewer',providerId:'mock',modelId:'mock',status:'succeeded',startedAt:new Date().toISOString()});
+  const roomy=buildTaskContext(s.project(p.id),s.task(child.id),{role:'reviewer',store:s.store,config:contextConfig({budget:1e9})});
+  assert.ok(roomy.parent&&roomy.review&&roomy.previous,'all three sections are present with room to spare');
+  assert.ok(roomy.manifest.sections.includes('parent-task'));
+  const built=buildTaskContext(s.project(p.id),s.task(child.id),{role:'reviewer',store:s.store,config:contextConfig({budget:40,minBudget:0})});
+  assert.ok(built.manifest.tokens<=40,`${built.manifest.tokens} tokens fits the 40 budget`);
+  assert.deepEqual([built.parent,built.review,built.previous],[null,null,null],'a context with nothing left in it rather than one over budget');
+  const dropped=built.manifest.trimmed;
+  assert.ok(dropped.indexOf('previous-run')<dropped.indexOf('review'),`the retry signal goes before the review: ${dropped.join(', ')}`);
+  assert.ok(dropped.indexOf('review')<dropped.indexOf('parent-task'),`and the parent goes last: ${dropped.join(', ')}`);
+});
+
+// -- feedback on a completed task --------------------------------------------
+
+test('feedback re-opens a completed task, and the repair reads it over the review it answers',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  // A review that passed while saying what it noticed: the ordinary shape of a
+  // COMPLETE task, and the text a person is answering when they give feedback.
+  s.updateProvider('mock',{config:{writes:['app.mjs'],reviewText:'The retry path was never exercised by a test.'}});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'build the queue');
+  s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  const done=await s.execute(t.id);
+  assert.equal(done.state,'COMPLETE');
+  const prompts=[];const real=s.runRole.bind(s);
+  s.runRole=(task,role,prompt,...rest)=>{if(role==='repair'||role==='reviewer')prompts.push([role,prompt]);return real(task,role,prompt,...rest)};
+  const back=await s.feedback(t.id,'Also drop jobs belonging to closed projects.');
+  assert.equal(back.state,'COMPLETE','the cycle runs to its own end, not to the edge it entered by');
+  const repair=prompts.find(r=>r[0]==='repair');
+  assert.match(repair[1],/Human feedback:\nAlso drop jobs belonging to closed projects\./);
+  // The human is answering the review, so the review is still underneath the
+  // instruction. A repair that could read only one of the two would be fixing half
+  // the story.
+  assert.match(repair[1],/The retry path was never exercised by a test\./);
+  // The verification checks the text the repair acted on, which is the same text
+  // plus the reviewer's own words - one text, carried through both.
+  const verification=prompts.filter(r=>r[0]==='reviewer').pop();
+  assert.match(verification[1],/Verify a repair/);
+  assert.match(verification[1],/Also drop jobs belonging to closed projects\./);
+  assert.match(verification[1],/The retry path was never exercised by a test\./);
+  // And the note is spent. A feedback answers one review; a later review-FAIL
+  // repair finding the same sentence still on the row would be answering it twice.
+  assert.equal(s.task(t.id).feedback,null);
+  assert.equal(s.store.listRuns(t.id).filter(r=>r.role==='repair').length,1);
+});
+
+test('a feedback note is spent on the repair it was written for',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  s.updateProvider('mock',{config:{writes:['app.mjs'],reviewText:'The retry path was never exercised by a test.'}});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'build the queue');
+  s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  await s.execute(t.id);
+  // A feedback whose verification fails. The task rests in REPAIRING with the
+  // verification's finding as its review - exactly the state a second repair runs
+  // from, and the state the note must not still be sitting on.
+  s.updateProvider('mock',{config:{writes:['app.mjs'],reviewText:'The retry path was never exercised by a test.',verifyText:'The queue still keeps closed projects.',verifyVerdict:'FAIL'}});
+  const stuck=await s.feedback(t.id,'Also drop jobs belonging to closed projects.');
+  assert.equal(stuck.state,'REPAIRING');
+  assert.equal(stuck.review,'The queue still keeps closed projects.');
+  assert.equal(s.task(t.id).feedback,null,'cleared even though the cycle did not end well');
+  const prompts=[];const real=s.runRole.bind(s);
+  s.runRole=(task,role,prompt,...rest)=>{if(role==='repair')prompts.push(prompt);return real(task,role,prompt,...rest)};
+  const again=await s.repair(t.id);
+  assert.doesNotMatch(prompts[0],/Human feedback/,'the second repair is not handed the first one\'s note');
+  assert.match(prompts[0],/The queue still keeps closed projects\./);
+  assert.doesNotMatch(again.review,/Also drop jobs belonging to closed projects\./,'and it does not survive into what a reader is left with');
+});
+
+test('feedback is refused unless the task is COMPLETE, idle, and the note says something',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'build the queue');
+  s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  await assert.rejects(()=>s.feedback(t.id,'do it differently'),/COMPLETE/);
+  await s.execute(t.id);
+  assert.equal(s.task(t.id).state,'COMPLETE');
+  // Refused before the transition and before the note is written: a refusal that
+  // left the task in REPAIRING would be a refusal that started the work.
+  await assert.rejects(()=>s.feedback(t.id,'   '),/required/i);
+  assert.equal(s.task(t.id).state,'COMPLETE');
+  assert.equal(s.task(t.id).feedback,null);
+  assert.equal(s.store.listRuns(t.id).filter(r=>r.role==='repair').length,0);
+  // The worktree may be being read by a port, a diff or a terminal session, and a
+  // repair started under one of those is an edit the reader never agreed to.
+  s.store.addRun({id:'live',taskId:t.id,role:'reviewer',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
+  s.store.heartbeat('live',t.id);
+  await assert.rejects(()=>s.feedback(t.id,'still there?'),/in flight/);
+  assert.equal(s.task(t.id).feedback,null,'nothing was written on the way to the refusal');
+  s.store.releaseLease('live');
+});
+
+test('COMPLETE has one exit, and feedback is it',()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');
+  s.store.updateTask(t.id,{state:'COMPLETE'});
+  assert.deepEqual(transitions.COMPLETE,['REPAIRING']);
+  assert.deepEqual(transitions.CANCELLED,[]);
+  // Every other verb refuses a task that has already been signed off: a plan, a
+  // test or an implement from here would be a second run over work that has
+  // already been through its own loop once.
+  assert.throws(()=>s.transition(t.id,'PLANNING'),/Invalid transition/);
+  assert.throws(()=>s.transition(t.id,'TESTING'),/Invalid transition/);
+  assert.equal(s.transition(t.id,'REPAIRING').state,'REPAIRING');
+});
+
+// -- a chat scoped to a task -------------------------------------------------
+
+test('a chat scoped to a task is answered with that task in front of it',async()=>{
+  // What the question cannot be answered without. "What did the review find" and
+  // "why was it done this way" are about a record that is in the database and
+  // nowhere in the working tree.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'move the queue into runner.mjs');
+  s.store.updateTask(t.id,{state:'COMPLETE',plan:'Step 1: move the queue.\nStep 2: leave the jobs table alone.',review:'The retry path was never exercised by a test.'});
+  const c=s.createChatSession(p.id,null,t.id);
+  assert.equal(c.task_id,t.id);
+  // Named for its subject, so the session list reads as what was asked about. It
+  // is deliberately not the default title: the first question renames a session
+  // carrying that title, and a conversation about a task should not lose its name.
+  assert.equal(c.title,'Questions about move the queue into runner.mjs');
+  const seen=[];const real=s.runRole.bind(s);
+  s.runRole=(task,role,prompt,...rest)=>{if(role==='chat')seen.push(task);return real(task,role,prompt,...rest)};
+  const answer=await s.chat(c.id,{message:'What did the review find?'});
+  assert.equal(answer.role,'assistant');
+  const scoped=seen.pop();
+  // The question is still the task half of the prompt - it is a question, not a
+  // task - and the subject rides on the same object, which is what puts it in the
+  // prompt the agent reads.
+  assert.match(scoped.description,/^What did the review find\?/);
+  assert.match(scoped.description,/TASK BEING ASKED ABOUT: move the queue into runner\.mjs/);
+  assert.match(scoped.description,/state: COMPLETE/);
+  assert.match(scoped.description,/The retry path was never exercised by a test\./);
+  // The plan goes in the plan slot rather than in prose: it is read-only context
+  // the question is answered against, which is exactly what that slot is for.
+  assert.match(scoped.plan,/Step 1: move the queue\./);
+  assert.match(scoped.plan,/Step 2: leave the jobs table alone\./);
+  // A session with no task is the project-wide chat, unchanged, down to the text
+  // that explains the missing plan.
+  const plain=s.createChatSession(p.id);
+  assert.equal(plain.task_id,null);
+  assert.equal(plain.title,'New chat');
+  await s.chat(plain.id,{message:'Where does the queue live?'});
+  const unscoped=seen.pop();
+  assert.doesNotMatch(unscoped.description,/TASK BEING ASKED ABOUT/);
+  assert.match(unscoped.plan,/^No plan: this is a direct question about the project/);
+});
+
+test('a session scoped to a task that is missing, or another project\'s, is refused',async()=>{
+  const rootA=repo(),rootB=repo();
+  const s=new Service(rootA,{allowMock:true,silent:true});
+  const pa=s.initProject('pa',rootA);
+  const pb=s.initProject('pb',rootB);
+  const mine=s.createTask(pa.id,'in project a');
+  const theirs=s.createTask(pb.id,'in project b');
+  assert.throws(()=>s.createChatSession(pa.id,null,theirs.id),/another project/);
+  assert.throws(()=>s.createChatSession(pa.id,null,'no-such-task'),/not found/);
+  // A subject that is deleted after the conversation exists degrades to the
+  // project-wide answer rather than refusing: the conversation outlives the task,
+  // and a chat that cannot answer because its subject is gone is a chat nobody can
+  // use.
+  const c=s.createChatSession(pa.id,null,mine.id);
+  s.store.db.prepare('DELETE FROM tasks WHERE id=?').run(mine.id);
+  const answered=await s.chat(c.id,{message:'Still there?'});
+  assert.equal(answered.role,'assistant');
+  assert.equal(s.store.pendingChatMessage(c.id),null,'the turn was answered rather than left waiting');
 });

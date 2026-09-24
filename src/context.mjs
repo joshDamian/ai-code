@@ -1494,6 +1494,35 @@ function previousSummary(store, task, role) {
   }
 }
 
+// The task a task is linked to, summarised for the prompt of the one that builds
+// on it. A description that says "continue what the parent task started" is
+// unreadable to a planner that has never seen the parent, and the *state* is half
+// of what makes it readable: a parent that is COMPLETE is work to build on, and one
+// that is still PLANNING is work that has not happened yet.
+//
+// Read one level deep and no further, which is what makes an accidental cycle
+// harmless: the parent's own parent is named by its id at most, never expanded.
+// A parent row that has since been deleted, or a store that was not handed over,
+// is nothing to say rather than a failure - a link is a human's annotation, and
+// losing one must not cost a run.
+function parentSummary(store, task) {
+  if (!store || !task.parent_id) return null;
+  try {
+    const p = store.getTask(task.parent_id);
+    if (!p) return null;
+    const cut = (text, max) => (text && text.length > max ? `${text.slice(0, max)}\n… (truncated)` : text || null);
+    return {
+      id: p.id,
+      title: p.title,
+      state: p.state,
+      description: cut(p.description, 800),
+      review: cut(p.review, 1000),
+    };
+  } catch {
+    return null;
+  }
+}
+
 // Assembles the prompt context for one role.
 //
 // `cwd` is the tree the agent will actually run in: the worktree for implementer,
@@ -1526,6 +1555,11 @@ export function buildTaskContext(project, task, options = {}) {
   // failure. The same reason the planner reads nothing: there is no earlier
   // attempt at this role that says anything about this question.
   let previous = role === 'planner' || role === 'chat' ? null : previousSummary(options.store, task, role);
+  // Every role gets the parent, the planner first of all: the planner is the one
+  // writing the plan a task's description is read against, so a description that
+  // gestures at earlier work is exactly what it cannot resolve on its own. Absent a
+  // link this is null and the context is byte-identical to what it was.
+  let parent = parentSummary(options.store, task);
 
   const files = [...picked.contents];
   let arch = architecture;
@@ -1544,7 +1578,7 @@ export function buildTaskContext(project, task, options = {}) {
   const full = scanned.files;
   const unreadable = scanned.unreadable || [];
   let tree = [...new Set([...picked.paths, ...picked.tail, ...full])].slice(0, cfg.tree);
-  const size = () => estimateTokens(JSON.stringify({ tree, architecture: arch, conventions: conv, files, review, previous }));
+  const size = () => estimateTokens(JSON.stringify({ tree, architecture: arch, conventions: conv, files, review, previous, parent }));
   let total = size();
 
   // Trim order: the lowest-ranked file first, because it scored lowest against the
@@ -1596,6 +1630,16 @@ export function buildTaskContext(project, task, options = {}) {
     trimmed.push('review');
     total = size();
   }
+  // The parent goes last of the three, because it is the only one of them that is
+  // about a different task: the review is what a repair is acting on and the
+  // previous attempt is a retry signal, while a parent reference is background a
+  // planner can do without - it is capped at construction, and this rung is what
+  // makes even the capped block droppable when the budget has nothing left.
+  while (total > cfg.budget && parent) {
+    parent = null;
+    trimmed.push('parent-task');
+    total = size();
+  }
   // Content to path only. The agent still learns the file exists and is still told
   // its name, which is the minimum useful form of a context; it is also what
   // `readForPrompt` already does for a binary or an unreadable file.
@@ -1635,7 +1679,7 @@ export function buildTaskContext(project, task, options = {}) {
     files: files.map((f) => ({ path: f.path, tokens: f.tokens })),
     // The file list is cheap and is what tells the agent where things live.
     tree: tree.length,
-    sections: [arch && 'architecture', conv && 'conventions', task.plan && 'plan', review && 'review', previous && 'previous-run'].filter(Boolean),
+    sections: [arch && 'architecture', conv && 'conventions', task.plan && 'plan', review && 'review', previous && 'previous-run', parent && 'parent-task'].filter(Boolean),
     tokens: total,
     budget: cfg.budget,
     trimmed,
@@ -1680,6 +1724,7 @@ export function buildTaskContext(project, task, options = {}) {
     files,
     review,
     previous,
+    parent,
     manifest,
   };
 }
@@ -1714,6 +1759,7 @@ export function treeOnlyContext(root, err) {
     files: [],
     review: null,
     previous: null,
+    parent: null,
     manifest: {
       files: [], tree: tree.length, sections: [], tokens: estimateTokens(JSON.stringify(tree)),
       budget: 0, trimmed: [], cwd: root || null, state: 'FAILED', note,
