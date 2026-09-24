@@ -476,11 +476,12 @@ export class Store {
     const n = { ...r, ...p };
     this.db
       .prepare(
-        `UPDATE runs SET status=?,ended_at=?,error=?,fallback_from=?,tokens=?,cost=?,duration_ms=?,session_id=?,
+        `UPDATE runs SET provider_id=?,model_id=?,status=?,ended_at=?,error=?,fallback_from=?,tokens=?,cost=?,duration_ms=?,session_id=?,
            input_tokens=?,output_tokens=?,cache_read_tokens=?,cache_write_tokens=?,cost_basis=?,
            context_tokens=?,relevant_files=?,context_budget=?,context_state=? WHERE id=?`
       )
       .run(
+        n.provider_id ?? null, n.model_id ?? null,
         n.status, n.ended_at ?? null, n.error ?? null, n.fallback_from ?? null, n.tokens ?? 0, n.cost ?? 0,
         n.duration_ms ?? 0, n.session_id ?? null, n.input_tokens ?? 0, n.output_tokens ?? 0,
         n.cache_read_tokens ?? 0, n.cache_write_tokens ?? 0, n.cost_basis ?? null,
