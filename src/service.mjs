@@ -2723,6 +2723,7 @@ export class Service {
       // The planner role: writing an architecture summary is the same job as
       // planning, and it wants the same kind of model.
       const { p, m } = this.select('planner');
+      this.store.updateRun(run.id, { provider_id: p.id, model_id: m.id });
       const info = inspect(project.path);
       const deps = readDependencies(project.path);
       const sources = relevantFiles(project, { title: `overview of ${project.name}`, description: '' }, { cwd: project.path, limit: 25 });
@@ -2747,6 +2748,7 @@ export class Service {
       ].join('\n');
 
       let text = '';
+      let lastUsage = null;
       for await (const e of runAgent(p, m, {
         role: 'planner',
         task: { id: 'context-enrich', title: `Context for ${project.name}`, project_id: project.id, plan: null },
@@ -2758,6 +2760,8 @@ export class Service {
         this.store.addEvent({ runId: run.id, type: e.type, data: e.data });
         const tx = this.extractText(e.data);
         if (tx) text += tx;
+        const u = this.usageFrom(e.data);
+        if (u) lastUsage = u;
       }
 
       const dir = path.join(project.path, '.ai-code', 'context');
@@ -2772,7 +2776,9 @@ export class Service {
         written.push(`${name}.md`);
       }
 
-      this.store.updateRun(run.id, { status: 'succeeded', ended_at: new Date().toISOString(), duration_ms: Date.now() - started });
+      const usage = lastUsage || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+      const priced = this.price(m, usage, run.started_at);
+      this.store.updateRun(run.id, { status: 'succeeded', ended_at: new Date().toISOString(), duration_ms: Date.now() - started, ...this.#usagePatch(priced, usage, text.length) });
       return { ok: true, provider: p.name, model: m.name, project: project.name, written, runId: run.id };
     } catch (e) {
       this.store.updateRun(run.id, { status: 'failed', ended_at: new Date().toISOString(), error: `${e.code || ''} ${e.message}`, duration_ms: Date.now() - started });
