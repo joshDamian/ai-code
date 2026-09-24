@@ -522,6 +522,10 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    content width with the button stretched to full height beside it. */
 .chat-composer .field{flex:1;min-width:0;gap:0}
 .chat-composer textarea{flex:1;min-height:24px;max-height:200px;padding:var(--space-1) 0;border:none;background:transparent;font-family:inherit;font-size:14px;line-height:1.5;resize:none;overflow-y:auto}
+/* The app-wide focus ring marks a control that is separately focusable, and this
+   one is not: the shell's own border is the indicator, and it wraps the send
+   button too. Without this the textarea drew a second rectangle inside the pill. */
+.chat-composer .input:focus-visible{outline:none}
 /* A small circle in the corner, not a rectangle stretched to the pill's height -
    the single biggest visual tell of the layouts this is modelled on. */
 .chat-composer button{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border-radius:50%;font-size:16px;line-height:1}
