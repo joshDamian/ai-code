@@ -1356,7 +1356,9 @@ test('a failed ranking reaches the run and the prompt instead of ending it',asyn
   s.project=(id)=>{if(armed){armed=false;throw new Error('the project row is gone')}return real(id)};
   const done=await s.execute(t.id);
   assert.equal(done.state,'COMPLETE','the run finished');
-  const runs=s.store.listRuns(t.id);
+  // Agent runs only: the test command is a run of its own now and is handed no
+  // context at all, so it has no ranking for this to be about.
+  const runs=s.store.listRuns(t.id).filter(r=>r.role!=='tester');
   const failed=runs.filter(r=>r.context_state==='FAILED');
   assert.ok(failed.length,'and every run says why its context was a listing');
   assert.equal(runs.filter(r=>!r.context_state).length,0);
@@ -1373,7 +1375,7 @@ test('the degradation state rides the manifest onto the run',async()=>{
   const t=s.createTask(p.id,'package');
   s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
   await s.execute(t.id);
-  const states=s.store.listRuns(t.id).map(r=>r.context_state);
+  const states=s.store.listRuns(t.id).filter(r=>r.role!=='tester').map(r=>r.context_state);
   assert.deepEqual([...new Set(states)],['FULL'],'a repository with the task in it ranks fully');
   // And the label is in the prompt, not only on the row: `manifest` is inside the
   // JSON the agent is handed, so a state nobody serialises is a state nobody reads.
@@ -2930,6 +2932,19 @@ test('a session start and a finished run carry their numbers',()=>{
   assert.equal(describeEvent({type:'completed',data:{sessionId:'4bce6f6c9a1e'}}).text,'run finished · session 4bce6f6c');
 });
 
+test("the test command's rows read as output rather than as an event type",()=>{
+  // The two `test` rows are told apart by which field is set: one names the command
+  // that was run, and every one after it is a line the command printed.
+  assert.deepEqual(describeEvent({type:'test',data:{command:'npm test'}}),{kind:'run',text:'test · npm test'});
+  assert.deepEqual(describeEvent({type:'test',data:{stream:'stdout',line:'ok 1 - it works'}}),{kind:'out',text:'ok 1 - it works'});
+  assert.deepEqual(describeEvent({type:'test_result',data:{passed:true,durationMs:4200}}),{kind:'done',text:'tests passed · 4s'});
+  // A failure leads with the failure, and the reason comes from the tail the runner
+  // kept rather than from a buffer it no longer has.
+  const failed=describeEvent({type:'test_result',data:{passed:false,durationMs:90000,error:'TEST_FAILED: 1 test failed\n    at x.mjs:1'}});
+  assert.equal(failed.kind,'error');
+  assert.equal(failed.text,'tests failed · 1m 30s — TEST_FAILED: 1 test failed');
+});
+
 test('a failed run leads with the failure, not with the harness subtype',()=>{
   // The 402 planning run. claude reports subtype `success` because the harness itself
   // worked; the run still failed, and that is the word the row has to open with.
@@ -3635,6 +3650,103 @@ test('a second review is refused while a review is running',async()=>{
   s.store.addRun({id:'live',taskId:t.id,role:'reviewer',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
   s.store.heartbeat('live',t.id);
   await assert.rejects(()=>s.review(t.id),/in flight/);
+});
+
+// ---- the test command as a tracked process --------------------------------------
+// `test()` used to run the project's command through exec(): buffered, with no run
+// row, no lease and nothing that could stop it. Every path that runs a suite -
+// execute(), retry(), repair() and runTests() - funnels through it, so a task
+// mid-suite used to read as idle and a ten-minute suite could not be cancelled.
+
+// Re-points a project's test command. The fixture's own is an instant exit 0, and
+// the cases worth pinning are a suite that fails and one that runs long enough to
+// kill. `undefined` drops the key, which is a project with no test command at all.
+function setTest(s,projectId,cmd){
+  const p=s.project(projectId);
+  s.store.addProject({id:p.id,name:p.name,path:p.path,createdAt:p.created_at,language:p.language,framework:p.framework,commands:{...p.commands,test:cmd}});
+}
+
+test('the test command runs as a tracked run that streams its output',async()=>{
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  const done=await s.runTests(t.id);
+  assert.equal(done.state,'REVIEWING');
+  const run=s.store.listRuns(t.id).filter((r)=>r.role==='tester').pop();
+  assert.ok(run,'the suite is a run of its own rather than a gap between two of them');
+  assert.equal(run.status,'succeeded');
+  assert.equal(run.provider_id,null,'a shell command has no provider for the breaker to count');
+  const events=s.store.listEvents(run.id);
+  assert.equal(events[0].type,'test');
+  assert.deepEqual(events[0].data,{command:'node -e "process.exit(0)"'},'the first row names what was run');
+  const result=events.filter((e)=>e.type==='test_result').pop();
+  assert.equal(result.data.passed,true);
+  assert.equal(typeof result.data.durationMs,'number');
+  assert.equal(s.liveRun(t.id),null,'the lease is released, so the dashboard stops showing the task as busy');
+});
+
+test('a failing suite is a failed run and still throws the TEST_FAILED a caller reads',async()=>{
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  setTest(s,t.project_id,'node -e "console.error(\'1 test failed\'); process.exit(1)"');
+  const err=await s.runTests(t.id).then(()=>null,e=>e);
+  assert.match(err.message,/^TEST_FAILED: /);
+  assert.match(err.message,/1 test failed/,"the reason is the command's own output, not its exit code");
+  const run=s.store.listRuns(t.id).filter((r)=>r.role==='tester').pop();
+  assert.equal(run.status,'failed');
+  assert.match(run.error,/TEST_FAILED/);
+  assert.equal(s.store.listEvents(run.id).filter((e)=>e.type==='test_result').pop().data.passed,false);
+  assert.equal(s.task(t.id).state,'FAILED');
+});
+
+test('retry still reads a failing suite as a reason to repair',async()=>{
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  // Fails twice and passes on the third run, so the repair leg ends somewhere
+  // assertable rather than looping back into the same failure. Run 1 is runTests(),
+  // run 2 is the test retry() runs itself, and run 3 is the one repair re-runs.
+  setTest(s,t.project_id,'n=$(cat runs 2>/dev/null || echo 0); n=$((n+1)); echo $n > runs; [ $n -ge 3 ] && exit 0; echo "1 test failed" >&2; exit 1');
+  await assert.rejects(()=>s.runTests(t.id),/TEST_FAILED/);
+  assert.equal(s.task(t.id).state,'FAILED');
+  const done=await s.retry(t.id);
+  assert.equal(done.state,'COMPLETE');
+  assert.ok(s.store.listRuns(t.id).some((r)=>r.role==='repair'),'the failure reached repair rather than being reported and dropped');
+});
+
+test('a cancel during the test command kills the suite and leaves the task re-runnable',async()=>{
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  // The redraw interval is shortened so this measures the mechanism rather than the
+  // 2s it was tuned for; the suite runs a minute, so a kill that never lands fails
+  // the deadline below rather than the assertion on the row.
+  s.options.tickMs=50;
+  setTest(s,t.project_id,'node -e "setTimeout(()=>{}, 60000)"');
+  const started=Date.now();
+  const testing=s.runTests(t.id).then(()=>null,e=>e);
+  await until(()=>s.liveRun(t.id)?.role==='tester');
+  // From a second Service, so the cancel travels the lease rather than the in-process
+  // map the first Service would find its own controller in.
+  const other=new Service(root,{allowMock:true,silent:true});
+  other.cancelTask(t.id);
+  const err=await testing;
+  assert.equal(err.code,'CANCELLED');
+  assert.ok(Date.now()-started<30000,`killed in ${Date.now()-started}ms, not after the suite's 60s`);
+  const run=s.store.listRuns(t.id).filter((r)=>r.role==='tester').pop();
+  assert.equal(run.status,'cancelled');
+  assert.equal(run.error,'Cancelled by user');
+  assert.equal(s.task(t.id).state,'TESTING','a cancel is not a failure: the task is still testable');
+  assert.equal(s.store.taskHasLiveRun(t.id),false,'and nothing is left holding the task');
+  assert.equal(s.store.taskCancelRequested(t.id),false,'the flag is spent, so the next agent is not aborted on sight');
+});
+
+test('a project with no test command records no run at all',async()=>{
+  const root=repoWith('app.mjs');
+  const {s,t}=await worked(root);
+  setTest(s,t.project_id,undefined);
+  const before=s.store.listRuns(t.id).length;
+  assert.deepEqual(await s.test(s.task(t.id),t.worktree),{skipped:true});
+  const done=await s.runTests(t.id);
+  assert.equal(done.state,'REVIEWING','nothing to run is not a reason to stop the chain');
+  assert.equal(s.store.listRuns(t.id).length,before,'and a step that did nothing left no row behind');
 });
 
 test('a plan is refused while the task has a job queued',async()=>{

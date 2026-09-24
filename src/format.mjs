@@ -206,6 +206,19 @@ export function describeEvent(event) {
     return { kind: 'think', text: `${what}${tokens || chars}` };
   }
 
+  // The test command's own rows. A `test` event is either the command that was run or
+  // one line of what it printed, and the two are told apart by which field is set -
+  // a line is the interesting one, because that is the suite reporting on itself.
+  if (type === 'test') {
+    if (data.line != null) return { kind: 'out', text: firstLine(data.line) };
+    return { kind: 'run', text: `test · ${firstLine(data.command, 100)}` };
+  }
+  if (type === 'test_result') {
+    const meta = data.durationMs != null ? formatDuration(data.durationMs) : '';
+    if (!data.passed) return { kind: 'error', text: `tests failed${meta ? ` · ${meta}` : ''} — ${firstLine(data.error)}` };
+    return { kind: 'done', text: meta ? `tests passed · ${meta}` : 'tests passed' };
+  }
+
   if (typeof data === 'string') {
     const text = firstLine(data);
     return text ? { kind: 'said', text } : null;
