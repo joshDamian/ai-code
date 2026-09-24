@@ -4,7 +4,7 @@ import { Service, transitions } from './service.mjs';
 const a = process.argv.slice(2);
 // Constructing the Service opens the database, so every invocation - including a
 // read-only one - touches shared state. The store's reaper accounts for that.
-const s = new Service(process.cwd());
+const s = new Service(process.env.AI_CODE_ROOT || process.cwd());
 const out = (x) => console.log(typeof x === 'string' ? x : JSON.stringify(x, null, 2));
 
 const HELP = `AI Code
