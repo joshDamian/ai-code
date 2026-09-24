@@ -576,6 +576,7 @@ export function providerEnv(provider, model) {
     return {
       AI_CODE_PROVIDER: provider.id,
       ANTHROPIC_BASE_URL: 'https://openrouter.ai/api/v1',
+      ANTHROPIC_API_KEY: '',
       ANTHROPIC_AUTH_TOKEN: key,
       ANTHROPIC_MODEL: mid,
       ANTHROPIC_DEFAULT_OPUS_MODEL: mid,
