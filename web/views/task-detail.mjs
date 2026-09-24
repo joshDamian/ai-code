@@ -4,7 +4,8 @@ import { api, taskStreamUrl } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
-import { TextArea, Select, TextInput } from '../components/form.mjs';
+import { TextArea, Select } from '../components/form.mjs';
+import { TaskPicker } from '../components/task-picker.mjs';
 import { DiffViewer } from '../components/diff-viewer.mjs';
 import { EventStream } from '../components/event-stream.mjs';
 import { Markdown } from '../components/markdown.mjs';
@@ -33,6 +34,10 @@ export function TaskDetail({ id, navigate, onTitle }) {
   // and the header is where a task is read, not where it is changed.
   const [linkingParent, setLinkingParent] = useState(false);
   const [parentDraft, setParentDraft] = useState('');
+  // The picker's candidates, null until the editor is first opened. Fetched
+  // lazily rather than with the page: linking is a rare edit, and most visits to
+  // a task never open it.
+  const [candidates, setCandidates] = useState(null);
   // Bumped to reopen the event stream. The stream is closed when a task reaches
   // COMPLETE, which used to be the end of the task; a feedback re-opens the
   // workflow, so it has to re-open the stream too or the repair, its test run and
@@ -64,6 +69,9 @@ export function TaskDetail({ id, navigate, onTitle }) {
     setData(null);
     setTab('plan');
     setRevisedAt(null);
+    setLinkingParent(false);
+    setParentDraft('');
+    setCandidates(null);
     seenPlanAtRef.current = undefined;
     liveRef.current = null;
     actionRef.current = null;
@@ -192,6 +200,29 @@ export function TaskDetail({ id, navigate, onTitle }) {
     return () => clearInterval(t);
   }, [liveOn, working, load]);
 
+  // The parent picker's list, fetched the first time the editor is opened. Same
+  // project only: the server refuses a cross-project parent, so offering one
+  // would be offering a dead end. The task itself is dropped by the picker.
+  const projectId = data?.task?.project_id;
+  useEffect(() => {
+    if (!linkingParent || candidates !== null || !projectId) return undefined;
+    let cancelled = false;
+    api.tasks()
+      .then((list) => {
+        if (cancelled) return;
+        setCandidates((list || []).filter((t) => t.project_id === projectId));
+      })
+      // Swallowed deliberately: an empty picker is a fine outcome, an error toast
+      // over a field the user just opened is not. The picker's own empty state
+      // says the list is empty, which is also what an empty answer means here.
+      .catch(() => {
+        if (!cancelled) setCandidates([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [linkingParent, candidates, projectId]);
+
   // `okMsg` may be a function of what `fn` returned, because an operation that can end
   // more than one way - a port that lands, or one that stops short and leaves a command
   // for you - cannot be reported from a string fixed at the call site. That mismatch is
@@ -238,9 +269,9 @@ export function TaskDetail({ id, navigate, onTitle }) {
               // says which task this one was built on.
               task.parent_id
                 ? html`<span>
-                    · builds on
+                    · builds on${' '}
                     <a class="link" href=${`#/tasks/${task.parent_id}`}>${data.parent?.title || task.parent_id}</a>
-                    ${data.parent ? html`<span class="muted">(${data.parent.state})</span>` : null}
+                    ${data.parent ? html`<span class="muted">${' '}(${data.parent.state})</span>` : null}
                   </span>`
                 : null
             }
@@ -250,12 +281,14 @@ export function TaskDetail({ id, navigate, onTitle }) {
             linkingParent
               ? html`
                   <div class="card">
-                    <${TextInput}
-                      label="Parent task id"
+                    <${TaskPicker}
+                      label="Parent task"
+                      tasks=${candidates || []}
                       value=${parentDraft}
                       onInput=${setParentDraft}
-                      placeholder="Paste the id of the task this one builds on"
-                      loading=${busy}
+                      placeholder="Search tasks by title"
+                      loading=${busy || !candidates}
+                      excludeId=${task.id}
                     />
                     <div class="row">
                       <button

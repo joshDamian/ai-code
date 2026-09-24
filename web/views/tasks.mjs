@@ -4,7 +4,8 @@ import { showToast } from '../components/toast.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
 import { SkeletonRows } from '../components/skeleton.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
-import { TextArea, Select, TextInput } from '../components/form.mjs';
+import { TextArea, Select } from '../components/form.mjs';
+import { TaskPicker } from '../components/task-picker.mjs';
 
 const TABS = [
   { id: 'all', label: 'All', states: null },
@@ -24,9 +25,9 @@ export function Tasks({ navigate }) {
   const [showForm, setShowForm] = useState(false);
   const [projectId, setProjectId] = useState('');
   const [title, setTitle] = useState('');
-  // Optional, and by id: the parent has to be named before there is anything on
-  // screen that could offer it as a choice, and the id is what a person has when
-  // they are creating the follow-on to a task they were just reading.
+  // Optional. Chosen from the project's own tasks rather than pasted as an id:
+  // the task a new one builds on is one you were reading a moment ago, and its
+  // id is not what you remember about it.
   const [parentId, setParentId] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -71,6 +72,10 @@ export function Tasks({ navigate }) {
     if (!q) return base;
     return base.filter((x) => String(x.title || '').toLowerCase().includes(q));
   }, [tasks, tab, showCancelled, query]);
+
+  // The candidates the picker may offer. Same project only: the server refuses a
+  // cross-project parent, so listing one would be offering a dead end.
+  const parentCandidates = useMemo(() => (tasks || []).filter((t) => t.project_id === projectId), [tasks, projectId]);
 
   async function submit(e) {
     e.preventDefault();
@@ -156,11 +161,12 @@ export function Tasks({ navigate }) {
                     }
                   }}
                 />
-                <${TextInput}
-                  label="Parent task id (optional)"
+                <${TaskPicker}
+                  label="Parent task (optional)"
+                  tasks=${parentCandidates}
                   value=${parentId}
                   onInput=${setParentId}
-                  placeholder="Paste the id of the task this one builds on"
+                  placeholder="Search tasks by title — the task this one builds on"
                   loading=${saving}
                 />
                 <button class="btn" type="submit" disabled=${saving || !projects.length}>${saving ? 'Creating…' : 'Create task'}</button>

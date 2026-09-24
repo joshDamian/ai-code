@@ -163,6 +163,10 @@ button:focus-visible,.nav-item:focus-visible,.tab:focus-visible,a:focus-visible,
 .field{display:grid;gap:var(--space-2)}
 .field-label{font-size:12px;color:var(--muted);font-weight:600}
 .inline-form{display:grid;gap:var(--space-3);margin-bottom:var(--space-4)}
+/* A button row sat directly under its form field: the two block-level siblings
+   would otherwise touch. Scoped away from .inline-form, which is a grid whose
+   own gap is already this value - a margin there would double it. */
+.card:not(.inline-form)>.field+.row{margin-top:var(--space-3)}
 textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical}
 
 .badge{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px var(--space-2);font-size:11.5px;font-weight:650;color:var(--muted);white-space:nowrap}
@@ -349,6 +353,17 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .cmd-item-hint{font-size:11.5px;color:var(--muted);flex:0 0 auto}
 .cmd-empty{padding:var(--space-5) var(--space-3);text-align:center}
 .cmd-foot{display:flex;gap:var(--space-4);border-top:1px solid var(--line);padding:var(--space-2) var(--space-4);font-size:11.5px;color:var(--muted)}
+
+/* ---- task picker ----
+   The palette's list classes, in a form field rather than in a dialog: an id is
+   not something a person has in hand, so the parent is chosen by title. */
+.task-picker .cmd-list{max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel2)}
+/* The input and its clear affordance. This is the positioning context rather
+   than the field, so the ✕ centres on the input and not on the label above it. */
+.task-picker-wrap{position:relative}
+.task-picker-wrap .input{padding-right:var(--space-6)}
+.task-picker-clear{position:absolute;right:var(--space-2);top:50%;transform:translateY(-50%);background:none;border:0;color:var(--muted);padding:var(--space-1);border-radius:var(--radius-sm);font-size:13px;line-height:1}
+.task-picker-clear:hover{background:var(--panel3);color:var(--text);opacity:1}
 
 /* ---- toolbar / tabs ---- */
 .view-toolbar{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-4);flex-wrap:wrap}
