@@ -3307,20 +3307,25 @@ export class Service {
 
         // A wall clock cannot tell a run that is thinking from one that is wedged, so
         // it fires on both and the only safe value for it is one that fits the slowest
-        // honest run. This one measures silence instead. It is armed by a streaming
-        // response and cleared by a frame that carries finished work, so it covers the
-        // window between a request and the model's first word - where the whole of the
-        // 277s gap in run 14185f67 lived - and never covers a local tool call, where a
-        // long `npm test` writes no frames at all because it is busy producing one.
+        // honest run. This one measures silence instead. Every frame that carries work
+        // arms it - progress, message, result, completed - and only a tool_progress
+        // frame clears it, so it covers both the window between a request and the
+        // model's first word, where the whole of the 277s gap in run 14185f67 lived,
+        // and the window after a finished turn, where the same wedge reappears past a
+        // response that has already answered once: a message cleared the timer and
+        // nothing re-armed it, leaving that silence to the much larger total timeout.
         //
-        // Only a frame carrying work clears it: the CLI's own status notices neither
-        // arm nor clear, because a provider that wedges after saying it was requesting
-        // would otherwise keep the detector quiet with the notice itself.
+        // tool_progress is the one frame that clears it, and it has to be: a local
+        // tool call like `npm test` writes nothing between its progress events,
+        // because running is what it is doing, so a budget left armed across one
+        // would kill the subprocess while it worked (the fc4cfb2c exit-137 case).
         //
-        // It is armed only once the run has streamed at all. A provider that ignores
-        // `--include-partial-messages` writes nothing between blocks, and a silence
-        // budget applied to one of those would kill it while it was working, so until
-        // the first progress frame arrives the total timeout is the only bound.
+        // The frames outside those five - `started`, the CLI's own status notices,
+        // `rate_limit` - neither arm nor clear. Arming on a notice would start the
+        // budget for a provider before it had shown that it produces anything at all,
+        // which would kill a working provider that ignores
+        // `--include-partial-messages`: until its first work-carrying frame arrives,
+        // the total timeout is the only bound.
         const stallMs = (policy.stall || 0) * 1000;
         let stallId = null;
         const clearStall = () => {
@@ -3355,14 +3360,14 @@ export class Service {
             if (u) usage = { ...usage, ...u };
             const txt = this.extractText(e.data);
             approxTokens += Math.ceil(txt.length / 4);
-            // Streaming frames are the run's pulse and a finished turn is its work;
-            // the silence budget watches the first and the total timeout covers both.
-            // tool_progress clears because a tool is actively running — a progress
-            // frame that arrives between the tool_use message and tool execution would
-            // otherwise arm a 120s timer that fires while the tool is still working,
-            // killing the subprocess (exit 137) and stalling the run.
-            if (e.type === 'progress') armStall();
-            else if (e.type === 'message' || e.type === 'result' || e.type === 'completed' || e.type === 'tool_progress') clearStall();
+            // Every frame carrying work arms the budget and only tool_progress
+            // clears it: a message is a finished turn, and the silence after one is
+            // the wedge window the detector exists for, while a tool that is
+            // actively running writes tool_progress and nothing else - so a timer
+            // left armed across it would fire while the tool still worked, killing
+            // the subprocess (exit 137) and stalling the run.
+            if (e.type === 'tool_progress') clearStall();
+            else if (e.type === 'progress' || e.type === 'message' || e.type === 'result' || e.type === 'completed') armStall();
             if (e.type === 'completed' && e.data?.sessionId) sessionId = e.data.sessionId;
             // Checked as the stream arrives rather than when it ends: the point of
             // a budget is to stop the run that is spiralling, and a run that has to

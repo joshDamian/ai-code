@@ -17,13 +17,14 @@ const ROLES = ['planner', 'implementer', 'reviewer', 'repair'];
 // reviewer explore and answer, so they get a tight budget; the two roles that
 // actually edit and test get a wide one. Unset or non-positive means no limit.
 //
-// stall is the seconds of silence - no frame at all from a response that has
-// started streaming - that count as wedged. It is the same number for every role
+// stall is the seconds of silence - no progress, no message, no result and no
+// tool_progress - that count as wedged. It is the same number for every role
 // because silence is a property of the provider rather than of the role. 120s is
 // far above what a streaming provider produces, which is a frame every few
-// milliseconds or a thinking-token notice every few hundred, and (matching
-// elsewhere) unreachable once the response is producing anything at all. Set it to
-// 0 for a provider that batches a whole block before writing it.
+// milliseconds or a thinking-token notice every few hundred, and the budget is
+// re-armed by every frame that carries work rather than only by the one a response
+// opens with - so a finished turn whose next one never arrives is a stall and not a
+// wait. Set it to 0 for a provider that batches a whole block before writing it.
 //
 // subagentWait is the seconds of a run's own wall clock it may spend inside
 // subagent calls without being charged for them. The spawn is the agent's own

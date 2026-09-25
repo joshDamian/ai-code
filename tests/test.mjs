@@ -565,6 +565,30 @@ test('a provider that writes nothing until it is done is not read as stalled',as
   assert.equal(s.store.listRuns(t.id).filter(x=>/STALLED/.test(x.error||'')).length,0);
 });
 
+test('a message after streaming leaves the stall detector armed',async()=>{
+  // The budget is armed by progress and must stay armed across the message that
+  // closes the response: the message is finished work, and silence after it is the
+  // wedge window the detector exists for. Before the inversion the message cleared
+  // the timer and nothing re-armed it, so this run lived until the total timeout.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  // Stream (closing progress arms the timer), then a tool_use message, then 30s
+  // of silence: the message used to clear what the stream armed.
+  s.addProvider({id:'msg-wedge',name:'MsgWedge',kind:'mock',enabled:true,config:{routable:true,streamEvents:5,streamMs:200,toolCalls:1,stallMs:30000}});
+  s.addModel({id:'msg-wedge-m',providerId:'msg-wedge',name:'mw',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,stall:1,timeout:60}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const started=Date.now();
+  const err=await s.plan(t.id).then(()=>null,e=>e);
+  const ms=Date.now()-started;
+  assert.equal(err?.code,'STALLED','silence after a finished message is a stall');
+  assert.ok(ms<15000,`cut off at 1s of silence rather than waited out (${ms}ms)`);
+  const run=s.store.listRuns(t.id).find(x=>x.role==='planner');
+  assert.match(run.error,/STALLED/,'and it is recorded on the run');
+});
+
 test('a run waiting on a subagent is not charged for the wait',async()=>{
   // The planner of task f70c23a7 was cut at 300s having spent 127 of them inside
   // three Explore spawns, with the run still streaming when it died. A subagent runs
