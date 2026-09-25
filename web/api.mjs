@@ -2,11 +2,15 @@
 // JSON bodies, parses JSON responses, and turns non-2xx responses into
 // thrown Errors carrying the server's {error} message.
 
+import { authHeaders, withToken, reportUnauthorized } from './auth.mjs';
+
 async function request(path, opts = {}) {
   const init = { ...opts };
+  // Empty on desktop, where the server exempts loopback and no token is needed.
+  init.headers = { ...authHeaders(), ...(init.headers || {}) };
   if (init.body !== undefined && typeof init.body !== 'string') {
     init.body = JSON.stringify(init.body);
-    init.headers = { 'content-type': 'application/json', ...(init.headers || {}) };
+    init.headers = { 'content-type': 'application/json', ...init.headers };
   }
 
   let res;
@@ -27,8 +31,14 @@ async function request(path, opts = {}) {
   }
 
   if (!res.ok) {
+    // A 401 is not a failure of this call, it is the absence of a token - and every
+    // caller would report it the same unhelpful way. The app listens for this and
+    // shows the pairing screen instead.
+    if (res.status === 401) reportUnauthorized();
     const msg = (data && typeof data === 'object' && data.error) || `Request failed (${res.status})`;
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
   }
   return data;
 }
@@ -144,14 +154,29 @@ export const api = {
   createChatSession: (projectId, title, taskId) => request('/api/chat/sessions', { method: 'POST', body: { projectId, title, taskId } }),
   chatSession: (id) => request(`/api/chat/sessions/${id}`),
   sendChatMessage: (sessionId, message) => request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', body: { message } }),
+
+  // Web Push. `pushKey` answers 503 when the server has no web-push installed, which
+  // the notifier treats as "no background push on this install" and nothing more.
+  pushKey: () => request('/api/push/key'),
+  pushSubscribe: (subscription) => request('/api/push/subscribe', { method: 'POST', body: subscription }),
+  pushUnsubscribe: (endpoint) => request('/api/push/unsubscribe', { method: 'POST', body: { endpoint } }),
 };
 
+// The three URLs below carry the token in the query string, because EventSource and
+// the WebSocket constructor both have no way to set a header. It is the same secret
+// the `Authorization` header carries, and the server reads it in exactly these cases.
+
 export function taskStreamUrl(id) {
-  return `/api/tasks/${id}/stream`;
+  return withToken(`/api/tasks/${id}/stream`);
 }
 
 export function chatStreamUrl(id) {
-  return `/api/chat/sessions/${id}/stream`;
+  return withToken(`/api/chat/sessions/${id}/stream`);
+}
+
+// The app-wide notification stream: run completions, for the in-page notifier.
+export function notificationsUrl() {
+  return withToken('/api/notifications');
 }
 
 // The one URL here that is not an http path: the terminal is a WebSocket, because
@@ -161,5 +186,5 @@ export function chatStreamUrl(id) {
 // than being refused as mixed content.
 export function terminalSocketUrl(taskId, target) {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${scheme}//${location.host}/api/tasks/${taskId}/terminal?target=${encodeURIComponent(target)}`;
+  return withToken(`${scheme}//${location.host}/api/tasks/${taskId}/terminal?target=${encodeURIComponent(target)}`);
 }

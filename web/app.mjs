@@ -14,7 +14,8 @@ import { Providers } from './views/providers.mjs';
 import { Routing } from './views/routing.mjs';
 import { Runs } from './views/runs.mjs';
 import { Usage } from './views/usage.mjs';
-import { Settings } from './views/settings.mjs';
+import { Settings, TokenGate } from './views/settings.mjs';
+import { notificationsUrl } from './api.mjs';
 
 const GO = { o: '#/overview', t: '#/tasks', c: '#/chat', p: '#/providers', r: '#/runs' };
 
@@ -68,6 +69,10 @@ function App() {
   // view that has one hands it up. Null everywhere else, and nulled on the way out
   // so a task's title cannot follow the user to another view.
   const [pageTitle, setPageTitle] = useState(null);
+  // Set by the first 401 from any call. Desktop never sees it - the server exempts
+  // loopback, so no request from this machine can be refused for the want of a token.
+  // A phone sees it once, before it has paired.
+  const [unpaired, setUnpaired] = useState(false);
 
   // The keydown listener is bound once; keep the current legend state where it
   // can read it without rebinding on every toggle.
@@ -200,8 +205,11 @@ function App() {
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
   useEffect(() => {
+    // Nothing to watch for while unpaired: the stream would 401 and retry forever,
+    // and every frame it did carry would be for a session this browser cannot read.
+    if (unpaired) return undefined;
     requestPermission();
-    const es = new EventSource('/api/notifications');
+    const es = new EventSource(notificationsUrl());
     es.addEventListener('run-end', (e) => {
       try {
         const { run, task } = JSON.parse(e.data);
@@ -211,7 +219,32 @@ function App() {
       }
     });
     return () => es.close();
+  }, [unpaired]);
+
+  // A push notification tapped while the app is already open. The service worker
+  // finds the window rather than opening a second copy, and this is what routes that
+  // window to the task the notification was about.
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !navigator.serviceWorker) return undefined;
+    const onMessage = (e) => {
+      const hash = typeof e.data?.url === 'string' ? e.data.url.replace(/^[^#]*/, '') : '';
+      if (e.data?.type === 'navigate' && hash) navigateRef.current(hash);
+    };
+    navigator.serviceWorker.addEventListener('message', onMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', onMessage);
   }, []);
+
+  useEffect(() => {
+    const onUnauthorized = () => setUnpaired(true);
+    window.addEventListener('ai-code:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('ai-code:unauthorized', onUnauthorized);
+  }, []);
+
+  // The pairing screen, and the one early return in this component. It replaces the
+  // whole shell rather than sitting inside it: an unpaired browser can render no view
+  // at all, so a sidebar of destinations that all 401 would be nine links to the same
+  // refusal.
+  if (unpaired) return html`<${TokenGate} />`;
 
   let view;
   switch (route.view) {
