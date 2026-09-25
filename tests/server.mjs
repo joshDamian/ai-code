@@ -1093,3 +1093,113 @@ test('ai-code task feedback reaches the service rather than falling through the 
   assert.doesNotMatch(r.err,/Unhandled task operation/);
   assert.equal(s.task(t.id).state,'CREATED');
 });
+
+// --- ai-code shell ----------------------------------------------------------
+//
+// One spawned process, its output collected. A variable set to undefined in `env`
+// is removed rather than passed on as the string "undefined", which is how a test
+// says "this key is not in the environment".
+function spawnCapture(cmd,args,{cwd,env={}}={}){
+  const e={...process.env,...env};
+  for(const k of Object.keys(e)) if(e[k]===undefined) delete e[k];
+  return new Promise((res)=>{
+    const p=spawn(cmd,args,{cwd,env:e,stdio:['ignore','pipe','pipe']});
+    let out='',err='';
+    p.stdout.on('data',(c)=>out+=c);
+    p.stderr.on('data',(c)=>err+=c);
+    p.on('close',(code)=>res({code,out,err}));
+  });
+}
+
+// A root with the deepseek provider installed through the real command, and a
+// `claude` shim first on PATH that records the environment it was handed. The shim
+// is what makes the assertion possible at all: without it, seeing which endpoint a
+// session was pointed at would mean opening one and asking it.
+async function shellFixture(root){
+  root=root||fs.mkdtempSync(path.join(os.tmpdir(),'aicode-shell-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const shim=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-shim-'));
+  const dump=path.join(shim,'env.txt');
+  fs.writeFileSync(path.join(shim,'claude'),'#!/bin/sh\n{ echo "argv: $*"; printenv | sort; } > "$SHIM_OUT"\nexit 0\n',{mode:0o755});
+  const add=await spawnCapture(process.execPath,[cliPath,'provider','add-deepseek'],{cwd:root,env:{AI_CODE_ROOT:root}});
+  assert.equal(add.code,0,add.err);
+  return {root,shim,dump};
+}
+
+test('shell opens the session on the provider rather than on the subscription',async()=>{
+  const {root,shim,dump}=await shellFixture();
+  const r=await spawnCapture(process.execPath,[cliPath,'shell','deepseek-claude-code','-p','hi'],{
+    cwd:root,
+    env:{AI_CODE_ROOT:root,PATH:`${shim}:${process.env.PATH}`,SHIM_OUT:dump,DEEPSEEK_API_KEY:'test-key',ANTHROPIC_MODEL:'ambient-model',ANTHROPIC_API_KEY:'ambient-key'},
+  });
+  assert.equal(r.code,0,r.err);
+  const env=fs.readFileSync(dump,'utf8');
+  assert.match(env,/^ANTHROPIC_BASE_URL=https:\/\/api\.deepseek\.com\/anthropic$/m);
+  assert.match(env,/^ANTHROPIC_AUTH_TOKEN=test-key$/m);
+  // The cheapest model in the catalog, which is what the shell's env default is -
+  // and the ambient model the person had exported is gone, not passed through.
+  assert.match(env,/^ANTHROPIC_MODEL=deepseek-flash$/m);
+  assert.match(env,/^argv: -p hi$/m);
+  assert.doesNotMatch(env,/^ANTHROPIC_API_KEY=/m,'the subscription key must not reach the session');
+  assert.doesNotMatch(env,/ambient-model/);
+});
+
+// The command the user types, end to end: the wrapper resolves the CLI beside it and
+// the session that opens is the provider's. This is the regression test for the
+// reported symptom, which was this wrapper opening a subscription session.
+test('bin/claude-cheap runs the session on the provider',async()=>{
+  const {root,shim,dump}=await shellFixture();
+  const r=await spawnCapture(path.resolve('bin','claude-cheap'),['-p','hi'],{
+    cwd:root,
+    env:{AI_CODE_ROOT:root,PATH:`${shim}:${process.env.PATH}`,SHIM_OUT:dump,DEEPSEEK_API_KEY:'test-key'},
+  });
+  assert.equal(r.code,0,r.err);
+  const env=fs.readFileSync(dump,'utf8');
+  assert.match(env,/^ANTHROPIC_BASE_URL=https:\/\/api\.deepseek\.com\/anthropic$/m);
+  assert.match(env,/^ANTHROPIC_MODEL=deepseek-flash$/m);
+});
+
+// And the registry it reads is the installed one under $HOME, the same root the
+// `ai-code` beside it resolves. The CLI's own default is the current directory, so a
+// wrapper without the export looks for the provider wherever you happen to be
+// standing and reports it missing - so the cwd here is deliberately a different
+// place from the store.
+test('bin/claude-cheap finds the registry under the installed root, not the current directory',async()=>{
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-home-'));
+  const root=path.join(home,'.ai-code');
+  fs.mkdirSync(root);
+  const {shim,dump}=await shellFixture(root);
+  const elsewhere=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-cwd-'));
+  const r=await spawnCapture(path.resolve('bin','claude-cheap'),['-p','hi'],{
+    cwd:elsewhere,
+    env:{HOME:home,AI_CODE_ROOT:undefined,PATH:`${shim}:${process.env.PATH}`,SHIM_OUT:dump,DEEPSEEK_API_KEY:'test-key'},
+  });
+  assert.equal(r.code,0,r.err);
+  assert.match(fs.readFileSync(dump,'utf8'),/^ANTHROPIC_BASE_URL=https:\/\/api\.deepseek\.com\/anthropic$/m);
+});
+
+// The failure that replaces the silent fallback: no key is a refusal, not a session
+// on whatever login the machine happens to carry.
+test('shell refuses to open a session when the provider key is missing',async()=>{
+  const {root,shim,dump}=await shellFixture();
+  const r=await spawnCapture(process.execPath,[cliPath,'shell','deepseek-claude-code','-p','hi'],{
+    cwd:root,
+    env:{AI_CODE_ROOT:root,PATH:`${shim}:${process.env.PATH}`,SHIM_OUT:dump,DEEPSEEK_API_KEY:undefined},
+  });
+  assert.equal(r.code,1);
+  assert.match(r.err,/DEEPSEEK_API_KEY/);
+  assert.equal(fs.existsSync(dump),false,'claude must not have been started at all');
+});
+
+test('shell names a provider it does not know',async()=>{
+  const {root,shim,dump}=await shellFixture();
+  const r=await spawnCapture(process.execPath,[cliPath,'shell','nope'],{
+    cwd:root,
+    env:{AI_CODE_ROOT:root,PATH:`${shim}:${process.env.PATH}`,SHIM_OUT:dump,DEEPSEEK_API_KEY:'test-key'},
+  });
+  assert.equal(r.code,1);
+  assert.match(r.err,/add-deepseek/);
+});

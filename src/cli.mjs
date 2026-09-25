@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process';
 import { Service, transitions } from './service.mjs';
+import { childEnv, providerEnv } from './agents.mjs';
 
 const a = process.argv.slice(2);
 // Constructing the Service opens the database, so every invocation - including a
@@ -52,6 +54,8 @@ Routing
 Runs
   runs
   usage [24h|7d|30d|all]
+Shell
+  shell <provider-id> [claude-args...]
 Ranker
   eval [project-id] [--k <n>] [--limit <n>] [--config <json>]
                      [--arms <json>] [--debug] [--json]
@@ -296,6 +300,49 @@ async function providerCommand(sub, rest) {
   return null;
 }
 
+// An interactive claude session wired to one provider, which is what makes a session
+// typed by hand bill the same way a routed run does.
+//
+// The environment is the pair the runner already builds: `providerEnv` translates the
+// provider row into the ANTHROPIC_* variables claude reads, and `childEnv` strips the
+// ambient routing a person's shell may carry. Composing them here rather than writing
+// a second translation for the wrapper is the whole point - the wrapper used to source
+// a file nothing in the repo writes, and fell back to the subscription login when it
+// was absent. It also means a provider with no key fails loudly instead of silently
+// running on the subscription.
+async function shellCommand(providerId, args) {
+  if (!providerId) throw new Error('shell needs a provider id; try `shell deepseek-claude-code`');
+  const provider = s.store.getProvider(providerId);
+  if (!provider) throw new Error(`Provider '${providerId}' not found; add it first with provider add-deepseek, add-openrouter or add-claude`);
+  if (!provider.enabled) throw new Error(`Provider '${providerId}' is disabled; run \`provider enable ${providerId}\` to use it`);
+
+  const models = s.store.listModels(providerId);
+  if (!models.length) throw new Error(`Provider '${providerId}' has no models; run \`provider sync ${providerId}\` to load its catalog`);
+  const enabled = models.filter((m) => m.enabled);
+  // The cheap end of what the provider offers, which is the tier an implementation
+  // run is routed to; `unknown price sorts last` rather than first, so a row with no
+  // published cost is never picked over one that has a price. A `--model` in the
+  // passthrough args overrides it, because claude's own flag beats the env default.
+  const model = [...(enabled.length ? enabled : models)].sort(
+    (x, y) => (x.inputCostPerMTok ?? Infinity) - (y.inputCostPerMTok ?? Infinity)
+  )[0];
+
+  const child = spawn('claude', args, { env: childEnv(providerEnv(provider, model)), stdio: 'inherit' });
+  // Ctrl-C reaches the child through the process group it shares with this one; the
+  // forward is for a signal delivered to this pid alone, and it is what keeps this
+  // process alive to report the session's exit code rather than dying first.
+  const forward = (sig) => child.kill(sig);
+  process.on('SIGINT', forward);
+  process.on('SIGTERM', forward);
+  const code = await new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', resolve);
+  });
+  process.off('SIGINT', forward);
+  process.off('SIGTERM', forward);
+  process.exitCode = code ?? 1;
+}
+
 async function main() {
   const [cmd, sub, ...rest] = a;
 
@@ -325,6 +372,10 @@ async function main() {
     if (sub === 'list') return out(s.store.listModels(rest[0]));
     if (sub === 'enable' || sub === 'disable') return out(s.updateModel(rest[0], { enabled: sub === 'enable' }));
   }
+
+  // Not through `out`: this command prints nothing of its own, and the session it
+  // launches owns the terminal for as long as it runs.
+  if (cmd === 'shell') return shellCommand(sub, rest);
 
   if (cmd === 'routing' && sub === 'show') return out(s.getRouting());
   if (cmd === 'routing' && sub === 'set') {

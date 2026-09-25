@@ -1,5 +1,27 @@
 #!/bin/sh
 set -eu
-CONFIG="${AI_CODE_CONFIG_DIR:-$HOME/.config/ai-code}/providers/deepseek.env"
-[ -f "$CONFIG" ] && . "$CONFIG"
-exec claude "$@"
+# A claude session on the cheapest enabled model of the deepseek provider. The env
+# comes from the provider row, not from a config file: `ai-code shell` is the one
+# place the translation lives, and it fails loudly when the key is missing rather
+# than falling back to the subscription login.
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$HERE/.." && pwd)"
+# The registry lives where the installer put it, which is what the `ai-code` this
+# script sits beside does too. Without this the CLI falls back to its own default,
+# the current directory, and reports the provider missing from wherever you happen
+# to be standing. An explicit AI_CODE_ROOT still wins.
+export AI_CODE_ROOT="${AI_CODE_ROOT:-$HOME/.ai-code}"
+# The `ai-code` install-ai-code writes next to this script when there is one, and
+# otherwise the working tree beside it. Both are resolved by path rather than by name,
+# so a stale `ai-code` earlier on PATH is never the thing that answers. The `-ef` is
+# what tells a checkout from an install: it is true only when this script really is
+# `$ROOT/bin/claude-cheap`, so an installed copy sitting in `$HOME/bin` cannot pick up
+# an unrelated `$HOME/src/cli.mjs` as if it were the CLI.
+if [ -x "$HERE/ai-code" ]; then
+  exec "$HERE/ai-code" shell deepseek-claude-code "$@"
+fi
+if [ -f "$ROOT/src/cli.mjs" ] && [ "$ROOT/bin/claude-cheap" -ef "$0" ]; then
+  exec node "$ROOT/src/cli.mjs" shell deepseek-claude-code "$@"
+fi
+printf '%s\n' "claude-cheap: no ai-code install beside this script and no working tree to fall back on" >&2
+exit 1
