@@ -195,6 +195,19 @@ button:hover{opacity:.9}
 button:disabled{opacity:.5;cursor:default}
 .btn.secondary{background:var(--panel3);color:var(--text);border:1px solid var(--line)}
 .btn.danger{background:#351b1b;color:#ffb5b5}
+/* The phone's hamburger. Hidden at every width where the sidebar is part of the
+   layout; the 1000px block below is where the sidebar leaves it and this arrives. */
+.nav-toggle{display:none}
+/* The backdrop is rendered only while the drawer is open, and the drawer only
+   exists below 1000px - but a drawer left open when the window is widened to the
+   desktop shell would drop this div into the grid as an unstyled item, taking a
+   cell of its own and pushing the page into a second row. Out of layout at every
+   width where it has no rules. */
+.nav-backdrop{display:none}
+/* The drawer takes focus when it opens, so a keyboard user lands inside the thing
+   they opened. It is a container rather than a control, and a ring around the whole
+   panel would read as a control that had been selected. */
+.sidebar:focus{outline:none}
 .chart-toggle{padding:var(--space-1) var(--space-3);font-size:12px}
 
 .input{width:100%;background:#0b0e12;color:var(--text);border:1px solid var(--line);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);outline:none}
@@ -691,10 +704,48 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 
 @media(max-width:1000px){
   .app-shell,.app-shell.collapsed{grid-template-columns:1fr}
-  .sidebar{display:none}
+  /* The sidebar becomes an off-canvas drawer behind the header hamburger. Fixed
+     rather than in flow, so the grid's one column is the page and the drawer slides
+     over it. */
+  .sidebar{
+    position:fixed;top:0;bottom:0;left:0;
+    width:280px;max-width:85vw;
+    height:auto; /* top+bottom bound it; 100vh mis-measures under mobile URL bars */
+    /* The rail sets `align-self:start`, which for a fixed box with top and bottom
+       at 0 is what decides whether an auto height stretches between them or
+       shrinks to its contents. The drawer is the whole screen edge, so it
+       stretches. */
+    align-self:stretch;
+    z-index:950;
+    transform:translateX(-105%);
+    visibility:hidden; /* off-canvas links stay out of tab order and the a11y tree */
+    transition:transform .18s ease,visibility 0s linear .18s;
+    box-shadow:0 0 24px rgba(0,0,0,.5);
+  }
+  .app-shell.nav-open .sidebar{transform:translateX(0);visibility:visible;transition:transform .18s ease}
+  .nav-backdrop{display:block;position:fixed;inset:0;background:rgba(4,6,9,.62);z-index:940} /* the kbd-overlay dim */
+  .nav-toggle{display:inline-flex;align-items:center;justify-content:center}
+  .app-header{display:flex;align-items:center;gap:var(--space-3)}
+  .header-title{flex:1} /* keeps the ellipsis working in the flex row */
+  .sidebar-toggle{display:none} /* collapsing is a desktop rail concept; the drawer is always expanded */
+  /* The drawer must not inherit the icon-only rail from a desktop collapse (the
+     preference persists in localStorage): re-expand it. */
+  .app-shell.collapsed .logo-text,.app-shell.collapsed .nav-group-label,.app-shell.collapsed .nav-item-label{display:block}
+  .app-shell.collapsed .logo{justify-content:flex-start;padding:0 var(--space-3) var(--space-6)}
+  .app-shell.collapsed .nav-item{justify-content:flex-start;gap:var(--space-3);padding:var(--space-2) var(--space-3)}
+  .app-shell.collapsed .nav-group{margin-top:var(--space-4);padding-top:0;border-top:0}
   .metric-grid,.provider-grid,.grid3{grid-template-columns:1fr 1fr}
   .chart-grid{grid-template-columns:1fr}
   .app-header,.content{padding-left:var(--space-5);padding-right:var(--space-5)}
+}
+/* The drawer's slide, for a reader who asked for reduced motion. Here rather than
+   with the skeleton rule at the top of the file - where a bare `.sidebar` would be
+   dead - for two reasons: the 1000px block above is what declares that transition,
+   and the rule in force at the moment the drawer appears is the heavier
+   `.app-shell.nav-open .sidebar`, so an override has to come after both and name
+   both. */
+@media(max-width:1000px) and (prefers-reduced-motion:reduce){
+  .sidebar,.app-shell.nav-open .sidebar{transition:none}
 }
 @media(max-width:650px){
   /* Metric cards stay paired - four full-width count cards is a lot of scroll

@@ -1,5 +1,5 @@
 // App shell: sidebar + header + content area + toast container.
-import { html, useState, useEffect } from '../lib.mjs';
+import { html, useState, useEffect, useRef } from '../lib.mjs';
 import { ToastContainer } from './toast.mjs';
 
 // One 16px stroke icon per destination, drawn inline. Inline rather than a
@@ -68,11 +68,44 @@ export function Layout({ route, title, children }) {
     }
   }, [collapsed]);
 
+  // The phone's drawer. Below 1000px the sidebar is off-canvas behind the header
+  // hamburger, and this is what it is behind. Component state rather than a
+  // preference: it is chrome that is open or not right now, and reopening on the
+  // next visit would put the drawer over the page the user just navigated to.
+  const [navOpen, setNavOpen] = useState(false);
+  const drawerRef = useRef(null);
+
+  // While the drawer is open it closes the way the command palette does - Escape,
+  // and any navigation. `hashchange` rather than a click on a link, because it is
+  // the one signal every route change passes through, `navigate()`'s manual
+  // dispatch included. Focus lands on the drawer so a keyboard user is inside the
+  // thing they opened rather than left outside it.
+  useEffect(() => {
+    if (!navOpen) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setNavOpen(false);
+    };
+    const onHashChange = () => setNavOpen(false);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('hashchange', onHashChange);
+    drawerRef.current?.focus();
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('hashchange', onHashChange);
+    };
+  }, [navOpen]);
+
   const current = NAV.find((n) => n.id === route);
 
   return html`
-    <div class="app-shell ${collapsed ? 'collapsed' : ''}">
-      <aside class="sidebar">
+    <div class="app-shell ${collapsed ? 'collapsed' : ''} ${navOpen ? 'nav-open' : ''}">
+      <aside
+        class="sidebar"
+        id="app-nav"
+        ref=${drawerRef}
+        tabIndex="-1"
+        onClick=${() => setNavOpen(false)}
+      >
         <div class="logo">
           <div class="logo-text">
             <div class="logo-title">AI CODE</div>
@@ -105,8 +138,19 @@ export function Layout({ route, title, children }) {
           `
         )}
       </aside>
+      ${navOpen ? html`<div class="nav-backdrop" onClick=${() => setNavOpen(false)} />` : null}
       <div class="main-col">
         <header class="app-header">
+          <button
+            class="nav-toggle btn secondary"
+            type="button"
+            aria-label=${navOpen ? 'Close navigation' : 'Open navigation'}
+            aria-expanded=${navOpen}
+            aria-controls="app-nav"
+            onClick=${() => setNavOpen((v) => !v)}
+          >
+            ${icon(html`<path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" />`)}
+          </button>
           <div class="header-title">
             ${current ? current.label : ''}
             ${title ? html`<span class="header-sep">/</span><span class="header-crumb">${title}</span>` : null}
