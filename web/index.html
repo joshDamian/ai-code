@@ -151,17 +151,29 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 
 /* ---- primitives ---- */
 .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4)}
+/* The vertical rhythm inside a card. A card is a plain block, so its children have
+   no gap between them and nothing to collapse against: a `p` has had its UA margin
+   stripped, a `.row`'s gap is horizontal, and a `.stack` opens flush against
+   whatever is above it. Each of these four blocks therefore carries a step on the
+   side where a sibling sits, and the first and last keep the card's own padding as
+   their edge. The blocks that own their spacing instead - a `.view-toolbar`'s 16px,
+   an `.action-bar`'s 20px - are not in the list, so nothing is counted twice.
+   The exception is a card whose own layout already owns the rhythm: a flex or grid
+   card with a gap would add this margin to that gap and double the step. Each such
+   card is named here, so a new variant that sets display and gap has to be added. */
+.card:not(.inline-form,.provider-card,.metric-card,.chat-list .card)>:is(.row,.stack,.muted,p):not(:first-child){margin-top:var(--space-3)}
+.card:not(.inline-form,.provider-card,.metric-card,.chat-list .card)>:is(.row,.stack,.muted,p):not(:last-child){margin-bottom:var(--space-3)}
+/* The rule above reaches only direct children of a card, so a `.row` in a toolbar's
+   filter bar or inside a list row is never matched - both containers own that space.
+   Zeroed anyway, so the two stay excluded if that selector is ever widened: a step
+   inside a filter bar pushes the toolbar out of alignment. */
+.view-toolbar>.row,.list-row .row{margin-top:0;margin-bottom:0}
 /* 20px between the sections of a page, whether or not the section is a card:
    one rhythm, so a page reads the same as the next one. */
 .section{margin-top:var(--space-5)}
 .row{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap}
 .stack{display:grid;gap:var(--space-3)}
-/* A page's sections, and the one place the page-level rhythm is declared: 20px
-   between the cards a page is made of, against .stack's 12px inside one. The
-   margin is zeroed here because the gap is the same gap - a .section is a card
-   with its own margin-top, and leaving both would double every seam. */
-.sections{display:grid;gap:var(--space-5)}
-.sections>.section{margin-top:0}
+
 .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-3);margin-top:var(--space-3)}
 .kv-grid{display:grid;grid-template-columns:140px 1fr;gap:var(--space-2) var(--space-3);padding-top:var(--space-1)}
 
@@ -170,9 +182,7 @@ button:hover{opacity:.9}
 button:disabled{opacity:.5;cursor:default}
 .btn.secondary{background:var(--panel3);color:var(--text);border:1px solid var(--line)}
 .btn.danger{background:#351b1b;color:#ffb5b5}
-/* The small button: a toolbar or a chart head, where a full-height button beside
-   a title reads as the page's primary action. */
-.btn.sm{padding:var(--space-1) var(--space-3);font-size:12px}
+.chart-toggle{padding:var(--space-1) var(--space-3);font-size:12px}
 
 .input{width:100%;background:#0b0e12;color:var(--text);border:1px solid var(--line);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);outline:none}
 .input:focus{border-color:var(--accent-dim)}
@@ -284,9 +294,7 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* ---- charts ---- */
 .chart-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:var(--space-3);margin-top:var(--space-6);align-items:start}
 /* No margin of its own: a chart card is a .section first, and the page's 20px step
-   is the one that puts it under the row of figures above it. Zeroing it here is what
-   left the usage page's charts touching the tiles - a .sections grid zeroes the step
-   itself, so both places still get their spacing from exactly one owner. */
+   from .section puts it under the row of figures above it. */
 .chart-card{min-width:0;overflow:visible}
 .chart-head{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-1)}
 .chart-head h2{margin:0}
@@ -391,9 +399,9 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 
 /* ---- toolbar / tabs ---- */
 .view-toolbar{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-4);flex-wrap:wrap}
-/* A toolbar holding a single action has nothing to sit opposite, and
-   space-between would strand it against the left edge. Only routing.mjs's Save
-   is alone in one today. */
+/* A toolbar holding a single action has nothing to sit opposite, and space-between
+   would strand it against the left edge. Two toolbars hold a single child today:
+   routing's Save, and the projects page's pair of creation buttons. */
 .view-toolbar:has(> :only-child){justify-content:flex-end}
 /* A toolbar opens a section, and the ones that open a card - the first thing inside
    it - are already placed by the card's own padding. One that follows content is not:
