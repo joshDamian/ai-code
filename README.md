@@ -265,6 +265,8 @@ The test suite covers workflow transitions, approval enforcement, the planner's 
 
 The HTTP tests bind an ephemeral port and wait for the child to answer on it before asserting anything. That is not incidental: with a fixed port, a stale server on it makes the child fail to bind and exit while the test polls the stranger and passes, which is exactly how a green suite once hid a broken server.
 
+Two of them are worth knowing about before changing them. The push test stands up a local HTTPS server holding a certificate it generates with `openssl`, because `web-push` speaks only TLS and builds the request itself — there is no seam to inject a fake at, so the test skips on a machine with no `openssl` rather than pretending to have run. The token test reads the token off the server's own stdout rather than inventing one, because the announcement is half of what it is testing.
+
 
 ## Mission Control control plane
 
@@ -297,6 +299,42 @@ The mock provider is retained for automated tests only and is never eligible for
 Anthropic: Claude Sonnet 5 is $2/MTok input and $10/MTok output; Claude Opus 4.8 is $5/MTok input and $25/MTok output. These are API list-price equivalents; Claude Code subscription usage is not represented as a direct per-token bill.
 
 DeepSeek: `deepseek-flash` is DeepSeek-V4.1-Flash. Current official pricing uses peak/off-peak rates and cache-hit pricing; AI Code stores the rate-card metadata and computes recorded API cost using observed usage and the run timestamp.
+
+
+## Phone access
+
+Mission Control installs on an Android or iOS phone as a PWA. It is the same dashboard against the same API, not a second client: a phone is a fourth caller of this server, next to the browser on this machine, the TUI and the CLI.
+
+Three things stood between the dashboard and a phone, and each is closed:
+
+- **The API had no authentication.** It now takes a token, and every `/api` route requires one unless the request arrived on loopback.
+- **The server bound every interface.** `server.listen(port)` binds `0.0.0.0`, so the dashboard was reachable from the LAN by accident. It now binds `127.0.0.1`, and a non-loopback bind refuses to start unless `AI_CODE_TOKEN` names the token explicitly.
+- **A backgrounded tab receives nothing.** Run completions are now also delivered as Web Push, so a phone with the app closed is told a run finished.
+
+### Setting it up
+
+The server stays on loopback. Tailscale terminates TLS in front of it and is the transport:
+
+```bash
+./dev/ai-code                       # prints the API token, and the command below
+tailscale serve https / http://127.0.0.1:4317
+```
+
+On the phone, open the `https://<machine>.<tailnet>.ts.net` address that `tailscale serve` prints. The first screen asks for the token — it is the `API token:` line the server logged at startup, and it is reprinted on every start, so it is never lost. Then **Add to Home screen**: the dashboard opens standalone, and the browser prompts once for notification permission, which is what registers the phone for push.
+
+A run that finishes while the app is closed now arrives as a notification, and tapping it opens the task it was about.
+
+### What the token does and does not grant
+
+The exemption is the Host header, not the socket, which is what makes this work through a proxy: `tailscale serve` connects to loopback from loopback, so a socket check could not tell a phone from the desktop, while the Host header it forwards still carries the machine's own name. Desktop sends `Host: localhost:4317` and stays tokenless; a phone sends the `.ts.net` name and is asked for the token. The consequence to know about is that a non-browser client on the tailnet can set `Host: localhost` by hand and inherit the exemption. That is the same trust boundary the terminal has always sat behind, and the fix — requiring the token on loopback too — would break the desktop, the TUI and the CLI to defend against a tailnet the user already controls.
+
+The terminal is the exception to all of it. It is loopback-only and a valid token does not change that, because reaching the API is not the same permission as opening a shell on the machine. The TAB is not rendered on a phone, and the upgrade is refused with a 403 if anything asks anyway.
+
+Push subscription state is in the `push_subscriptions` table, and the VAPID keypair and the API token are in `settings`. Deleting rows there revokes a phone's push and re-pairs it respectively.
+
+### Reaching it without Tailscale
+
+`AI_CODE_HOST=<tailnet-ip>` plus `AI_CODE_TOKEN=<a-token>` works, and serves plain HTTP. Without a secure context the browser has no service worker and no push, so this is a debug fallback rather than the way to use it. It is also why the bind refuses to start without a named token: that address is reachable by anything on the network.
 
 
 ## Model registry

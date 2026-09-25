@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';import {spawn,execFileSync} from 'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import net from 'node:net';import {Service} from '../src/service.mjs';import {WebSocket} from 'ws';import {TerminalSessions} from '../src/terminal.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';import https from 'node:https';import crypto from 'node:crypto';import {spawn,execFileSync} from 'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import net from 'node:net';import {Service} from '../src/service.mjs';import {WebSocket} from 'ws';import {TerminalSessions} from '../src/terminal.mjs';
 function get(url){return new Promise((res,rej)=>http.get(url,r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))}).on('error',rej))}
 function post(url,payload){return new Promise((res,rej)=>{const data=JSON.stringify(payload||{});const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)}},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.write(data);req.end()})}
 function patch(url,payload){return new Promise((res,rej)=>{const data=JSON.stringify(payload||{});const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname,method:'PATCH',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)}},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.write(data);req.end()})}
@@ -737,11 +737,11 @@ test('a shell that exits ends its session, and the next reader gets a live one',
 });
 
 test('the terminal is localhost-only, and refuses by name',async()=>{
-  // A terminal is arbitrary command execution and this server has no auth, so the route
-  // narrows relative to the rest of it: the upgrade is refused unless it came from this
-  // machine. CORS does not cover WebSocket upgrades, so a page on any origin can open a
-  // socket to localhost - which is the case the Origin check is for - and a rebound DNS
-  // name is the case the Host check is.
+  // A terminal is arbitrary command execution, so the route narrows relative to the
+  // rest of the server: the upgrade is refused unless it came from this machine, and a
+  // valid token does not change that. CORS does not cover WebSocket upgrades, so a page
+  // on any origin can open a socket to localhost - which is the case the Origin check
+  // is for - and a rebound DNS name is the case the Host check is.
   const {root,taskId}=await worked();
   const s=await startServer(root);
   try{
@@ -751,6 +751,16 @@ test('the terminal is localhost-only, and refuses by name',async()=>{
 
     assert.match(await refused(terminalSocket(s.base,taskId,'parent',{headers:{origin:'http://evil.example.com'}})),/403/);
     assert.match(await refused(terminalSocket(s.base,taskId,'parent',{headers:{host:'evil.example.com'}})),/403/);
+    // A phone that has paired and holds a valid token, asking anyway. Reaching the API
+    // is not the same permission as opening a shell on the machine, and this is the
+    // case the two are distinguished by - so it is asserted rather than assumed.
+    const {root:tokRoot,taskId:tokTask}=seeded();
+    const tok=await startedWithToken(tokRoot);
+    try{
+      const phone={host:'workstation.tailnet-abc.ts.net',authorization:`Bearer ${tok.token}`};
+      assert.equal((await withHeaders(`${tok.base}/api/tasks/${tokTask}/show`,phone)).status,200,'the token itself has to be accepted, or the refusal below proves nothing');
+      assert.match(await refused(terminalSocket(tok.base,tokTask,'parent',{headers:phone})),/403/);
+    }finally{tok.stop()}
     // A target that is not a directory: a bad request rather than a shell in one.
     assert.match(await refused(terminalSocket(s.base,taskId,'everywhere')),/400/);
     // A task that does not exist.
@@ -1202,4 +1212,313 @@ test('shell names a provider it does not know',async()=>{
   });
   assert.equal(r.code,1);
   assert.match(r.err,/add-deepseek/);
+});
+
+// ---------------------------------------------------------------------------
+// Phone access: the token gate, the bind, and Web Push.
+
+// One request with headers this test chooses. `get` above cannot send a Host or an
+// Authorization, and both are the whole subject here.
+function withHeaders(url,headers={}){
+  return new Promise((res,rej)=>{const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname+u.search,headers},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.end()});
+}
+
+// The token the server prints, read off its own stdout. A test that invented its own
+// would be testing a comparison rather than the announcement a person pairs from.
+async function startedWithToken(root,extra={}){
+  const port=await freePort();
+  const proc=spawn(process.execPath,['src/server.mjs'],{cwd:process.cwd(),env:{...process.env,AI_CODE_ROOT:root,PORT:String(port),...extra},stdio:['ignore','pipe','pipe']});
+  const base=`http://localhost:${port}`;
+  // Whatever the ambient environment holds would otherwise decide the answer for a
+  // test that is about what happens when no token is configured.
+  let out='';let stderr='';let exited=null;
+  proc.stdout.on('data',(c)=>{out+=c});
+  proc.stderr.on('data',(c)=>{stderr+=c});
+  proc.on('exit',(code)=>{if(!exited)exited={code}});
+  const deadline=Date.now()+20000;
+  for(;;){
+    if(exited)throw new Error(`server exited (${exited.code}) before it answered\n${stderr}`);
+    const token=out.match(/^API token: (.+)$/m)?.[1];
+    if(token&&(await probe(`${base}/api/overview`))?.status===200)return {proc,base,port,token,stop:()=>proc.kill('SIGTERM')};
+    if(Date.now()>deadline){proc.kill('SIGKILL');throw new Error(`server never announced a token on :${port}\n${out}\n${stderr}`)}
+    await new Promise(r=>setTimeout(r,25));
+  }
+}
+
+// The header the phone does not send and the one it does. A request carrying the
+// machine's Tailscale name is not on loopback, whichever socket it arrived on, and that
+// is the whole mechanism: `tailscale serve` proxies from loopback, so only the Host
+// distinguishes the phone from the desktop behind it.
+const TS_HOST={host:'workstation.tailnet-abc.ts.net'};
+
+test('an API request from off-loopback is refused without the token, and served with it',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-auth-'));
+  const s=await startedWithToken(root);
+  try{
+    // The regression guard for the desktop, the TUI and the CLI: all three send a
+    // loopback Host and none of them has a token to send. If this ever fails, the
+    // dashboard on this machine stops working.
+    assert.equal((await get(`${s.base}/api/overview`)).status,200);
+    assert.equal((await withHeaders(`${s.base}/api/overview`,{host:'localhost:'+s.port})).status,200);
+
+    assert.equal((await withHeaders(`${s.base}/api/overview`,TS_HOST)).status,401);
+    assert.equal((await withHeaders(`${s.base}/api/overview`,{...TS_HOST,authorization:`Bearer ${s.token}`})).status,200);
+    // EventSource and the WebSocket constructor cannot set a header, so the query
+    // string is the transport for both.
+    assert.equal((await withHeaders(`${s.base}/api/overview?token=${encodeURIComponent(s.token)}`,TS_HOST)).status,200);
+    assert.equal((await withHeaders(`${s.base}/api/overview`,{...TS_HOST,authorization:'Bearer not-the-token'})).status,401);
+    assert.equal((await withHeaders(`${s.base}/api/overview?token=not-the-token`,TS_HOST)).status,401);
+    // A token of a different length must be refused rather than throw: the comparison
+    // is over digests, which is what makes the lengths equal whatever arrives.
+    assert.equal((await withHeaders(`${s.base}/api/overview`,{...TS_HOST,authorization:'Bearer x'})).status,401);
+
+    // The shell a phone loads before it has a token has to be reachable without one,
+    // or there is nothing to pair with.
+    assert.equal((await withHeaders(`${s.base}/`,TS_HOST)).status,200);
+    assert.equal((await withHeaders(`${s.base}/app.mjs`,TS_HOST)).status,200);
+    assert.equal((await withHeaders(`${s.base}/manifest.webmanifest`,TS_HOST)).status,200);
+    assert.equal((await withHeaders(`${s.base}/sw.js`,TS_HOST)).status,200);
+    assert.equal((await withHeaders(`${s.base}/icons/icon-192.png`,TS_HOST)).status,200);
+  }finally{s.stop()}
+});
+
+test('the manifest is served as a manifest, which is what makes the app installable',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-manifest-'));
+  const s=await startedWithToken(root);
+  try{
+    const r=await new Promise((res,rej)=>{const u=new URL(s.base);const req=http.get({hostname:u.hostname,port:u.port,path:'/manifest.webmanifest'},(x)=>{let b='';x.on('data',(c)=>b+=c);x.on('end',()=>res({status:x.statusCode,type:x.headers['content-type'],body:b}))});req.on('error',rej)});
+    assert.equal(r.status,200);
+    // Chrome accepts octet-stream and installability checks do not.
+    assert.match(r.type,/application\/manifest\+json/);
+    const m=JSON.parse(r.body);
+    assert.equal(m.display,'standalone');
+    assert.ok(m.icons.some((i)=>i.purpose==='maskable'),'a launcher crops the icon, so one has to survive it');
+  }finally{s.stop()}
+});
+
+test('the dashboard sends no CORS grant, so another origin cannot read the API',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-cors-'));
+  const s=await startedWithToken(root);
+  try{
+    const r=await new Promise((res,rej)=>{const u=new URL(s.base);const req=http.get({hostname:u.hostname,port:u.port,path:'/api/overview'},(x)=>{x.resume();x.on('end',()=>res({status:x.statusCode,headers:x.headers}))});req.on('error',rej)});
+    assert.equal(r.status,200);
+    assert.equal(r.headers['access-control-allow-origin'],undefined);
+  }finally{s.stop()}
+});
+
+test('a token can be supplied by environment instead of generated',async()=>{
+  // An install that manages its own secret, which is also the only way a non-loopback
+  // bind is allowed to start.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-envtoken-'));
+  const s=await startedWithToken(root,{AI_CODE_TOKEN:'chosen-by-the-operator'});
+  try{
+    assert.equal((await withHeaders(`${s.base}/api/overview`,{...TS_HOST,authorization:'Bearer chosen-by-the-operator'})).status,200);
+    assert.equal((await withHeaders(`${s.base}/api/overview`,TS_HOST)).status,401);
+  }finally{s.stop()}
+});
+
+test('the token survives a restart, so a paired phone stays paired',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-tokenpersist-'));
+  const first=await startedWithToken(root);
+  const token=first.token;
+  first.stop();
+  await new Promise(r=>setTimeout(r,250));
+  const second=await startedWithToken(root);
+  try{
+    assert.equal(second.token,token);
+    assert.equal((await withHeaders(`${second.base}/api/overview`,{...TS_HOST,authorization:`Bearer ${token}`})).status,200);
+  }finally{second.stop()}
+});
+
+test('a bind that is not loopback refuses to start without an explicitly named token',async()=>{
+  // The address is reachable by anything on the network, so it does not get to run on
+  // a secret this process invented and printed to a log nobody is reading.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-bind-'));
+  const proc=spawn(process.execPath,['src/server.mjs'],{cwd:process.cwd(),env:{...process.env,AI_CODE_ROOT:root,PORT:'0',AI_CODE_HOST:'0.0.0.0',AI_CODE_TOKEN:''},stdio:['ignore','pipe','pipe']});
+  let stderr='';
+  proc.stderr.on('data',(c)=>{stderr+=c});
+  const code=await new Promise((res)=>proc.on('exit',(c)=>res(c)));
+  assert.notEqual(code,0,'exited 0, so an unauthenticated API was left listening on every interface');
+  assert.match(stderr,/AI_CODE_TOKEN/);
+});
+
+test('a bind that is not loopback starts when the token is named',async()=>{
+  // The other half: the refusal above is a guard, not a ban on the configuration.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-bindok-'));
+  const port=await freePort();
+  const proc=spawn(process.execPath,['src/server.mjs'],{cwd:process.cwd(),env:{...process.env,AI_CODE_ROOT:root,PORT:String(port),AI_CODE_HOST:'127.0.0.1',AI_CODE_TOKEN:'named-for-the-bind'},stdio:['ignore','pipe','pipe']});
+  try{
+    const deadline=Date.now()+20000;
+    for(;;){
+      if((await probe(`http://localhost:${port}/api/overview`))?.status===200)break;
+      if(Date.now()>deadline)throw new Error('the server never answered on an explicitly named loopback bind');
+      await new Promise(r=>setTimeout(r,25));
+    }
+    // Still exempt on loopback, so naming a token does not lock the desktop out.
+    assert.equal((await get(`http://localhost:${port}/api/overview`)).status,200);
+  }finally{proc.kill('SIGKILL')}
+});
+
+test('push is offered, subscribable, and unsubscribable',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-push-'));
+  const s=await startedWithToken(root);
+  try{
+    const key=JSON.parse((await get(`${s.base}/api/push/key`)).body);
+    // A VAPID public key is an uncompressed P-256 point: 65 bytes, base64url.
+    assert.match(key.key,/^[A-Za-z0-9_-]+$/);
+    assert.equal(Buffer.from(key.key.replace(/-/g,'+').replace(/_/g,'/'),'base64').length,65);
+
+    const sub={endpoint:'https://fcm.googleapis.com/fcm/send/abc',keys:{p256dh:'p',auth:'a'}};
+    const added=await post(`${s.base}/api/push/subscribe`,sub);
+    assert.equal(added.status,201);
+    assert.equal(JSON.parse(added.body).subscriptions,1);
+    // Re-subscribing from the same browser replaces rather than duplicates, which is
+    // what a rotated keypair looks like from here.
+    assert.equal((await post(`${s.base}/api/push/subscribe`,{endpoint:sub.endpoint,keys:{p256dh:'p2',auth:'a2'}})).status,201);
+    assert.equal((await post(`${s.base}/api/push/unsubscribe`,{endpoint:sub.endpoint})).status,200);
+    assert.equal((await post(`${s.base}/api/push/unsubscribe`,{endpoint:sub.endpoint})).status,200,'unsubscribing twice is not an error');
+    assert.equal((await post(`${s.base}/api/push/subscribe`,{endpoint:'nope'})).status,400);
+  }finally{s.stop()}
+});
+
+test('the VAPID keypair is generated once and kept, so subscriptions outlive a restart',async()=>{
+  // A keypair that changed on every start would silently invalidate every subscription
+  // ever made, and the failure looks like "push just stopped working".
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-vapid-'));
+  const first=await startedWithToken(root);
+  const key=JSON.parse((await get(`${first.base}/api/push/key`)).body).key;
+  first.stop();
+  await new Promise(r=>setTimeout(r,250));
+  const second=await startedWithToken(root);
+  try{
+    assert.equal(JSON.parse((await get(`${second.base}/api/push/key`)).body).key,key);
+  }finally{second.stop()}
+});
+
+// A push service stand-in. `web-push` speaks only TLS - it parses the endpoint itself
+// and builds the request with `https.request` - so the stub has to be an HTTPS server,
+// and the certificate is generated per run rather than checked in: a checked-in fixture
+// expires, and a test that fails on a calendar date is a test nobody trusts. Only the
+// child server is told to accept it, through NODE_TLS_REJECT_UNAUTHORIZED.
+function pushStub(){
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-pushstub-'));
+  execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',path.join(dir,'k.pem'),'-out',path.join(dir,'c.pem'),'-days','2','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'});
+  const received=[];
+  const server=https.createServer({key:fs.readFileSync(path.join(dir,'k.pem')),cert:fs.readFileSync(path.join(dir,'c.pem'))},(req,res)=>{
+    let body='';req.on('data',(c)=>body+=c);
+    req.on('end',()=>{
+      received.push({path:req.url,headers:req.headers,body});
+      // 410 Gone is the push service saying this subscription is dead for good, which
+      // is the one answer the server acts on. The path is what makes a subscription
+      // dead, so one stub can be both a live service and an expired one.
+      const dead=req.url.startsWith('/dead');
+      res.writeHead(dead?410:201);res.end();
+    });
+  });
+  return {
+    received,
+    listen:()=>new Promise((ok)=>server.listen(0,'127.0.0.1',()=>ok(server.address().port))),
+    close:()=>new Promise((ok)=>server.close(ok)),
+  };
+}
+
+// The client half of a subscription, which web-push will not encrypt to unless the keys
+// are real: `p256dh` is an uncompressed P-256 point and `auth` is 16 random bytes, both
+// base64url, both generated here rather than faked.
+function subscriptionKeys(){
+  const ecdh=crypto.createECDH('prime256v1');ecdh.generateKeys();
+  return {p256dh:ecdh.getPublicKey().toString('base64url'),auth:crypto.randomBytes(16).toString('base64url')};
+}
+
+// The notification stream has no natural end - it is open for as long as a dashboard
+// is - so it is read incrementally and closed by the test rather than awaited to its
+// end, which would wait forever.
+function openNotificationStream(url){
+  let text='';
+  const req=http.get(url,(r)=>{r.on('data',(c)=>{text+=c})});
+  req.on('error',()=>{});
+  return {text:()=>text,close:()=>req.destroy()};
+}
+
+async function untilFrame(reader,type,ms=25000){
+  const deadline=Date.now()+ms;
+  for(;;){
+    if(frames(reader.text()).some((f)=>f.type===type))return;
+    if(Date.now()>deadline)throw new Error(`no ${type} frame within ${ms}ms\n${reader.text()}`);
+    await new Promise((r)=>setTimeout(r,100));
+  }
+}
+
+test('a run that ends pushes once, to every subscription, however many dashboards are watching',async(t)=>{
+  try{execFileSync('openssl',['version'],{stdio:'ignore'})}catch{return t.skip('openssl is not on this machine, so no local TLS endpoint can stand in for a push service')}
+  const {root,taskId}=seeded();
+  const stub=pushStub();
+  const stubPort=await stub.listen();
+  // The child is told to trust the stub's self-signed certificate. Scoped to that one
+  // process; nothing about this test loosens TLS anywhere else.
+  const s=await startedWithToken(root,{NODE_TLS_REJECT_UNAUTHORIZED:'0',AI_CODE_ALLOW_MOCK:'1'});
+  const viewers=[];
+  try{
+    const good=`https://127.0.0.1:${stubPort}/good`;
+    const dead=`https://127.0.0.1:${stubPort}/dead`;
+    for(const endpoint of [good,dead])assert.equal((await post(`${s.base}/api/push/subscribe`,{endpoint,keys:subscriptionKeys()})).status,201);
+
+    // Two dashboards, which is the case a per-connection push would get wrong: it would
+    // send two notifications for one run, and none at all when nobody is watching -
+    // and "nobody is watching" is exactly the backgrounded phone.
+    viewers.push(openNotificationStream(`${s.base}/api/notifications`),openNotificationStream(`${s.base}/api/notifications`));
+    await new Promise((r)=>setTimeout(r,300));
+
+    assert.equal((await post(`${s.base}/api/tasks/${taskId}/plan`,{})).status,200);
+    await untilFrame(viewers[0],'run-end');
+
+    // web-push resolves the send before the frame loop drains, so the stub may be a
+    // tick behind the stream the assertion above waited on.
+    const deadline=Date.now()+15000;
+    while(stub.received.length<2&&Date.now()<deadline)await new Promise((r)=>setTimeout(r,50));
+    assert.equal(stub.received.length,2,`one run-end produced ${stub.received.length} sends for two watchers and two subscriptions`);
+    for(const r of stub.received){
+      assert.equal(r.headers['content-encoding'],'aes128gcm');
+      assert.match(r.headers.authorization||'',/^vapid t=/,'a push has to be signed by the install key or the service drops it');
+      assert.ok(r.body.length>0);
+    }
+
+    // The dead subscription answered 410, which is the one answer that means "delete
+    // this row" - so the next subscribe reports one fewer than it otherwise would.
+    const after=await post(`${s.base}/api/push/subscribe`,{endpoint:`https://127.0.0.1:${stubPort}/another`,keys:subscriptionKeys()});
+    assert.equal(JSON.parse(after.body).subscriptions,2,`the dead subscription was kept: ${JSON.stringify(stub.received.map((r)=>r.path))}`);
+  }finally{
+    for(const v of viewers)v.close();
+    s.stop();
+    await stub.close();
+  }
+});
+
+test('a run already in flight when the server starts is announced when it ends',async()=>{
+  // The seed that keeps history quiet is the same seed that can swallow the news: a
+  // foreground `ai-code task execute` is a run in another process, and a dashboard
+  // starting under it has to report it when it lands. Both transports hang off the one
+  // publish point, so the frame asserted here is also the push.
+  const {root,taskId}=seeded();
+  const s=new Service(root,{allowMock:true,silent:true});
+  s.store.addRun({id:'inflight',taskId,role:'implementer',providerId:'worker',modelId:'worker-m',status:'running',startedAt:new Date().toISOString()});
+  // A fresh lease, so the server's own reaper leaves the row alone: this is a run the
+  // process holding it is still driving, not debris from a crash.
+  s.store.heartbeat('inflight',taskId);
+  const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  const viewer=openNotificationStream(`${server.base}/api/notifications`);
+  try{
+    // Longer than a tick, so a watcher that had announced the run at startup would have
+    // done so by now - a live run announced as a finished one being the same defect
+    // from the other side.
+    await new Promise((r)=>setTimeout(r,1500));
+    assert.equal(frames(viewer.text()).filter((f)=>f.type==='run-end').length,0,'a run still in flight is not a run that ended');
+
+    s.store.updateRun('inflight',{status:'succeeded',endedAt:new Date().toISOString(),durationMs:1000});
+    await untilFrame(viewer,'run-end');
+    const ends=frames(viewer.text()).filter((f)=>f.type==='run-end');
+    assert.equal(ends.length,1,`one run-end for one run, got ${ends.length}`);
+    assert.equal(ends[0].data.run.id,'inflight');
+    assert.equal(ends[0].data.task.id,taskId,'the frame names the task, which is what a notification deep-links to');
+  }finally{viewer.close();server.stop()}
 });

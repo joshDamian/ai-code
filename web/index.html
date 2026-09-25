@@ -2,8 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <title>AI Code — Mission Control</title>
+<!-- Installable on a phone. The manifest is served from the same origin as the
+     dashboard, so the installed app and the browser tab are the same application
+     against the same API - which is the whole reason this is a PWA and not a second
+     client to keep in sync. -->
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="icon" href="/icons/icon-192.png" type="image/png" />
+<!-- iOS reads neither the manifest's icons nor its theme colour, so it is told
+     separately. `black-translucent` is what puts the page under the status bar once
+     it is installed, which is what makes the header look like an app's. -->
+<link rel="apple-touch-icon" href="/icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#0a0c10" />
 <script type="importmap">
 {
   "imports": {
@@ -370,7 +383,12 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* The search field the `/` shortcut has always looked for. Fixed width so the
    toolbar does not reflow as the user types. */
 .search-input{width:240px;max-width:100%}
-.tabs{display:flex;gap:var(--space-1);border-bottom:1px solid var(--line)}
+/* The strip scrolls rather than wrapping or widening the page. Seven tabs do not fit a
+   phone, and a tab that has been pushed off the right edge is a tab nobody finds. The
+   bottom border stays on the container so the row still reads as a tab strip while it
+   scrolls; the padding keeps the last tab's underline off the edge. */
+.tabs{display:flex;gap:var(--space-1);border-bottom:1px solid var(--line);overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
 .tab{background:transparent;color:var(--muted);border-radius:0;padding:var(--space-2) var(--space-4);font-weight:600}
 .tab:hover{background:transparent;color:var(--text);opacity:1}
 .tab.active{color:var(--text);border-bottom:2px solid var(--accent)}
@@ -390,7 +408,12 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* ---- task detail ---- */
 /* A step above the scale's 6px rounding: the tabs sit directly under this, and at
    8px the title and the tab row read as one crowded block. */
+/* The back link is a fixed-width affordance rather than a wrapping one: it is squeezed
+   by a long title, and "Back / to / tasks" over three lines is three lines of a phone
+   screen spent on the way out of the page. The title wraps instead, which is what a
+   title is for. */
 .task-header{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-4);margin-bottom:var(--space-3)}
+.task-header>.link{white-space:nowrap;flex-shrink:0}
 .task-meta{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap;font-size:12.5px;margin-top:var(--space-2)}
 .task-description{margin:var(--space-3) 0 0;color:var(--muted);font-size:13.5px;line-height:1.55;max-width:700px;white-space:pre-line}
 .action-bar{margin-top:var(--space-6);padding-top:var(--space-4);border-top:1px solid var(--line);display:flex;justify-content:flex-end}
@@ -664,10 +687,52 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   .metric-grid{grid-template-columns:1fr}
   .metric-value{font-size:21px}
 }
+/* ---- touch ----
+   A finger is not a mouse. The desktop sizes above are set for a pointer that lands
+   on a pixel; on a coarse pointer every control grows to roughly the 44px that a
+   fingertip actually covers, and the tabs - which are the main navigation on a task
+   page and were the tightest targets in the app - get a little more room than that. */
+@media(pointer:coarse){
+  .btn,.seg-btn,.tab,.nav-item,.input{min-height:44px}
+  .tab{padding:var(--space-3) var(--space-4)}
+  /* Every field in the app carries `.input`, selects and textareas included. */
+  /* A tap leaves a hover style stuck until the next tap lands elsewhere. */
+  .btn:hover,.tab:hover,.seg-btn:hover{opacity:1}
+}
+/* ---- installed ----
+   `viewport-fit=cover` puts the page under the status bar and the home indicator, so
+   the header and the content have to clear them by hand. Zero on every display that
+   has no inset, which is why these are safe unconditionally. */
+@supports(padding:env(safe-area-inset-top)){
+  .app-header{padding-top:calc(var(--space-5) + env(safe-area-inset-top))}
+  .content{padding-bottom:calc(var(--space-6) + env(safe-area-inset-bottom))}
+  .sidebar{padding-top:env(safe-area-inset-top)}
+}
+/* ---- pairing ----
+   The only screen a phone sees before it has a token, so it is centred and narrow
+   rather than inheriting the dashboard's layout: there is no sidebar to show and
+   nothing to navigate to. */
+.token-gate{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:var(--space-5)}
+.token-card{display:flex;flex-direction:column;gap:var(--space-3);width:100%;max-width:360px;padding:var(--space-6)}
+.token-card .logo-title{font-size:20px;letter-spacing:.14em}
+.token-hint{margin:0;font-size:13px;line-height:1.55;color:var(--muted)}
+.token-hint code{color:var(--text);background:var(--panel3);padding:1px var(--space-1);border-radius:4px;overflow-wrap:anywhere}
+.token-error{font-size:13px;color:var(--bad)}
 </style>
 </head>
 <body>
 <div id="app"></div>
 <script type="module" src="/app.mjs"></script>
+<script>
+  // Registered here rather than from app.mjs so it happens on the first paint rather
+  // than after the module graph has resolved - and it is a no-op wherever it cannot
+  // work: `serviceWorker` is absent outside a secure context, which is the plain-http
+  // tailnet address the README calls a debug-only fallback.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
+  }
+</script>
 </body>
 </html>

@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { Service } from './service.mjs';
 import { Runner } from './runner.mjs';
@@ -22,10 +23,85 @@ svc.runner = runner;
 // The interactive shells. In this process rather than in each connection, because a
 // session outlives the socket that opened it (see src/terminal.mjs).
 const terminals = new TerminalSessions({ reapMs: Number(process.env.AI_CODE_TERMINAL_REAP_MS) || undefined });
-// A terminal is arbitrary command execution, and this server has no auth. The switch
-// is here so an install that does not want that can say so without patching the code.
+// A terminal is arbitrary command execution, so it is refused to every caller that did
+// not arrive on loopback - a token is not enough for this one, which is what keeps a
+// phone from opening a shell on the machine. The switch is here so an install that does
+// not want the feature at all can say so without patching the code.
 const terminalEnabled = !process.env.AI_CODE_DISABLE_TERMINAL;
 const port = Number(process.env.PORT || 4317);
+
+// Where the server binds. Loopback by default, which is what this process has always
+// meant to do and until now did not say - `listen(port)` binds every interface, so the
+// dashboard was reachable from the LAN by accident. A reachable bind is opt-in and
+// costs an explicitly named token.
+const host = process.env.AI_CODE_HOST || '127.0.0.1';
+// An address `listen` accepts, so no brackets on the IPv6 form - the Host header's own
+// regex, which does carry them, is separate and lives with the gate.
+const loopbackHost = /^(localhost|127\.\d+\.\d+\.\d+|::1)$/;
+const loopbackBind = loopbackHost.test(host);
+// A bind that is not loopback is reachable by anything on the network, so it does not
+// get to run on a token this process invented and printed to a log nobody is reading.
+// Naming the token is the acknowledgement that the address is exposed. The loopback
+// bind keeps the generated one, which is the path the phone actually takes: it reaches
+// `tailscale serve`, which proxies to loopback from loopback.
+if (!loopbackBind && !process.env.AI_CODE_TOKEN) {
+  console.error(
+    `AI_CODE_HOST=${host} is reachable off this machine, so AI_CODE_TOKEN must name the token explicitly.\n` +
+      'Leave AI_CODE_HOST unset and reach this from another device with `tailscale serve`.'
+  );
+  process.exit(1);
+}
+
+// The token every non-loopback caller presents. `AI_CODE_TOKEN` for an install that
+// manages its own secret; otherwise one is generated on first start and kept, so a
+// phone that paired once stays paired across restarts. The loopback exemption below is
+// what keeps the desktop dashboard, the TUI and the CLI working with no token at all.
+const token =
+  process.env.AI_CODE_TOKEN || svc.store.getSetting('api_token') || svc.store.setSetting('api_token', crypto.randomBytes(32).toString('base64url'));
+// Compared as digests rather than as strings: the digest is what makes the two sides
+// the same length whatever was presented, which is both why `timingSafeEqual` cannot
+// throw here and why the token's own length does not leak into the timing.
+const tokenDigest = crypto.createHash('sha256').update(token).digest();
+
+// The browser's Origin header is the one that matters. CORS does not cover WebSocket
+// upgrades, so a page served from anywhere can open a socket to localhost - and a
+// token in a query string is not a substitute, since a WebSocket cannot set a header
+// and a URL leaks into history. Neither is a reason to accept a shell: a browser tab
+// the user is not looking at cannot start one if the origin is checked, and DNS
+// rebinding cannot fake a Host of localhost into a same-origin connection.
+//
+// So this is the primitive for both consumers: the token gate above exempts a request
+// that arrived this way, and the terminal route refuses everything that did not. Two
+// different answers built on the same question, which is the point.
+const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?$/;
+
+function fromLocalhost(req) {
+  if (!LOCAL_HOST.test(req.headers.host || '')) return false;
+  const origin = req.headers.origin;
+  // Absent for a client that is not a browser - curl, the test suite, the TUI - which
+  // leaves the Host check as the whole of the guard for it.
+  if (!origin) return true;
+  try {
+    return LOCAL_HOST.test(new URL(origin).host);
+  } catch {
+    return false;
+  }
+}
+
+// A browser can set a header on `fetch` but not on `EventSource` or a WebSocket, so the
+// query string is accepted too. The gate reads it on every route rather than only on the
+// two that need it: it is the same secret either way, and a route list would be one more
+// thing to keep in step with the router. This server writes no request log, so the URL
+// is not recorded.
+function presentedToken(req, u) {
+  const header = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
+  return header ? header[1].trim() : u.searchParams.get('token') || '';
+}
+
+function tokenMatches(presented) {
+  if (!presented) return false;
+  return crypto.timingSafeEqual(crypto.createHash('sha256').update(presented).digest(), tokenDigest);
+}
 
 // The checkout a task belongs to. Not `root`, which is where this process was started
 // and where the database lives: projects are registered with a path of their own, and
@@ -33,8 +109,13 @@ const port = Number(process.env.PORT || 4317);
 // repo a task's branch lands on has to ask for it here.
 const repoOf = (task) => svc.project(task.project_id).path;
 
+// No `access-control-allow-origin`. The dashboard is same-origin, the TUI and the CLI
+// are not browsers, and a wildcard on an API that starts agent runs - and, before the
+// gate below, on one that did not even ask for a token - let any page the user happened
+// to have open read this server. Nothing needs it; the phone arrives same-origin too,
+// through `tailscale serve`.
 const json = (res, x, status = 200) => {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' });
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(x));
 };
 
@@ -62,7 +143,6 @@ const sse = (res) => {
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-cache',
     connection: 'keep-alive',
-    'access-control-allow-origin': '*',
   });
   // The stream ends on its own: the tick cap closes it on a resting task, and the
   // browser reconnects. Without this the gap before it does is the browser's default
@@ -213,30 +293,148 @@ function chatStream(req, res, id) {
   req.on('close', () => clearInterval(timer));
 }
 
-// Global notification stream. Watches for runs that transition out of 'running'
-// and emits one frame per completion, so the browser can fire a notification
-// without polling.
-function notificationStream(req, res) {
-  sse(res);
-  const known = new Map();
-  for (const r of svc.store.listRuns()) known.set(r.id, r.status);
+// ---------------------------------------------------------------------------
+// Web Push
+//
+// The notification stream below only reaches a tab that is open, and a phone with the
+// dashboard backgrounded is the case Web Push exists for. That means VAPID: one keypair
+// per install, the private half kept in the database beside the token, the public half
+// handed to the browser so it can subscribe with the push service.
+//
+// Loaded defensively rather than imported at the top, because everything else in this
+// file - the token gate, the PWA shell, every route - has to keep working on a checkout
+// where `npm install` has not been run since web-push was added. A missing optional
+// dependency should cost push and nothing else.
+let webpush = null;
+let vapid = null;
+try {
+  webpush = (await import('web-push')).default;
+  const stored = { publicKey: svc.store.getSetting('vapid_public'), privateKey: svc.store.getSetting('vapid_private') };
+  const keys = stored.publicKey && stored.privateKey ? stored : webpush.generateVAPIDKeys();
+  if (keys !== stored) {
+    svc.store.setSetting('vapid_public', keys.publicKey);
+    svc.store.setSetting('vapid_private', keys.privateKey);
+  }
+  // A push service wants a way to contact whoever is sending, and only ever uses it to
+  // complain about traffic. There is no address to give it, so this is a placeholder
+  // rather than a lie about a real mailbox.
+  webpush.setVapidDetails('mailto:noreply@example.com', keys.publicKey, keys.privateKey);
+  vapid = keys;
+} catch {
+  // Push is off. Every route below says so rather than throwing.
+}
+
+// The role labels, in the browser's own words. Duplicated from
+// web/components/notify.mjs rather than shared: this composes a payload read on a lock
+// screen, which is not the dashboard's DOM, and the two are allowed to differ.
+const ROLE_LABEL = {
+  planner: 'Planning',
+  implementer: 'Implementation',
+  reviewer: 'Review',
+  repair: 'Repair',
+  'context-enrich': 'Context enrichment',
+  chat: 'Chat',
+};
+
+// What a finished run says, composed once. Same shape as the in-page notifier, plus the
+// ids a push needs to open the right screen - a notification that cannot be tapped
+// through to the thing it is about is a notification the user has to go hunting after.
+function runEndPayload(run, task) {
+  const succeeded = run.status === 'succeeded';
+  const role = ROLE_LABEL[run.role] || run.role || 'Run';
+  return {
+    title: `${role} ${succeeded ? 'completed' : 'failed'}`,
+    body: `${role}${task?.title ? `: ${task.title}` : ''} — ${succeeded ? 'succeeded' : run.error || 'failed'}`,
+    runId: run.id,
+    taskId: task?.id || null,
+  };
+}
+
+// One run-end, to every subscribed browser. Failures here are the push service's and
+// are not the caller's problem - the run is already over and its row already written.
+// A 404 or a 410 is the one answer that means this subscription is dead for good (the
+// app was removed, or the browser rotated the endpoint), so that row is dropped;
+// anything else is left in place to fail again next time.
+async function pushRunEnd(payload) {
+  if (!vapid) return;
+  const subs = svc.store.listPushSubscriptions();
+  if (!subs.length) return;
+  const payloadJson = JSON.stringify(payload);
+  await Promise.allSettled(
+    subs.map(async (s) => {
+      try {
+        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payloadJson);
+      } catch (e) {
+        if (e?.statusCode === 404 || e?.statusCode === 410) svc.store.deletePushSubscription(s.endpoint);
+      }
+    })
+  );
+}
+
+// Every attached notification stream, and the runs already announced. Module-level
+// rather than per-connection: a completion has to fan out when no browser is attached
+// at all - which is exactly the backgrounded-phone case, and a per-connection watcher
+// would push zero times for it. It is also what keeps N open tabs from producing N
+// pushes for one run.
+const notifiers = new Set();
+const announcedRuns = new Set();
+
+function publishRunEnd(run, task) {
+  const frame = `event: run-end\ndata: ${JSON.stringify({ run, task: task ? { id: task.id, title: task.title } : null })}\n\n`;
+  for (const res of notifiers) {
+    try {
+      res.write(frame);
+    } catch {
+      // The socket is gone; its own close handler removes it.
+    }
+  }
+  // Not awaited: the SSE frame is already out, and a push is minutes of network away
+  // from mattering. A rejected promise here would be an unhandled rejection for a
+  // notification nobody is waiting on.
+  pushRunEnd(runEndPayload(run, task)).catch(() => {});
+}
+
+// Runs that have finished and not been announced. The seed is everything already
+// finished in the store, so history stays quiet: a run that ended while the server was
+// down is not news, and re-announcing every old run on startup is a lock screen full of
+// notifications nobody can act on.
+//
+// A run still in flight at startup is deliberately left out of the seed, even though it
+// is already in the store. Another process may be driving it - a foreground `ai-code
+// task execute`, or the TUI starting this server mid-run - and its completion is exactly
+// what this watcher exists to carry. Seeding it would mark it announced while it was
+// still running, and the tick below skips a run it has already announced: no SSE frame,
+// no push, silent. It is added to the set when a tick sees it leave 'running'.
+//
+// "Finished and not yet announced" rather than a 'running' -> other transition, because
+// a run is written to the store already running and only ever leaves that status when
+// it is done. A transition check has to see the run while it is still live, and a run
+// that begins and ends inside one tick never is - which a mock does in a tenth of the
+// interval, and a real agent can do on a retry that fails immediately.
+function watchRuns() {
+  for (const r of svc.store.listRuns()) if (r.status !== 'running') announcedRuns.add(r.id);
   const timer = setInterval(() => {
     try {
-      const runs = svc.store.listRuns();
-      for (const r of runs) {
-        const prev = known.get(r.id);
-        known.set(r.id, r.status);
-        if (!prev) continue;
-        if (prev === 'running' && r.status !== 'running') {
-          const task = r.task_id ? svc.store.getTask(r.task_id) : null;
-          res.write(`event: run-end\ndata: ${JSON.stringify({ run: r, task: task ? { id: task.id, title: task.title } : null })}\n\n`);
-        }
+      for (const r of svc.store.listRuns()) {
+        if (r.status === 'running' || announcedRuns.has(r.id)) continue;
+        announcedRuns.add(r.id);
+        publishRunEnd(r, r.task_id ? svc.store.getTask(r.task_id) : null);
       }
     } catch {
       // Store read failed; skip this tick.
     }
   }, 1000);
-  req.on('close', () => clearInterval(timer));
+  // Never the reason the process stays alive. The listening socket is.
+  timer.unref();
+}
+watchRuns();
+
+// The per-connection half. The watcher above is global and already running; a stream
+// only has to register itself as a destination and deregister when it goes away.
+function notificationStream(req, res) {
+  sse(res);
+  notifiers.add(res);
+  req.on('close', () => notifiers.delete(res));
 }
 
 const webDir = new URL('../web/', import.meta.url).pathname;
@@ -251,6 +449,9 @@ const mimeTypes = {
   '.mjs': 'text/javascript',
   '.css': 'text/css',
   '.json': 'application/json',
+  // The PWA manifest. Without the entry it is served as octet-stream, which Chrome
+  // accepts and installability checks do not.
+  '.webmanifest': 'application/manifest+json',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
 };
@@ -262,20 +463,66 @@ const server = http.createServer(async (req, res) => {
     // Anything outside /api is the dashboard's static bundle.
     if (!/^\/api(\/|$)/.test(u.pathname)) {
       if (SHARED_MODULES[u.pathname]) {
-        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'access-control-allow-origin': '*' });
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
         return res.end(fs.readFileSync(SHARED_MODULES[u.pathname]));
       }
       const staticPath = path.join(webDir, u.pathname === '/' ? 'index.html' : u.pathname);
       const ext = path.extname(staticPath);
       // The startsWith check keeps a traversal path from escaping the web root.
       if (ext && staticPath.startsWith(webDir) && fs.existsSync(staticPath)) {
-        res.writeHead(200, { 'content-type': (mimeTypes[ext] || 'application/octet-stream') + '; charset=utf-8', 'access-control-allow-origin': '*' });
+        res.writeHead(200, { 'content-type': (mimeTypes[ext] || 'application/octet-stream') + '; charset=utf-8' });
         return res.end(fs.readFileSync(staticPath));
       }
     }
 
+    // -------------------------------------------------------------------------
+    // The token gate.
+    //
+    // Everything under /api needs a token unless it arrived on loopback. The static
+    // branch above is deliberately outside it: the login screen, the manifest, the
+    // service worker and the icons are exactly what a phone loads *before* it has a
+    // token, so gating them would leave nothing to pair with.
+    //
+    // The exemption is the Host header, not the socket, and that is the whole reason
+    // this works behind Tailscale: `tailscale serve` proxies to loopback from
+    // loopback, so a socket check could not tell the phone apart from the desktop,
+    // while the Host header it forwards still says the machine's own name. The
+    // desktop browser sends `Host: localhost:4317` and the TUI and CLI send the same,
+    // so all three stay tokenless with no change on their side.
+    //
+    // The posture has a caveat, and it is the same one the terminal guard documents
+    // below: a non-browser client on the tailnet can set `Host: localhost` by hand and
+    // inherit the exemption. For a single user's own tailnet that is the same trust
+    // boundary the terminal already sits behind, and the alternative - requiring the
+    // token on loopback too - would break the desktop dashboard, the TUI and the CLI
+    // to defend against the tailnet the user already controls.
+    if (!fromLocalhost(req) && !tokenMatches(presentedToken(req, u))) {
+      return json(res, { error: 'unauthorized' }, 401);
+    }
+
     if (u.pathname === '/api/notifications') {
       return notificationStream(req, res);
+    }
+
+    // Web Push. The key is public by construction - a browser cannot subscribe
+    // without it - and these two writes are what a phone does once, while pairing.
+    // Available with or without a token check above, which is the point: subscribing
+    // is the one API call a freshly paired phone makes first.
+    if (u.pathname === '/api/push/key') {
+      if (!vapid) return json(res, { error: 'push is not available on this install' }, 503);
+      return json(res, { key: vapid.publicKey });
+    }
+    if (u.pathname === '/api/push/subscribe') {
+      if (!vapid) return json(res, { error: 'push is not available on this install' }, 503);
+      const s = await body(req);
+      if (!s?.endpoint || !s?.keys?.p256dh || !s?.keys?.auth) return json(res, { error: 'endpoint and keys are required' }, 400);
+      svc.store.addPushSubscription({ endpoint: s.endpoint, keys: { p256dh: s.keys.p256dh, auth: s.keys.auth } });
+      return json(res, { ok: true, subscriptions: svc.store.listPushSubscriptions().length }, 201);
+    }
+    if (u.pathname === '/api/push/unsubscribe') {
+      const s = await body(req);
+      if (!s?.endpoint) return json(res, { error: 'endpoint is required' }, 400);
+      return json(res, { ok: true, removed: svc.store.deletePushSubscription(s.endpoint) });
     }
 
     if (u.pathname === '/api/overview') {
@@ -631,29 +878,12 @@ const server = http.createServer(async (req, res) => {
 const routeTerminal = /^\/api\/tasks\/([^/]+)\/terminal$/;
 const wss = new WebSocketServer({ noServer: true });
 
-// The browser's Origin header is the one that matters. CORS does not cover WebSocket
-// upgrades, so a page served from anywhere can open a socket to localhost - and the
-// `access-control-allow-origin: *` this server already sets on every response means
-// any origin can read the API anyway. Neither of those is a reason to accept a shell:
-// a browser tab the user is not looking at cannot start one if the origin is checked,
-// and DNS rebinding cannot fake a Host of localhost into a same-origin connection.
-//
 // So this route narrows relative to the rest of the server rather than inheriting the
-// posture: localhost or nothing, and only when the terminal is enabled at all.
-const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?$/;
-
-function fromLocalhost(req) {
-  if (!LOCAL_HOST.test(req.headers.host || '')) return false;
-  const origin = req.headers.origin;
-  // Absent for a client that is not a browser - curl, the test suite - which leaves the
-  // Host check as the whole of the guard for it.
-  if (!origin) return true;
-  try {
-    return LOCAL_HOST.test(new URL(origin).host);
-  } catch {
-    return false;
-  }
-}
+// posture: localhost or nothing, and only when the terminal is enabled at all. A phone
+// that has paired and holds a valid token still gets a 403 here - reaching the API is
+// not the same permission as opening a shell on the machine, and the phone is exactly
+// the client that must not have the second one. `fromLocalhost` and the reasoning
+// behind it are at the top of this file, next to the token gate that shares them.
 
 // A refusal is an HTTP response rather than a WebSocket close: the handshake has not
 // happened, so there is no frame to close with. The reason goes in the body because a
@@ -734,8 +964,23 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-// The requested port is not always the bound port: PORT=0 asks the kernel for a free
-// one, and every agent run is handed PORT=0 (see AGENT_PORT in src/agents.mjs) so a
-// smoke-test server can never collide with the dashboard that spawned the agent. A log
-// that echoed the request back would print `localhost:0` and send the reader hunting.
-server.listen(port, () => console.log(`AI Code Mission Control: http://localhost:${server.address().port}`));
+// `host` rather than every interface. The default is loopback, and the one exception
+// that is worth reaching from elsewhere - a phone - goes through `tailscale serve`,
+// which proxies to loopback and terminates TLS in front of it. The address is printed
+// as a bare `localhost` regardless of the bind, because that is the URL that works for
+// every client on this machine whichever address the socket is actually on.
+//
+// The token goes on the second line, and every start rather than only the first: it is
+// what pairs a phone, and a secret shown once and then lost is a secret the user has to
+// go digging in the database for. Nothing parses these lines but a person - except the
+// port test, which reads the first one, and that one is unchanged.
+server.listen(port, host, () => {
+  const bound = server.address().port;
+  // The requested port is not always the bound port: PORT=0 asks the kernel for a free
+  // one, and every agent run is handed PORT=0 (see AGENT_PORT in src/agents.mjs) so a
+  // smoke-test server can never collide with the dashboard that spawned the agent. A log
+  // that echoed the request back would print `localhost:0` and send the reader hunting.
+  console.log(`AI Code Mission Control: http://localhost:${bound}`);
+  console.log(`API token: ${token}`);
+  if (loopbackBind) console.log(`Phone access: tailscale serve https / http://127.0.0.1:${bound}`);
+});

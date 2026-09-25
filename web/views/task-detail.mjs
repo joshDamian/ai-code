@@ -1,6 +1,7 @@
 // Full-page task view (not a modal). URL hash: #/tasks/:id
 import { html, useState, useEffect, useRef, useCallback, useMemo, bodyKind, describeEvent, formatDuration, formatTokens, formatCost } from '../lib.mjs';
 import { api, taskStreamUrl } from '../api.mjs';
+import { onLocalhost } from '../auth.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
@@ -19,7 +20,12 @@ import { TerminalPane } from '../components/terminal.mjs';
 // and omitted TESTING. It also claimed PLANNING, which is usually the opposite:
 // a task parked in PLANNING with no run is waiting for the user to start one.
 const WORKING_STATES = new Set(['IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING']);
-const TABS = ['plan', 'execute', 'review', 'port', 'terminal', 'stats', 'activity'];
+// The terminal is dropped off localhost because the server refuses it there - a phone
+// holding a valid token still gets a 403, on purpose: reaching the API is not the same
+// permission as opening a shell on the machine. Rendering the tab anyway would be a tab
+// whose only possible outcome is an error. Evaluated once at module load; the page's
+// host cannot change without a reload.
+const TABS = ['plan', 'execute', 'review', 'port', ...(onLocalhost() ? ['terminal'] : []), 'stats', 'activity'];
 
 export function TaskDetail({ id, navigate, onTitle }) {
   const [data, setData] = useState(null);

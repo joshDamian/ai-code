@@ -84,6 +84,20 @@ export class Store {
       -- built when it was written. No foreign key, for the reason chat_messages has
       -- none - the task row can be deleted and its decision still has to be readable.
       CREATE TABLE IF NOT EXISTS decisions(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,task_id TEXT,content TEXT NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL,approved_at TEXT);
+
+      -- Values that belong to the install rather than to any project: the API token
+      -- a phone pairs with, and the VAPID keypair push is signed with. A table
+      -- rather than a file because the database is already the one thing every
+      -- process opens, and a secret in a second file beside it is a second thing
+      -- that can go missing or get out of sync with the row it belongs to.
+      CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+
+      -- One row per browser that has subscribed to push. Keyed on the endpoint
+      -- because that is what the push service issues and what identifies a
+      -- subscription, with the two client keys the payload is encrypted to.
+      -- Re-subscribing from the same browser replaces the row, which is what a
+      -- rotated keypair or a refreshed token looks like from here.
+      CREATE TABLE IF NOT EXISTS push_subscriptions(endpoint TEXT PRIMARY KEY,p256dh TEXT NOT NULL,auth TEXT NOT NULL,created_at TEXT NOT NULL);
     `);
     for (const [table, columns] of Object.entries({
       // The project's spec: what it is for, what it is not for, and the product
@@ -210,6 +224,35 @@ export class Store {
     } catch {
       // Column already exists. ALTER TABLE has no IF NOT EXISTS.
     }
+  }
+
+  getSetting(key) {
+    return this.db.prepare('SELECT value FROM settings WHERE key=?').get(key)?.value ?? null;
+  }
+
+  setSetting(key, value) {
+    this.db
+      .prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .run(key, String(value));
+    return value;
+  }
+
+  // Called once at pairing, and again whenever the same browser re-subscribes -
+  // which it does on every permission grant, because the endpoint is stable but
+  // the keys under it are not guaranteed to be.
+  addPushSubscription(sub) {
+    this.db
+      .prepare('INSERT INTO push_subscriptions(endpoint,p256dh,auth,created_at) VALUES(?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh,auth=excluded.auth')
+      .run(sub.endpoint, sub.keys.p256dh, sub.keys.auth, new Date().toISOString());
+    return this.db.prepare('SELECT * FROM push_subscriptions WHERE endpoint=?').get(sub.endpoint);
+  }
+
+  deletePushSubscription(endpoint) {
+    return this.db.prepare('DELETE FROM push_subscriptions WHERE endpoint=?').run(endpoint).changes;
+  }
+
+  listPushSubscriptions() {
+    return this.db.prepare('SELECT * FROM push_subscriptions ORDER BY created_at').all();
   }
 
   migrateLegacyModels() {
