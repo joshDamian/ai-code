@@ -455,6 +455,27 @@ test('runProcess kills the child process when the signal aborts',async()=>{
   assert.ok(Date.now()-started<10000,`child killed in ${Date.now()-started}ms`);
 });
 
+test('a pipe-holding descendant does not keep the run open after the child exits',async()=>{
+  const script=[
+    `const {spawn}=require('node:child_process');`,
+    `console.log(JSON.stringify({type:'assistant',session_id:'s9',message:{content:[{type:'text',text:'hi'}]}}));`,
+    `const g=spawn(process.execPath,['-e','setTimeout(()=>{},30000)'],{stdio:'inherit'});`,
+    `console.log(JSON.stringify({type:'system',subtype:'grandchild_pid',pid:g.pid}));`,
+    `process.exit(0);`,
+  ].join('');
+  const started=Date.now();
+  const gen=runProcess(process.execPath,['-e',script],{cwd:os.tmpdir(),env:process.env,role:'implementer'});
+  const drained=(async()=>{const out=[];for await(const ev of gen)out.push(ev);return out})();
+  const guard=new Promise((_,rej)=>{const t=setTimeout(()=>rej(new Error('run still open 10s after the child exited')),10000);t.unref?.()});
+  const frames=await Promise.race([drained,guard]);
+  assert.ok(Date.now()-started<10000,'resolved on the child exit, not the grandchild exit');
+  assert.equal(frames.find(e=>e.type==='completed').data.sessionId,'s9','the output written before exit still arrives');
+  const pid=frames.find(e=>e.data?.subtype==='grandchild_pid')?.data.pid;
+  assert.ok(pid,'the grandchild was spawned');
+  assert.doesNotThrow(()=>process.kill(pid,0),'the pipe-holder was still alive when the run resolved');
+  process.kill(pid,'SIGKILL');
+});
+
 test('role timeout aborts the agent and falls back to the next provider',async()=>{
   const root=repo();const s=new Service(root,{allowMock:true});
   s.updateProvider('mock',{enabled:false});

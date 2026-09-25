@@ -414,6 +414,16 @@ export async function* collapseStream(frames, { firstMs = PROGRESS_FIRST_MS, eve
   }
 }
 
+// Grace between child exit and stream destruction. A healthy exit's final frames
+// (the result frame carrying sessionId) are still in the pipe when exit fires; the
+// grace lets the read loops drain them before the streams are closed. A pipe-holding
+// descendant means EOF never arrives at all, so this destroy is what ends the reads.
+const EXIT_DRAIN_MS = 2000;
+
+// Bound on the close fallback for spawn failures. The spawn failed: exit never fires,
+// close carries the result, and the timer bounds a close that also never comes.
+const CLOSE_FALLBACK_MS = 1000;
+
 async function* runProcess(cmd, args, { cwd, env, role, signal }) {
   const child = spawn(cmd, args, {
     cwd,
@@ -456,6 +466,23 @@ async function* runProcess(cmd, args, { cwd, env, role, signal }) {
     else signal.addEventListener('abort', onAbort, { once: true });
   }
 
+  const exited = new Promise((resolve) => {
+    child.once('exit', (code) => resolve(code));
+    child.once('error', () => {
+      // The spawn failed: 'exit' never fires, 'close' carries the result, and
+      // the timer bounds a 'close' that also never comes.
+      child.once('close', (code) => resolve(code));
+      setTimeout(() => resolve(child.exitCode ?? null), CLOSE_FALLBACK_MS).unref?.();
+    });
+  });
+  child.once('exit', () => {
+    const t = setTimeout(() => {
+      if (!child.stdout.readableEnded) child.stdout.destroy();
+      if (!child.stderr.readableEnded) child.stderr.destroy();
+    }, EXIT_DRAIN_MS);
+    t.unref?.();
+  });
+
   yield { type: 'started', data: { cmd, role, args: args.filter((x) => !String(x).toLowerCase().includes('token')) } };
 
   child.stdout.setEncoding('utf8');
@@ -463,31 +490,38 @@ async function* runProcess(cmd, args, { cwd, env, role, signal }) {
 
   // stream-json is one JSON object per line, and a chunk can split any line.
   let buffer = '';
-  for await (const chunk of child.stdout) {
-    buffer += chunk;
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch {
-        // Not JSON: the binary wrote a plain log line. Pass it through as text.
-        yield { type: 'message', data: line };
-        continue;
-      }
-      if (obj.session_id) sessionId = obj.session_id;
-      if (obj.api_error_status || obj.is_error) apiError = { status: obj.api_error_status || null, message: String(obj.result || '') };
-      // Every frame is passed through, including the streaming ones. Deciding which
-      // of them a consumer should see is collapseStream's job, and a parser that
-      // dropped a frame would hide it from the one caller that wants it.
-      if (obj.type === 'assistant' || obj.type === 'result' || obj.message?.content || obj.usage) {
-        yield { type: obj.type === 'result' ? 'result' : 'message', data: obj };
-      } else {
-        yield { type: obj.type || 'event', data: obj };
+  try {
+    for await (const chunk of child.stdout) {
+      buffer += chunk;
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let obj;
+        try {
+          obj = JSON.parse(line);
+        } catch {
+          // Not JSON: the binary wrote a plain log line. Pass it through as text.
+          yield { type: 'message', data: line };
+          continue;
+        }
+        if (obj.session_id) sessionId = obj.session_id;
+        if (obj.api_error_status || obj.is_error) apiError = { status: obj.api_error_status || null, message: String(obj.result || '') };
+        // Every frame is passed through, including the streaming ones. Deciding which
+        // of them a consumer should see is collapseStream's job, and a parser that
+        // dropped a frame would hide it from the one caller that wants it.
+        if (obj.type === 'assistant' || obj.type === 'result' || obj.message?.content || obj.usage) {
+          yield { type: obj.type === 'result' ? 'result' : 'message', data: obj };
+        } else {
+          yield { type: obj.type || 'event', data: obj };
+        }
       }
     }
+  } catch (e) {
+    // destroy() on exit rejects a pending read, and that rejection is the end of
+    // the output rather than a failure. Anything else is a real read error and
+    // belongs to the caller, which is why this is not a bare catch.
+    if (e?.code !== 'ERR_STREAM_PREMATURE_CLOSE') throw e;
   }
   // A final line without a trailing newline is still a whole object.
   if (buffer.trim()) {
@@ -499,8 +533,14 @@ async function* runProcess(cmd, args, { cwd, env, role, signal }) {
     }
   }
 
-  for await (const chunk of child.stderr) stderr += chunk;
-  const code = await new Promise((r) => child.on('close', r));
+  try {
+    for await (const chunk of child.stderr) stderr += chunk;
+  } catch (e) {
+    // Same reading as the stdout loop above: the destroy that follows an exit is
+    // what ends this read, and it is not a failure.
+    if (e?.code !== 'ERR_STREAM_PREMATURE_CLOSE') throw e;
+  }
+  const code = await exited;
   signal?.removeEventListener('abort', onAbort);
 
   if (aborted) {
