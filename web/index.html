@@ -101,6 +101,18 @@ h1,h2,h3{margin:0 0 var(--space-2);font-weight:650}
 h1{font-size:22px}
 h2{font-size:15px;color:var(--text)}
 h3{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+/* The browser's default margins are for a document, not for an app: a paragraph
+   or a figure inside a grid or flex container never has a neighbour to collapse
+   with, so the ~16px it carries is added to the container's own gap. Every
+   rhythm in this sheet is a step on the spacing scale, and these were the one
+   place a number neither declared nor chosen leaked in. */
+p{margin:0}
+pre{margin:0}
+figure{margin:0}
+/* Headings in a flex header: the header's own gap is the space, and the 8px
+   under a heading would be added to it. Descendant rather than child, because
+   project.mjs nests its h1 one div deep in the toolbar. */
+.view-toolbar :is(h1,h2,h3),.provider-card-head :is(h1,h2,h3),.kbd-legend-head :is(h1,h2,h3){margin:0}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
 .muted{color:var(--muted)}
 .link{color:var(--accent);text-decoration:none;font-weight:600}
@@ -152,18 +164,38 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 
 /* ---- primitives ---- */
 .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4)}
-.section{margin-top:var(--space-6)}
-.section.card{margin-top:var(--space-5)}
+/* The vertical rhythm inside a card. A card is a plain block, so its children have
+   no gap between them and nothing to collapse against: a `p` has had its UA margin
+   stripped, a `.row`'s gap is horizontal, and a `.stack` opens flush against
+   whatever is above it. Each of these four blocks therefore carries a step on the
+   side where a sibling sits, and the first and last keep the card's own padding as
+   their edge. The blocks that own their spacing instead - a `.view-toolbar`'s 16px,
+   an `.action-bar`'s 20px - are not in the list, so nothing is counted twice.
+   The exception is a card whose own layout already owns the rhythm: a flex or grid
+   card with a gap would add this margin to that gap and double the step. Each such
+   card is named here, so a new variant that sets display and gap has to be added. */
+.card:not(.inline-form,.provider-card,.metric-card,.chat-list .card)>:is(.row,.stack,.muted,p):not(:first-child){margin-top:var(--space-3)}
+.card:not(.inline-form,.provider-card,.metric-card,.chat-list .card)>:is(.row,.stack,.muted,p):not(:last-child){margin-bottom:var(--space-3)}
+/* The rule above reaches only direct children of a card, so a `.row` in a toolbar's
+   filter bar or inside a list row is never matched - both containers own that space.
+   Zeroed anyway, so the two stay excluded if that selector is ever widened: a step
+   inside a filter bar pushes the toolbar out of alignment. */
+.view-toolbar>.row,.list-row .row{margin-top:0;margin-bottom:0}
+/* 20px between the sections of a page, whether or not the section is a card:
+   one rhythm, so a page reads the same as the next one. */
+.section{margin-top:var(--space-5)}
 .row{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap}
 .stack{display:grid;gap:var(--space-3)}
+
 .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-3);margin-top:var(--space-3)}
-.kv-grid{display:grid;grid-template-columns:140px 1fr;gap:var(--space-2) var(--space-3);padding-top:var(--space-2)}
+.kv-grid{display:grid;grid-template-columns:140px 1fr;gap:var(--space-2) var(--space-3);padding-top:var(--space-1)}
 
 button{background:var(--accent);color:#0b0d10;border:0;border-radius:var(--radius-sm);padding:var(--space-2) var(--space-4);font-weight:650;cursor:pointer;transition:opacity .15s}
 button:hover{opacity:.9}
 button:disabled{opacity:.5;cursor:default}
 .btn.secondary{background:var(--panel3);color:var(--text);border:1px solid var(--line)}
 .btn.danger{background:#351b1b;color:#ffb5b5}
+.chart-toggle{padding:var(--space-1) var(--space-3);font-size:12px}
 
 .input{width:100%;background:#0b0e12;color:var(--text);border:1px solid var(--line);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);outline:none}
 .input:focus{border-color:var(--accent-dim)}
@@ -176,10 +208,6 @@ button:focus-visible,.nav-item:focus-visible,.tab:focus-visible,a:focus-visible,
 .field{display:grid;gap:var(--space-2)}
 .field-label{font-size:12px;color:var(--muted);font-weight:600}
 .inline-form{display:grid;gap:var(--space-3);margin-bottom:var(--space-4)}
-/* A button row sat directly under its form field: the two block-level siblings
-   would otherwise touch. Scoped away from .inline-form, which is a grid whose
-   own gap is already this value - a margin there would double it. */
-.card:not(.inline-form)>.field+.row{margin-top:var(--space-3)}
 textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical}
 
 .badge{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px var(--space-2);font-size:11.5px;font-weight:650;color:var(--muted);white-space:nowrap}
@@ -193,7 +221,7 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .list-row.clickable{cursor:pointer}
 .list-row.clickable:hover{border-color:var(--accent-dim)}
 .list-row-main{display:flex;flex-direction:column;gap:3px}
-.list-row-side{display:flex;align-items:center;gap:var(--space-3)}
+.list-row-side{display:flex;align-items:center;gap:var(--space-2)}
 
 .empty-state{text-align:center;padding:var(--space-7) var(--space-5);color:var(--muted);display:grid;gap:var(--space-3);justify-items:center}
 
@@ -265,7 +293,10 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .md img{max-width:100%}
 
 /* ---- metrics ---- */
-.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--space-3)}
+/* auto-fit rather than a fixed count: a page has four of these cards and a task's
+   stats tab has five, and four fixed columns orphan the fifth onto a row of its
+   own. At 150px minimum the four-card pages keep exactly the tracks they had. */
+.metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--space-3)}
 /* min-width:0 stops the charts' measured SVG width from feeding back into the
    grid track and widening the column past the viewport. */
 .metric-card{display:flex;flex-direction:column;gap:var(--space-2);min-width:0}
@@ -275,10 +306,11 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 
 /* ---- charts ---- */
 .chart-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:var(--space-3);margin-top:var(--space-6);align-items:start}
-.chart-card{margin:0;min-width:0;overflow:visible}
+/* No margin of its own: a chart card is a .section first, and the page's 20px step
+   from .section puts it under the row of figures above it. */
+.chart-card{min-width:0;overflow:visible}
 .chart-head{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-1)}
 .chart-head h2{margin:0}
-.chart-toggle{padding:var(--space-1) var(--space-3);font-size:12px}
 .chart-figure{position:relative;margin-top:var(--space-3);min-width:0}
 /* Clamp the first paint (before the ResizeObserver reports) to the container,
    so a chart never pushes the page wide for a frame. */
@@ -380,6 +412,16 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 
 /* ---- toolbar / tabs ---- */
 .view-toolbar{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-4);flex-wrap:wrap}
+/* A toolbar holding a single action has nothing to sit opposite, and space-between
+   would strand it against the left edge. Two toolbars hold a single child today:
+   routing's Save, and the projects page's pair of creation buttons. */
+.view-toolbar:has(> :only-child){justify-content:flex-end}
+/* A toolbar opens a section, and the ones that open a card - the first thing inside
+   it - are already placed by the card's own padding. One that follows content is not:
+   the head over the drafts list sat on the block above it, reading as a caption for
+   that block rather than as the start of a new one. It takes the page's section step,
+   which is deliberately more above the head than the 16px below it. */
+.card>.view-toolbar:not(:first-child){margin-top:var(--space-5)}
 /* The search field the `/` shortcut has always looked for. Fixed width so the
    toolbar does not reflow as the user types. */
 .search-input{width:240px;max-width:100%}
@@ -402,7 +444,9 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    .plan-notice, but it carries the page's primary action rather than an aside, so
    the button is a real .btn: on a page whose only other affordance is a tab click,
    this is the thing to press. */
-.next-step-banner{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap;font-size:13px;padding:var(--space-3) var(--space-4);border:1px solid var(--accent-dim);border-radius:var(--radius-sm);background:var(--panel2);margin-bottom:var(--space-4)}
+/* Between the tab rule and the tab's own content, so it takes the same 16px on both
+   sides - the step .tab-content already uses below it. */
+.next-step-banner{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap;font-size:13px;padding:var(--space-3) var(--space-4);border:1px solid var(--accent-dim);border-radius:var(--radius-sm);background:var(--panel2);margin:var(--space-4) 0}
 .next-step-banner .btn{padding:var(--space-2) var(--space-3);font-size:12.5px}
 
 /* ---- task detail ---- */
@@ -416,6 +460,12 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .task-header>.link{white-space:nowrap;flex-shrink:0}
 .task-meta{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap;font-size:12.5px;margin-top:var(--space-2)}
 .task-description{margin:var(--space-3) 0 0;color:var(--muted);font-size:13.5px;line-height:1.55;max-width:700px;white-space:pre-line}
+/* The header's left column is a title, a meta line, then whichever of the description
+   or the parent buttons the task has - not a .stack, so nothing spaces the last of
+   them. On a task with no description the Link parent row sat on the meta line itself;
+   the .stack step, which is what this row would have been given anywhere else. Scoped
+   past the header's own .card so the editor inside it keeps its single 12px gap. */
+.task-header>div>.row{margin-top:var(--space-3)}
 .action-bar{margin-top:var(--space-6);padding-top:var(--space-4);border-top:1px solid var(--line);display:flex;justify-content:flex-end}
 .activity-box{position:relative;max-height:560px;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4)}
 .activity-notice{position:sticky;top:calc(-1 * var(--space-4));z-index:2;margin:calc(-1 * var(--space-4)) calc(-1 * var(--space-4)) var(--space-3);padding:var(--space-2) var(--space-4);background:var(--panel);border-bottom:1px solid var(--line);font-size:12px;color:var(--muted);display:flex;align-items:center;gap:var(--space-2)}
@@ -656,7 +706,6 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   .app-header,.content{padding-left:var(--space-4);padding-right:var(--space-4)}
   .app-header{padding-top:var(--space-4)}
   .content{padding-bottom:var(--space-7)}
-  .card{padding:var(--space-4)}
   .header-title{font-size:19px}
   .metric-value{font-size:23px}
   /* Long titles and paths must break rather than widen the page. */
@@ -664,7 +713,6 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   .list-row-main b,.list-row-main span{overflow-wrap:anywhere}
   .list-row-side{flex-wrap:wrap}
   .view-toolbar{gap:var(--space-2)}
-  .seg-btn{padding:var(--space-2) var(--space-3)}
   .kbd-overlay{padding:var(--space-6) var(--space-3)}
   /* Toasts are fixed, so an oversized one is clipped rather than scrolled -
      pin them to the viewport edges instead. */
