@@ -14,7 +14,11 @@ export function hasCommits(root){try{return !!head(root)}catch{return false}}
 export function status(root){return git(root,['status','--porcelain']).split('\n').filter(x=>x && !x.trimEnd().endsWith('.ai-code')).join('\n')}
 export function protectAiCode(root){const f=path.join(root,'.git','info','exclude');fs.mkdirSync(path.dirname(f),{recursive:true});let s=fs.existsSync(f)?fs.readFileSync(f,'utf8'):'';if(!s.split('\n').some(x=>x.trim()==='.ai-code/'))fs.appendFileSync(f,(s.endsWith('\n')||!s?'':'\n')+'.ai-code/\n')}
 export function head(root){return git(root,['rev-parse','HEAD'])}
-export function createWorktree(root,id){ensureGit(root);const base=head(root);const baseRoot=process.env.AI_CODE_WORKTREE_ROOT||path.join(path.dirname(root),`.ai-code-worktrees-${path.basename(root)}`);const dir=path.join(baseRoot,id);const branch=`ai-code/${id}`;fs.mkdirSync(path.dirname(dir),{recursive:true});if(!fs.existsSync(dir))git(root,['worktree','add','-b',branch,dir,base]);return {dir,branch,base}}
+export function createWorktree(root,id){ensureGit(root);const base=head(root);const baseRoot=process.env.AI_CODE_WORKTREE_ROOT||path.join(path.dirname(root),`.ai-code-worktrees-${path.basename(root)}`);const dir=path.join(baseRoot,id);const branch=`ai-code/${id}`;fs.mkdirSync(path.dirname(dir),{recursive:true});if(!fs.existsSync(dir))git(root,['worktree','add','-b',branch,dir,base]);linkDeps(root,dir);return {dir,branch,base}}
+// A worktree shares the repo's package.json but not its node_modules (gitignored).
+// Without this, every test step and every implementer that imports a dependency
+// fails on ERR_MODULE_NOT_FOUND. A symlink is instant and always in sync.
+function linkDeps(root,dir){const nm=path.join(root,'node_modules');const target=path.join(dir,'node_modules');if(fs.existsSync(nm)&&!fs.existsSync(target)){try{fs.symlinkSync(nm,target,'junction')}catch{/* race or permission — the install step will catch it */}}}
 // Against a ref, not against the index. `git diff` alone compares the worktree to
 // the index, so staging or committing the work makes it empty - which hands the
 // reviewer a blank page, and a blank page is a PASS. Against a ref it reads the
