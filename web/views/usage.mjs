@@ -1,4 +1,4 @@
-import { html, useState, useEffect, useMemo } from '../lib.mjs';
+import { html, useState, useEffect, useMemo, formatTokens } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
@@ -102,7 +102,7 @@ export function Usage() {
   const providerColumns = [
     { key: 'provider', label: 'Provider', sortable: true, sortValue: (r) => r.provider || r.provider_id },
     { key: 'runs', label: 'Runs', sortable: true, render: (r) => Number(r.runs || 0).toLocaleString() },
-    { key: 'tokens', label: 'Tokens', sortable: true, render: (r) => Number(r.tokens || 0).toLocaleString() },
+    { key: 'tokens', label: 'Tokens', sortable: true, render: (r) => formatTokens(r.tokens) },
     { key: 'cost', label: 'Cost', sortable: true, render: (r) => `$${Number(r.cost || 0).toFixed(6)}` },
     { key: 'failed', label: 'Failed', sortable: true, render: (r) => (r.failed ? html`<span class="error-text">${r.failed}</span>` : '—') },
     // Beside the count rather than in a tile of its own: "which provider's failures
@@ -115,7 +115,7 @@ export function Usage() {
     { key: 'provider_id', label: 'Provider', sortable: true, render: (r) => providerNames[r.provider_id] || r.provider_id || '—' },
     { key: 'model_id', label: 'Model', sortable: true, render: (r) => r.model_id || '—' },
     { key: 'status', label: 'Status', sortable: true, render: (r) => (r.status ? html`<${StatusBadge} status=${r.status} />` : '—') },
-    { key: 'tokens', label: 'Tokens', sortable: true, render: (r) => Number(r.tokens || 0).toLocaleString() },
+    { key: 'tokens', label: 'Tokens', sortable: true, render: (r) => formatTokens(r.tokens) },
     { key: 'cost', label: 'Cost', sortable: true, render: (r) => `$${Number(r.cost || 0).toFixed(6)}` },
     { key: 'duration_ms', label: 'Duration', sortable: true, render: (r) => (r.duration_ms ? `${Math.round(r.duration_ms / 1000)}s` : '—') },
     {
@@ -134,7 +134,7 @@ export function Usage() {
   const contextTokens = Number(totals.context_tokens || 0);
   const outputTokens = Number(totals.tokens || 0);
   const spent = contextTokens + outputTokens;
-  const ratio = spent > 0 ? `${Math.round((contextTokens / spent) * 100)}% of ${spent.toLocaleString()} sent` : '—';
+  const ratio = spent > 0 ? `${Math.round((contextTokens / spent) * 100)}% of ${formatTokens(spent)} sent` : '—';
   const finished = succeeded + failed;
 
   // The waste tiles. Each one is a share of the same total cost, so they are directly
@@ -174,18 +174,18 @@ export function Usage() {
         </span>
       </div>
 
-      <div class="metric-grid">
+      <div class="metric-grid usage-metrics">
         <div class="card metric-card">
           <div class="metric-label muted">Total Cost</div>
           <div class="metric-value">$${Number(totals.cost || 0).toFixed(4)}</div>
         </div>
         <div class="card metric-card">
           <div class="metric-label muted">Total Tokens</div>
-          <div class="metric-value">${Number(totals.tokens || 0).toLocaleString()}</div>
+          <div class="metric-value">${formatTokens(totals.tokens)}</div>
         </div>
         <div class="card metric-card">
           <div class="metric-label muted">Context Tokens</div>
-          <div class="metric-value">${Number(totals.context_tokens || 0).toLocaleString()}</div>
+          <div class="metric-value">${formatTokens(totals.context_tokens)}</div>
           <div class="metric-note muted">${ratio}</div>
         </div>
         <div class="card metric-card">

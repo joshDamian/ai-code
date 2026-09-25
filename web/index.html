@@ -316,6 +316,21 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .metric-label{font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 .metric-value{font-size:27px;font-weight:750}
 .metric-note{font-size:11.5px}
+/* The usage page's nine metric cards: auto-fit fills a desktop row with seven
+   and orphans two beneath. Five fixed columns land them 5/4; the step-downs
+   keep full final rows at every width. */
+.metric-grid.usage-metrics{grid-template-columns:repeat(5,1fr)}
+@media(max-width:1199px){
+  .metric-grid.usage-metrics{grid-template-columns:repeat(3,1fr)}
+}
+@media(max-width:650px){
+  .metric-grid.usage-metrics{grid-template-columns:1fr 1fr}
+  /* An odd card count would orphan the last card half-width; it spans instead. */
+  .metric-grid.usage-metrics .metric-card:last-child:nth-child(odd){grid-column:1/-1}
+}
+@media(max-width:400px){
+  .metric-grid.usage-metrics{grid-template-columns:1fr}
+}
 
 /* ---- charts ---- */
 .chart-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:var(--space-3);margin-top:var(--space-6);align-items:start}

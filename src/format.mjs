@@ -263,9 +263,15 @@ export function formatDuration(ms) {
 
 export function formatTokens(n) {
   if (n == null || n === 0) return '0';
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  if (n >= 1000000) return `${trimOne(n / 1000000)}M`;
+  if (n >= 1000) return `${trimOne(n / 1000)}K`;
   return String(n);
+}
+
+// "20.0M" reads as a decimal no one asked for; "1.5M" keeps its digit.
+function trimOne(v) {
+  const s = v.toFixed(1);
+  return s.endsWith('.0') ? s.slice(0, -2) : s;
 }
 
 export function formatCost(c) {
