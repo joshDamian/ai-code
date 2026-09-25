@@ -451,7 +451,7 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
       busy ? e(Box, { marginLeft: 2 }, e(Text, { color: 'yellow' }, e(Spinner, { type: 'dots' }), ` ${busy}…`)) : null,
     ),
     e(Box, { height: 1 }),
-    tab === 'plan' && renderPlan(task, refining, editing, feedback, setFeedback, submitFeedback),
+    tab === 'plan' && renderPlan(task, runs, refining, editing, feedback, setFeedback, submitFeedback),
     tab === 'execute' && renderExecute(task, runs, selected),
     tab === 'review' && renderReview(task, sendingFeedback, noteDraft, setNoteDraft, submitNote),
     tab === 'activity' && renderActivity(events),
@@ -488,7 +488,11 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
   );
 }
 
-function renderPlan(task, refining, editing, feedback, setFeedback, submitFeedback) {
+function renderPlan(task, runs, refining, editing, feedback, setFeedback, submitFeedback) {
+  // A planner is only "in progress" when a run says so, and the runs are the ones the
+  // screen already loaded. Read here rather than closed over from the component: the
+  // line below used to name a binding that was never in scope in this function.
+  const activeRun = runs.find((r) => r.status === 'running') || null;
   if (editing) {
     return e(Text, { color: 'yellow' }, 'Plan is open in $EDITOR — save and quit to apply your edits.');
   }
@@ -508,11 +512,27 @@ function renderPlan(task, refining, editing, feedback, setFeedback, submitFeedba
       ? e(Text, { color: 'yellow' }, 'Planning in progress… press c to cancel.')
       : e(Text, { color: 'yellow' }, 'No plan yet — press p to start the planner.');
   }
-  if (!task.plan) return e(Text, { color: 'gray' }, 'No plan yet.');
+  const plan = task.plan
+    ? e(
+        Box,
+        { flexDirection: 'column' },
+        ...wrap(task.plan).map((line, i) => e(Text, { key: i }, line)),
+      )
+    : e(Text, { color: 'gray' }, 'No plan yet.');
+  if (task.state !== 'FAILED') return plan;
+  // FAILED is on this tab because this is where its two ways out are offered, and why
+  // it failed is what a user chooses between them on. The row that carries the reason
+  // is the last failed run - the repair ceiling's own refusal for a task that ran out
+  // of budget, or the run a budget stopped - and the plan is rendered under it, since
+  // a failed task usually still has the plan it was working from.
+  const failed = [...runs].reverse().find((r) => r.status === 'failed');
+  if (!failed) return plan;
   return e(
     Box,
     { flexDirection: 'column' },
-    ...wrap(task.plan).map((line, i) => e(Text, { key: i }, line)),
+    e(Text, { color: 'red' }, `Failed: ${failed.error || 'unknown error'}`),
+    e(Box, { height: 1 }),
+    plan,
   );
 }
 

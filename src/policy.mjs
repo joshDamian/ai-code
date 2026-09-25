@@ -50,11 +50,26 @@ const ROLES = ['planner', 'implementer', 'reviewer', 'repair'];
 // followed for the same reason a day later: on 2026-09-24 the planner of task
 // f70c23a7 was cut at 300 mid-thought after 95s of reasoning and 127s inside three
 // subagents, still streaming when it died.
+//
+// maxRepairs is the repair role's own ceiling and the only one here that bounds a
+// task rather than a run: it is the number of repair runs one plan revision may
+// spend. Every other budget stops something that is still making progress; this one
+// stops a cycle that is not - repair, test, review, FAIL, repair - which no per-run
+// budget can see, because each run in the cycle is individually inside its budget.
+// Task 820e5d05 spent $2.88 and fourteen repair runs that way, each one re-reading
+// the same findings and answering them with an edit the next review rejected.
+//
+// Five, because a repair cycle that has not converged after five attempts is
+// evidence about the plan rather than about the code, and the exit that follows is
+// a new plan. It is a repair-row key rather than a top-level one so it travels with
+// the role it bounds, and it is read per attempt from the live policy, so raising it
+// in routing.json is itself the way out (see repairLimitError in src/service.mjs).
+// Non-positive or absent means no ceiling, like the other budgets here.
 const defaults = {
   planner: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.2, speed: 0.1, effort: 'high', timeout: 900, stall: 120, maxToolCalls: 40, maxRunCost: 1, subagentWait: 600 },
   implementer: { strategy: 'balanced', preferred: [], fallback: [], quality: 0.5, cost: 0.2, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5, subagentWait: 600 },
   reviewer: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.1, speed: 0.3, effort: 'high', timeout: 900, stall: 120, maxToolCalls: 40, maxRunCost: 1, subagentWait: 600 },
-  repair: { strategy: 'speed', preferred: [], fallback: [], quality: 0.2, cost: 0.4, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5, subagentWait: 600 },
+  repair: { strategy: 'speed', preferred: [], fallback: [], quality: 0.2, cost: 0.4, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5, subagentWait: 600, maxRepairs: 5 },
   // Circuit-breaker thresholds. Absent means the defaults in src/health.mjs apply.
   health: {},
   // Prompt budget for the context assembler. Absent means the defaults in

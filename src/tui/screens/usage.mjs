@@ -76,6 +76,12 @@ export function UsageScreen({ api, isActive, onError, setFooter }) {
       e(MetricBox, { label: 'Runs', value: totals.runs ?? 0, color: 'cyan' }),
       e(MetricBox, { label: 'Failed', value: totals.failed ?? 0, color: 'red' }),
       e(MetricBox, { label: 'Fallbacks', value: totals.fallbacks ?? 0, color: 'yellow' }),
+      // The three waste figures, in dollars: what the failures cost, what covering for
+      // them cost, and what the rework cost. Counts alone say a run failed; only these
+      // say whether it was worth caring about.
+      e(MetricBox, { label: 'Failed $', value: formatCost(totals.failed_cost ?? 0), color: 'red' }),
+      e(MetricBox, { label: 'Fallback $', value: formatCost(totals.fallback_cost ?? 0), color: 'yellow' }),
+      e(MetricBox, { label: 'Repair $', value: formatCost(totals.repair_cost ?? 0), color: 'magenta' }),
     ),
     e(Box, { height: 1 }),
     e(Text, { bold: true }, 'By Provider'),

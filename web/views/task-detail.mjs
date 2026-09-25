@@ -692,6 +692,11 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
       ${
         task.state === 'FAILED'
           ? html`
+              ${
+                lastRun && lastRun.status === 'failed'
+                  ? html`<p class="error-text">The last run failed: ${lastRun.error || 'unknown error'}</p>`
+                  : null
+              }
               <div class="row">
                 ${task.worktree ? html`<button class="btn" disabled=${busy} onClick=${() => run(() => api.taskRetry(task.id), 'Retrying...')}>Retry Tests</button>` : null}
                 <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskReplan(task.id), 'Replanning...')}>Replan</button>

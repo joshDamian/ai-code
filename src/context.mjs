@@ -1560,6 +1560,8 @@ export function buildTaskContext(project, task, options = {}) {
 
   // Sections in the order the spec fixes: what the project is, the files that
   // matter, the approved plan, then whatever the last attempt in this role left.
+  // The return value below is ordered by volatility rather than by that reading
+  // order, because the prompt is the serialized object - see the note there.
   const architecture = readDoc(project.path, 'architecture.md', cfg.architecture);
   const conventions = readDoc(project.path, 'conventions.md', cfg.conventions);
   // What the project is for, what it is explicitly not for, and the product
@@ -1567,7 +1569,12 @@ export function buildTaskContext(project, task, options = {}) {
   // the two generated documents for the same reason they are: a plan is written
   // against it, and a review is a judgement about whether the work served it.
   let spec = readSpec(project, cfg.spec);
-  let review = role === 'repair' || role === 'reviewer' ? task.review || null : null;
+  // The planner reads the review too, and only in the case that matters: a replan
+  // after a failed task is the exit from a repair cycle that ran out of budget, and
+  // the review is the findings it could not answer. A first plan has no review - the
+  // column is null - so nothing changes for it. `#writePlan` clears the column when
+  // the new plan lands, so what a planner reads is never a review of its own plan.
+  let review = role === 'repair' || role === 'reviewer' || role === 'planner' ? task.review || null : null;
   // A chat run belongs to no task, so `previousSummary` has no id to scope its
   // query by - `listRuns(null)` returns every run in the database, and the
   // "previous attempt" a chat would be handed is some other conversation's
@@ -1744,13 +1751,20 @@ export function buildTaskContext(project, task, options = {}) {
     } catch { /* diagnostic only */ }
   }
 
+  // Key order is load-bearing, not cosmetic: this object is `JSON.stringify`d into the
+  // prompt, and prompt caches match on a shared prefix, so the bytes that repeat across
+  // runs have to come first. The order is therefore least-volatile to most-volatile -
+  // the project row and its three standing documents are the same string for every run
+  // against a project, `task` changes per task, and `files`, `review`, `previous` and
+  // `parent` change per attempt. V8 keeps string keys in insertion order, so what is
+  // written here is what the provider is sent.
   return {
     project: { id: project.id, name: project.name, path: root, language: project.language, framework: project.framework, commands: project.commands },
-    task: { id: task.id, title: task.title, plan: task.plan },
     tree,
     architecture: arch,
     conventions: conv,
     spec,
+    task: { id: task.id, title: task.title, plan: task.plan },
     files,
     review,
     previous,

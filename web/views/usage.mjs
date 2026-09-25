@@ -105,6 +105,9 @@ export function Usage() {
     { key: 'tokens', label: 'Tokens', sortable: true, render: (r) => Number(r.tokens || 0).toLocaleString() },
     { key: 'cost', label: 'Cost', sortable: true, render: (r) => `$${Number(r.cost || 0).toFixed(6)}` },
     { key: 'failed', label: 'Failed', sortable: true, render: (r) => (r.failed ? html`<span class="error-text">${r.failed}</span>` : '—') },
+    // Beside the count rather than in a tile of its own: "which provider's failures
+    // cost me" is a question about one row, and a total over all of them cannot answer it.
+    { key: 'failed_cost', label: 'Failed $', sortable: true, render: (r) => (r.failed_cost ? html`<span class="error-text">$${Number(r.failed_cost).toFixed(4)}</span>` : '—') },
   ];
 
   const runColumns = [
@@ -133,6 +136,18 @@ export function Usage() {
   const spent = contextTokens + outputTokens;
   const ratio = spent > 0 ? `${Math.round((contextTokens / spent) * 100)}% of ${spent.toLocaleString()} sent` : '—';
   const finished = succeeded + failed;
+
+  // The waste tiles. Each one is a share of the same total cost, so they are directly
+  // comparable and none of them needs a chart to be read - the note says what part of
+  // the period the money was. An absent denominator reads as an em dash rather than as
+  // 0%, which is the difference between "nothing was wasted" and "nothing was spent".
+  const totalCost = Number(totals.cost || 0);
+  const failedCost = Number(totals.failed_cost || 0);
+  const fallbackCost = Number(totals.fallback_cost || 0);
+  const repairRuns = Number(totals.repair_runs || 0);
+  const repairCost = Number(totals.repair_cost || 0);
+  const runs = Number(totals.runs || 0);
+  const share = (part) => (totalCost > 0 ? `${Math.round((part / totalCost) * 100)}% of $${totalCost.toFixed(2)}` : '—');
 
   if (loading && !data) return html`<${Spinner} message="Loading usage..." />`;
   if (!data) return html`<${EmptyState} message="Could not load usage." />`;
@@ -181,6 +196,26 @@ export function Usage() {
         <div class="card metric-card">
           <div class="metric-label muted">Fallbacks</div>
           <div class="metric-value">${Number(totals.fallbacks || 0).toLocaleString()}</div>
+        </div>
+        <div class="card metric-card">
+          <div class="metric-label muted">Failed Spend</div>
+          <div class="metric-value">$${failedCost.toFixed(4)}</div>
+          <div class="metric-note muted">${failed ? share(failedCost) : '—'}</div>
+        </div>
+        <div class="card metric-card">
+          <div class="metric-label muted">Fallback Spend</div>
+          <div class="metric-value">$${fallbackCost.toFixed(4)}</div>
+          <div class="metric-note muted">${Number(totals.fallbacks || 0) ? share(fallbackCost) : '—'}</div>
+        </div>
+        <div class="card metric-card">
+          <div class="metric-label muted">Repair Runs</div>
+          <div class="metric-value">${repairRuns.toLocaleString()}</div>
+          <div class="metric-note muted">${repairRuns ? `${Math.round((repairRuns / Math.max(1, runs)) * 100)}% of runs` : '—'}</div>
+        </div>
+        <div class="card metric-card">
+          <div class="metric-label muted">Repair Spend</div>
+          <div class="metric-value">$${repairCost.toFixed(4)}</div>
+          <div class="metric-note muted">${repairRuns ? share(repairCost) : '—'}</div>
         </div>
       </div>
 

@@ -356,10 +356,38 @@ export function cancelled() {
   return err;
 }
 
-// The codes the harness raises when a run crosses a budget it was given. Neither
-// is the provider's fault and neither is worth a fallback: the next provider would
-// run the same agent into the same wall at the same cost.
-const BUDGET_CODES = new Set(['TOOL_CALL_LIMIT', 'COST_LIMIT']);
+// The codes the harness raises when a run crosses a budget it was given. None of
+// them is the provider's fault and none is worth a fallback: the next provider would
+// run the same agent into the same wall at the same cost. REPAIR_LIMIT is the same
+// reading one level up - a cycle out of turns rather than a run - and reaches the
+// same two decisions, which is why it belongs in this set rather than beside it.
+const BUDGET_CODES = new Set(['TOOL_CALL_LIMIT', 'COST_LIMIT', 'REPAIR_LIMIT']);
+
+// One repair ceiling, one explanation. Both call sites that can hit it (repair, and
+// the retry that would end in one) build their error here, so a user who reached the
+// wall from either side is told the same three things: how many repairs are spent,
+// that nothing was touched, and the three ways out in the order worth trying.
+//
+// The order is the substance. A ceiling reached is a statement about the plan - the
+// findings have now survived five attempts to answer them, and a sixth attempt at the
+// same text is the loop this exists to stop - so the recommended exit is a new plan,
+// which is the only one that changes the input. Raising the number and retrying is
+// deliberately second: it is the right call when the findings are nearly answered and
+// wrong when they are not, and only the person reading the review can tell. Closing
+// is last because it discards the worktree, which is a real loss when the repair runs
+// did make progress - and the only exit that needs no code.
+export function repairLimitError(prior) {
+  const err = new Error(
+    `REPAIR_LIMIT: this plan revision has spent its whole repair budget (${prior} repair run${prior === 1 ? '' : 's'}). ` +
+      `Nothing was started, and the work is untouched in the worktree and on the branch. ` +
+      `Three ways out, in the order worth trying: ` +
+      `(1) Replan - the failing review is carried into the planner prompt, and a new plan revision resets this count; ` +
+      `(2) raise repair.maxRepairs in .ai-code/routing.json and then Retry - the count persists, so it needs raising above ${prior}; ` +
+      `(3) Close - discards the worktree, knowingly.`
+  );
+  err.code = 'REPAIR_LIMIT';
+  return err;
+}
 
 // The planner prompt. Demanding an implementation plan and offering no other
 // valid answer is what made a planning run spiral: when the code already
@@ -1515,7 +1543,13 @@ export class Service {
     if (t.state !== 'FAILED') throw new Error('Can only replan when FAILED');
     // plan_base goes with the plan it describes: between here and the next plan()
     // the task would otherwise carry a baseline for a plan that no longer exists.
-    this.store.updateTask(id, { plan: null, plan_prev: null, plan_at: null, review: null, worktree: null, branch: null, base_commit: null, plan_base: null });
+    //
+    // `review` deliberately stays. A replan is the exit from a task that failed, and
+    // most often from one that failed because its repairs ran out - so the review is
+    // the findings, and the planner that follows is the one reader who can do
+    // something about them. It is cleared by #writePlan the moment the new plan lands,
+    // because at that point it describes a plan that is gone.
+    this.store.updateTask(id, { plan: null, plan_prev: null, plan_at: null, worktree: null, branch: null, base_commit: null, plan_base: null });
     return this.transition(id, 'PLANNING');
   }
 
@@ -1523,6 +1557,14 @@ export class Service {
     const t = this.task(id);
     if (t.state !== 'FAILED') throw new Error('Can only retry when FAILED');
     if (!t.worktree || !fs.existsSync(t.worktree)) throw new Error('No worktree to retry — use replan instead');
+    // retry's whole path ends in repair(), so the ceiling is checked here rather than
+    // there: later is after a test command has been paid for, and after the review
+    // below has been cleared - which is the one thing the recommended exit needs, since
+    // a replan carries the failing review into the planner prompt. No row is written
+    // for the refusal here; the task is already FAILED and the ledger already ends on
+    // the row that put it there.
+    const prior = this.#repairCount(t);
+    if (prior >= this.#repairCap()) throw repairLimitError(prior);
     this.store.updateTask(id, { review: null });
     this.transition(id, 'TESTING');
     try {
@@ -2066,6 +2108,37 @@ export class Service {
     }
   }
 
+  // The repair budget for the current policy, as a number or Infinity. Read per
+  // attempt rather than cached, which is what makes editing routing.json a live way
+  // out of a task that has hit the ceiling.
+  #repairCap() {
+    return budgetOf((this.policies.repair || {}).maxRepairs);
+  }
+
+  // How much of that budget this plan revision has already spent.
+  //
+  // Read from the ledger rather than kept in a counter column, so it survives a
+  // restart, a second process and a CLI command, and scoped to the plan revision the
+  // repair is answering: `plan_at` is when that plan landed, and a repair from before
+  // it was answering a different plan. A task with no plan_at counts every repair it
+  // has, which is the conservative reading.
+  //
+  // Three exclusions, and each one is a repair that was not a turn spent:
+  //   - running, because it has not finished and may yet be cancelled;
+  //   - cancelled, because the user stopped it before it could act, and a ceiling a
+  //     user can reach by cancelling is a ceiling that punishes the wrong party;
+  //   - no provider, which is the synthetic row the refusal itself writes (below).
+  //     It records that the ceiling was hit, not that a turn was taken, and counting
+  //     it would put the real number one below the configured one - so raising
+  //     maxRepairs by one would buy the user nothing.
+  #repairCount(t) {
+    const planAt = t.plan_at || null;
+    const spent = new Set(['succeeded', 'failed', 'interrupted']);
+    return this.store
+      .listRuns(t.id)
+      .filter((r) => r.role === 'repair' && r.provider_id && spent.has(r.status) && (!planAt || String(r.started_at || '') > String(planAt))).length;
+  }
+
   async repair(id) {
     const t = this.task(id);
     if (t.state !== 'REPAIRING') throw new Error('Task must be in REPAIRING');
@@ -2073,6 +2146,35 @@ export class Service {
     // edits are not measured for violations, so the second would write on top of the
     // first with neither aware of the other.
     this.#assertIdle(id, 'repairing', { job: false });
+    // The ceiling, checked before anything runs rather than discovered at the far end
+    // of a repair and a test suite. A cycle that has spent its budget gets no sixth
+    // turn: the findings are the same text a fifth repair already failed to answer,
+    // and spending another run on them is the loop, not the fix.
+    //
+    // The refusal is a real outcome, so it is recorded like one - the task lands in
+    // FAILED, where Replan and Retry live, and the ledger gets a row saying why. That
+    // row is provider-less by construction: no model was asked anything, and `usage()`
+    // prices only rows with a provider, so a refusal cannot appear in a cost report.
+    const prior = this.#repairCount(t);
+    if (prior >= this.#repairCap()) {
+      const err = repairLimitError(prior);
+      this.transition(id, 'FAILED');
+      const runId = this.store.id();
+      this.store.addRun({
+        id: runId,
+        taskId: id,
+        role: 'repair',
+        providerId: null,
+        modelId: null,
+        status: 'running',
+        startedAt: new Date().toISOString(),
+      });
+      // Two writes rather than one because addRun hardcodes ended_at and error to
+      // NULL - it is written for a run that is about to start - so the failure lives
+      // in the update, exactly as it does for a run that ran.
+      this.store.updateRun(runId, { status: 'failed', ended_at: new Date().toISOString(), error: err.message, duration_ms: 0 });
+      throw err;
+    }
     // What the repair actually did, measured rather than assumed. The findings it is
     // working from name files that are already dirty, so a dirty set read again
     // afterwards says nothing about whether it acted on them; hashes do. The two
@@ -2843,7 +2945,11 @@ export class Service {
     // is word for word the old one. So the timestamp means "a revision landed", not "a
     // planner ran", and nothing else has to know the difference.
     if (this.store.getTask(id).plan === plan) return;
-    this.store.updateTask(id, { plan, plan_prev: prev ?? null, plan_at: new Date().toISOString() });
+    // `review` is cleared here rather than at the replan, and this is the only write
+    // that can: a review carried across a replan is what the planner reads, and it
+    // stops being that the moment the plan it was answering is replaced. A plan
+    // revision and the findings against its predecessor are the same lifetime.
+    this.store.updateTask(id, { plan, plan_prev: prev ?? null, plan_at: new Date().toISOString(), review: null });
   }
 
   // -- run helpers ----------------------------------------------------------
@@ -3588,7 +3694,27 @@ export class Service {
 
     // `tokens` is what the models generated; `context_tokens` is what was sent to
     // them. They are different questions - the second is what the budget governs.
-    const totals = { runs: priced.length, tokens: 0, context_tokens: 0, cost: 0, succeeded: 0, failed: 0, fallbacks: 0 };
+    //
+    // The four waste totals answer the question cost alone cannot: of the money spent,
+    // how much bought nothing. They are deliberately separate rather than summed into
+    // one "waste" figure, because they have different fixes - a failed run is a budget
+    // or a provider, a fallback is a provider that was down, a repair is a plan that
+    // did not hold - and a single number would hide which one is moving.
+    //
+    //   failed_cost    spend on runs that failed. Bought nothing. It is the same row
+    //                  set as `failed` above, so the count and the money agree.
+    //   fallback_cost  spend on the second (and later) attempts in a chain - work that
+    //                  was attempted twice because a provider failed. The attempt it
+    //                  replaced is in failed_cost, so the two together are the price of
+    //                  the failure, and this half is the one a healthy provider removes.
+    //   repair_runs    repairs run - the rework count. Read against `runs`, it is the
+    //                  share of the period that was spent correcting work.
+    //   repair_cost    and what the rework cost.
+    //
+    // A repair that hit the ceiling is not counted in either repair total: it is a
+    // provider-less row, and every sum here walks `priced`, which is the same filter
+    // that keeps the test command out of a model spend report.
+    const totals = { runs: priced.length, tokens: 0, context_tokens: 0, cost: 0, succeeded: 0, failed: 0, fallbacks: 0, failed_cost: 0, fallback_cost: 0, repair_runs: 0, repair_cost: 0 };
     const byProvider = new Map();
     const byRole = new Map();
     const byDay = new Map();
@@ -3602,24 +3728,41 @@ export class Service {
       totals.tokens += tokens;
       totals.context_tokens += Number(r.context_tokens || 0);
       totals.cost += cost;
+      const failed = r.status === 'failed';
+      const fallback = Boolean(r.fallback_from);
+      const repair = r.role === 'repair';
       if (r.status === 'succeeded') totals.succeeded++;
-      if (r.status === 'failed') totals.failed++;
-      if (r.fallback_from) totals.fallbacks++;
+      if (failed) {
+        totals.failed++;
+        totals.failed_cost += cost;
+      }
+      if (fallback) {
+        totals.fallbacks++;
+        totals.fallback_cost += cost;
+      }
+      if (repair) {
+        totals.repair_runs++;
+        totals.repair_cost += cost;
+      }
 
       const pk = r.provider_id || 'unknown';
-      const pv = byProvider.get(pk) || { provider_id: pk, provider: names.get(pk) || pk, runs: 0, tokens: 0, cost: 0, failed: 0 };
+      const pv = byProvider.get(pk) || { provider_id: pk, provider: names.get(pk) || pk, runs: 0, tokens: 0, cost: 0, failed: 0, failed_cost: 0 };
       pv.runs++;
       pv.tokens += tokens;
       pv.cost += cost;
-      if (r.status === 'failed') pv.failed++;
+      if (failed) {
+        pv.failed++;
+        pv.failed_cost += cost;
+      }
       byProvider.set(pk, pv);
 
       const rk = r.role || 'unknown';
-      const rv = byRole.get(rk) || { role: rk, runs: 0, tokens: 0, context_tokens: 0, cost: 0 };
+      const rv = byRole.get(rk) || { role: rk, runs: 0, tokens: 0, context_tokens: 0, cost: 0, failed_cost: 0 };
       rv.runs++;
       rv.tokens += tokens;
       rv.context_tokens += Number(r.context_tokens || 0);
       rv.cost += cost;
+      if (failed) rv.failed_cost += cost;
       byRole.set(rk, rv);
 
       const day = String(r.started_at || '').slice(0, 10);

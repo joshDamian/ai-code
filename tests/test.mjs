@@ -709,6 +709,20 @@ test('failed runs keep their session id and only transient failures are resumabl
 
 function seedRun(s,t,id){s.store.addRun({id,taskId:t.id,role:'implementer',providerId:'a',modelId:'m',status:'running',startedAt:new Date().toISOString()});return id}
 
+// A repair run that happened, without running one. The repair ceiling is counted from
+// the ledger, so a test of it needs a history rather than a cycle - driving five real
+// repairs through the mock would make the test about the mock's five verdicts.
+//
+// `at` is explicit because the count is a comparison of started_at against plan_at and
+// listRuns orders by started_at: two rows in the same millisecond would sort by nothing
+// in particular, which is the one thing a test of an ordering cannot afford.
+function seedRepair(s,t,at,opts={}){
+  const id=`rep-${at}`;
+  s.store.addRun({id,taskId:t.id,role:'repair',providerId:opts.provider===undefined?'a':opts.provider,modelId:'m',status:'running',startedAt:at});
+  s.store.updateRun(id,{status:opts.status||'succeeded',cost:opts.cost||0,ended_at:at});
+  return id;
+}
+
 test('the run a task is live on comes from the lease, not from the status column',()=>{
   const root=repo();
   const s=new Service(root,{allowMock:true,silent:true});
@@ -3848,7 +3862,11 @@ test('the plan columns survive the positional write they go through',async()=>{
   assert.equal(after.plan,'PLAN_MARKER');
   assert.equal(after.plan_prev,v1);
   assert.equal(after.context,'CONTEXT_MARKER','context still holds context');
-  assert.equal(after.review,'REVIEW_MARKER','and review still holds a review');
+  // And review is cleared rather than landed on. That is #writePlan's own rule - a
+  // review answers the plan it was written against, and this is the write that ends
+  // that plan's life - and it is asserted through the same positional list, so a slip
+  // that swapped review and context would fail here as well as above.
+  assert.equal(after.review,null,'a new plan revision clears the review it answered');
 });
 
 test('a refine records the plan it replaced, and the diff is against that one',async()=>{
@@ -4689,6 +4707,229 @@ test('COMPLETE has one exit, and feedback is it',()=>{
   assert.throws(()=>s.transition(t.id,'PLANNING'),/Invalid transition/);
   assert.throws(()=>s.transition(t.id,'TESTING'),/Invalid transition/);
   assert.equal(s.transition(t.id,'REPAIRING').state,'REPAIRING');
+});
+
+// -- the repair ceiling ------------------------------------------------------
+//
+// A per-run budget cannot see a cycle: repair, test, review, FAIL, repair, each run
+// inside its own timeout and cost, the task going nowhere. Task 820e5d05 spent fifteen
+// repairs and six reviews that way, and the largest of them were the reviews. The
+// ceiling is per plan revision, because a revision that has not converged after five
+// attempts is evidence about the plan rather than about the code.
+
+// A task whose review failed, which is the state every repair below runs from. The mock
+// writes a file so a repair's delta is measured, and its verification fails so each
+// attempt leaves the task in REPAIRING - the shape of a cycle that is not converging,
+// which is the only shape the ceiling exists for.
+async function failingTask(s,root){
+  s.updateProvider('mock',{config:{writes:['app.mjs'],reviewText:'The retry path was never exercised.',reviewVerdict:'FAIL',verifyText:'Still not exercised.',verifyVerdict:'FAIL'}});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'build the queue');
+  s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  const after=await s.execute(t.id);
+  assert.equal(after.state,'REPAIRING');
+  assert.ok(s.task(t.id).worktree,'with a worktree, which is what a repair edits');
+  return t;
+}
+
+// Move the plan boundary behind the seeded repairs. The count is "repairs since this
+// plan landed", so this is how a test says the repairs below belong to this revision.
+function planLongAgo(s,t){s.store.updateTask(t.id,{plan_at:'2026-01-01T00:00:00.000Z'})}
+
+test('a plan revision that has spent its repairs is refused, and the task lands in FAILED',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const t=await failingTask(s,root);
+  planLongAgo(s,t);
+  for(let i=0;i<5;i++) seedRepair(s,t,`2026-01-0${i+2}T00:00:00.000Z`);
+  const worktree=s.task(t.id).worktree;
+  const branch=s.task(t.id).branch;
+  const refusal=await s.repair(t.id).then(()=>null,(e)=>e);
+  assert.equal(refusal.code,'REPAIR_LIMIT');
+  assert.match(refusal.message,/5 repair runs/,'the message names what was spent');
+  assert.match(refusal.message,/Replan/,'and the exit worth trying first');
+  assert.match(refusal.message,/routing\.json/,'and the one that needs no replan');
+  assert.match(refusal.message,/untouched/,'and says the work is still there');
+  // The refusal is an outcome, so it is recorded like one: FAILED is where both of its
+  // exits (Retry, Replan) already live, and the ledger ends on the reason.
+  assert.equal(s.task(t.id).state,'FAILED');
+  assert.equal(s.task(t.id).worktree,worktree,'the worktree is not touched by a refusal');
+  assert.ok(fs.existsSync(worktree));
+  assert.ok(branch,'with a branch, which is what the refusal must leave alone');
+  assert.equal(s.task(t.id).branch,branch,'and the branch is not touched either');
+  const runs=s.store.listRuns(t.id);
+  const last=runs[runs.length-1];
+  assert.equal(last.role,'repair');
+  assert.match(last.error,/^REPAIR_LIMIT: /,'the row carries the refusal, not a run');
+  assert.equal(last.provider_id,null,'nothing was asked of a provider');
+  assert.equal(Number(last.cost),0);
+  // And the refusal cannot be stacked: repair() is refused by its own state guard, so a
+  // second click writes no second row.
+  const before=runs.length;
+  await assert.rejects(()=>s.repair(t.id),/REPAIRING/);
+  assert.equal(s.store.listRuns(t.id).length,before);
+});
+
+test('the ceiling is checked before a repair agent is started',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const t=await failingTask(s,root);
+  planLongAgo(s,t);
+  for(let i=0;i<5;i++) seedRepair(s,t,`2026-01-0${i+2}T00:00:00.000Z`);
+  let ran=0;
+  s.runRole=async()=>{ran++;throw new Error('no agent may start at the ceiling')};
+  await assert.rejects(()=>s.repair(t.id),/REPAIR_LIMIT/);
+  assert.equal(ran,0,'the cheapest refusal is the one that spends nothing');
+});
+
+test('a repair that changed nothing still spends a turn',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const t=await failingTask(s,root);
+  // The mock writes nothing now, so the repair's delta is empty and the findings are
+  // left unanswered - the one outcome a counter of "repairs that acted" would miss.
+  s.updateProvider('mock',{config:{writes:[],reviewText:'The retry path was never exercised.',reviewVerdict:'FAIL'}});
+  planLongAgo(s,t);
+  const rested=await s.repair(t.id);
+  assert.equal(rested.state,'REVIEWING','a repair that changed nothing rests where a review can be asked for');
+  assert.match(s.task(t.id).review,/changed nothing/);
+  assert.equal(s.store.listRuns(t.id).filter(r=>r.role==='repair'&&r.provider_id).length,1);
+  // A run was spent discovering there was nothing to change, so it counts as one.
+  s.saveRouting({...s.getRouting(),repair:{...s.getRouting().repair,maxRepairs:1}});
+  s.transition(t.id,'REPAIRING');
+  await assert.rejects(()=>s.repair(t.id),/REPAIR_LIMIT/);
+});
+
+test('retry is refused at the ceiling, and raising the ceiling is the way back in',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const t=await failingTask(s,root);
+  planLongAgo(s,t);
+  for(let i=0;i<5;i++) seedRepair(s,t,`2026-01-0${i+2}T00:00:00.000Z`);
+  await assert.rejects(()=>s.repair(t.id),/REPAIR_LIMIT/);
+  assert.equal(s.task(t.id).state,'FAILED');
+  // The refusal row is not a repair turn: were it counted, the count would read six
+  // against a ceiling of five and raising the number by one would buy nothing.
+  const before=s.store.listRuns(t.id).length;
+  await assert.rejects(()=>s.retry(t.id),/REPAIR_LIMIT/);
+  assert.equal(s.task(t.id).state,'FAILED','a refused retry leaves the task where it was');
+  assert.equal(s.task(t.id).review,'The retry path was never exercised.','and leaves the findings a replan reads');
+  assert.equal(s.store.listRuns(t.id).length,before,'and writes no row of its own');
+  // One more turn, bought deliberately. The test command is what a retry would otherwise
+  // spend before discovering the same ceiling at the far end of it.
+  s.saveRouting({...s.getRouting(),repair:{...s.getRouting().repair,maxRepairs:6}});
+  s.updateProvider('mock',{config:{writes:['app.mjs'],reviewText:'Now it is exercised.',reviewVerdict:'PASS'}});
+  const done=await s.retry(t.id);
+  assert.equal(done.state,'COMPLETE');
+});
+
+test('a replan hands the planner the review that failed, and the next plan spends it',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const t=await failingTask(s,root);
+  planLongAgo(s,t);
+  for(let i=0;i<5;i++) seedRepair(s,t,`2026-01-0${i+2}T00:00:00.000Z`);
+  await assert.rejects(()=>s.repair(t.id),/REPAIR_LIMIT/);
+  const findings=s.task(t.id).review;
+  assert.equal(findings,'The retry path was never exercised.');
+  // The recommended exit, and the only one that changes the input: findings that have
+  // outlived five repairs are the one thing a new plan can act on, so the review
+  // outlives the replan rather than being nulled with the plan it answered.
+  s.replan(t.id);
+  assert.equal(s.task(t.id).review,findings,'the review survives the replan');
+  assert.equal(s.task(t.id).plan,null);
+  const ctx=buildTaskContext(s.project(t.project_id),s.task(t.id),{role:'planner',cwd:root,store:s.store});
+  assert.equal(ctx.review,findings,'and reaches the planner, which is who it is kept for');
+  assert.match(JSON.stringify(ctx),/The retry path was never exercised\./,'in the text the model is sent');
+  const after=await s.plan(t.id);
+  assert.equal(after.state,'AWAITING_APPROVAL');
+  assert.equal(s.task(t.id).review,null,'and the plan that replaced it spends it');
+  // A first plan is unaffected: with no review on the row, nothing is added to it.
+  const freshRoot=repo();
+  const fresh=new Service(freshRoot,{allowMock:true,silent:true});
+  const fp=fresh.initProject('p',freshRoot);
+  const ft=fresh.createTask(fp.id,'y');
+  assert.equal(buildTaskContext(fresh.project(fp.id),ft,{role:'planner'}).review,null);
+});
+
+test('a new plan revision starts the repair count over',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const t=await failingTask(s,root);
+  planLongAgo(s,t);
+  for(let i=0;i<5;i++) seedRepair(s,t,`2026-01-0${i+2}T00:00:00.000Z`);
+  // The same five repairs, against a plan that landed after them. They were answering a
+  // plan that no longer exists, so none of them is a turn spent on this one - which is
+  // what makes Replan an exit rather than a longer way round to the same refusal.
+  s.store.updateTask(t.id,{plan_at:'2026-02-01T00:00:00.000Z'});
+  const after=await s.repair(t.id);
+  assert.equal(s.store.listRuns(t.id).filter(r=>r.role==='repair'&&r.provider_id).length,6,'the sixth repair ran');
+  assert.equal(after.state,'REPAIRING','and left the task where a failing verification leaves it');
+});
+
+test('a cancelled repair is not a turn spent',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const t=await failingTask(s,root);
+  planLongAgo(s,t);
+  for(let i=0;i<5;i++) seedRepair(s,t,`2026-01-0${i+2}T00:00:00.000Z`,{status:'cancelled'});
+  // The user stopped these before they could act, and a ceiling reachable by cancelling
+  // is a ceiling that punishes the party who was paying attention.
+  const after=await s.repair(t.id);
+  assert.equal(s.store.listRuns(t.id).filter(r=>r.role==='repair'&&r.provider_id).length,6);
+  assert.equal(after.state,'REPAIRING');
+});
+
+test('the repair ceiling reaches a routing.json that predates it, and a fresh install',()=>{
+  const root=repo();
+  fs.mkdirSync(path.join(root,'.ai-code'),{recursive:true});
+  // A file written before the key existed. normalize() merges per role key by key, so
+  // an absent budget is picked up from the defaults rather than being lost.
+  fs.writeFileSync(path.join(root,'.ai-code','routing.json'),JSON.stringify({repair:{timeout:1},planner:{timeout:1}}));
+  const s=new Service(root,{allowMock:true,silent:true});
+  assert.equal(s.getRouting().repair.maxRepairs,5);
+  assert.equal(s.getRouting().repair.timeout,1,'and the keys the file did name are still the file\'s');
+  const fresh=new Service(repo(),{allowMock:true,silent:true});
+  assert.equal(fresh.getRouting().repair.maxRepairs,5,'a fresh install gets the ceiling too');
+});
+
+// -- what the spend bought ---------------------------------------------------
+
+test('usage totals the spend that bought nothing',()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);const t=s.createTask(p.id,'x');
+  const at=(i)=>new Date(Date.UTC(2026,0,1,0,0,i)).toISOString();
+  const add=(id,o)=>{
+    s.store.addRun({id,taskId:t.id,role:o.role||'implementer',providerId:o.provider===undefined?'a':o.provider,modelId:'m',status:'running',startedAt:at(o.i)});
+    s.store.updateRun(id,{status:o.status||'succeeded',cost:o.cost||0,tokens:o.tokens||0,context_tokens:o.ctx||0,fallback_from:o.fallback||null,error:o.error||null});
+  };
+  add('ok',{i:0,cost:1,tokens:100,ctx:900});
+  add('failed',{i:1,cost:2,status:'failed',error:'COST_LIMIT over its ceiling'});
+  add('fallback',{i:2,cost:0.5,fallback:'a'});
+  add('repair',{i:3,cost:0.25,role:'repair'});
+  // A repair ceiling's own row: provider-less, because nothing was asked of a model,
+  // and so it is not a run that cost anything or a turn anyone spent.
+  add('refusal',{i:4,cost:0,role:'repair',provider:null,status:'failed',error:'REPAIR_LIMIT: enough'});
+  const u=s.usage('all');
+  assert.equal(u.totals.cost,3.75,'the refusal is not priced and not counted');
+  assert.equal(u.totals.runs,4);
+  assert.equal(u.totals.failed,1);
+  assert.equal(u.totals.failed_cost,2);
+  assert.equal(u.totals.fallbacks,1);
+  assert.equal(u.totals.fallback_cost,0.5);
+  assert.equal(u.totals.repair_runs,1,'the refusal is not a repair turn');
+  assert.equal(u.totals.repair_cost,0.25);
+  // Per row as well as in total: "which provider's failures cost me" is a question a
+  // single total cannot answer.
+  assert.equal(u.by_provider.find(x=>x.provider_id==='a').failed_cost,2);
+  assert.equal(u.by_role.find(r=>r.role==='repair').failed_cost,0);
+  assert.equal(u.by_role.find(r=>r.role==='implementer').failed_cost,2);
+});
+
+// The context object is serialized into every prompt, and a prompt cache matches on a
+// shared prefix - so the order of these keys is bytes, not style. Least volatile first:
+// the project row and its three standing documents are the same string for every run
+// against a project, and files/review/previous/parent change per attempt.
+test('the context is serialized least-volatile first, so prompts share a prefix',()=>{
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);const t=s.createTask(p.id,'x');
+  const ctx=buildTaskContext(s.project(p.id),t,{role:'planner',cwd:root,store:s.store});
+  assert.deepEqual(Object.keys(ctx),['project','tree','architecture','conventions','spec','task','files','review','previous','parent','manifest']);
+  assert.match(JSON.stringify(ctx),/^\{"project":/,'which is the order the provider is sent');
 });
 
 // -- a chat scoped to a task -------------------------------------------------

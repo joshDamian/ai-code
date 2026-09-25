@@ -44,6 +44,11 @@ export const FAILURE_POLICY = {
   CONTEXT_TOO_LARGE: { transient: false, resume: false, health: 'none' },
   TOOL_CALL_LIMIT: { transient: false, resume: false, health: 'none' },
   COST_LIMIT: { transient: false, resume: false, health: 'none' },
+  // The repair ceiling. Same reading as the two above - the harness stopped a cycle
+  // it decided had had enough turns, and every provider involved answered correctly -
+  // so no circuit moves and no fallback is worth trying. It is the one code of the
+  // three that stops a task rather than a run.
+  REPAIR_LIMIT: { transient: false, resume: false, health: 'none' },
   PROVIDER_DOWN: { transient: true, resume: true, health: 'count' },
   TIMEOUT: { transient: true, resume: true, health: 'count' },
   // An endpoint that stopped answering mid-response. Same reading as a timeout - the
