@@ -3357,8 +3357,12 @@ export class Service {
             approxTokens += Math.ceil(txt.length / 4);
             // Streaming frames are the run's pulse and a finished turn is its work;
             // the silence budget watches the first and the total timeout covers both.
+            // tool_progress clears because a tool is actively running — a progress
+            // frame that arrives between the tool_use message and tool execution would
+            // otherwise arm a 120s timer that fires while the tool is still working,
+            // killing the subprocess (exit 137) and stalling the run.
             if (e.type === 'progress') armStall();
-            else if (e.type === 'message' || e.type === 'result' || e.type === 'completed') clearStall();
+            else if (e.type === 'message' || e.type === 'result' || e.type === 'completed' || e.type === 'tool_progress') clearStall();
             if (e.type === 'completed' && e.data?.sessionId) sessionId = e.data.sessionId;
             // Checked as the stream arrives rather than when it ends: the point of
             // a budget is to stop the run that is spiralling, and a run that has to

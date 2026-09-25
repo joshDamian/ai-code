@@ -529,6 +529,24 @@ test('a response that starts and then goes quiet is stopped as stalled',async()=
   assert.equal(s.providerHealthList().find(h=>h.providerId==='wedged').state,'DEGRADED','a stall counts against the provider');
 });
 
+test('a tool_progress event during a long tool clears the stall timer',async()=>{
+  // The stall of fc4cfb2c: a progress frame that arrives after the tool_use message
+  // arms the stall timer, and a tool that takes longer than the stall timeout (e.g.
+  // node --test) was killed because tool_progress events did not clear it.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  // Stream events arm the stall, then a tool runs for 3s — well over the 1s stall.
+  s.addProvider({id:'slow-tool',name:'SlowTool',kind:'mock',enabled:true,config:{routable:true,streamEvents:5,streamMs:200,toolProgressMs:3000,toolProgressEvents:5}});
+  s.addModel({id:'slow-tool-m',providerId:'slow-tool',name:'st',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,stall:1,timeout:60}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const planned=await s.plan(t.id);
+  assert.equal(planned.state,'AWAITING_APPROVAL','a tool running for 3s with a 1s stall budget is not killed');
+  assert.equal(s.store.listRuns(t.id).filter(x=>/STALLED/.test(x.error||'')).length,0,'no stall recorded');
+});
+
 test('a provider that writes nothing until it is done is not read as stalled',async()=>{
   // The guard on the above. A provider that ignores --include-partial-messages emits
   // no frame between blocks, so a silence budget applied to it would kill it while it

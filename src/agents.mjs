@@ -84,6 +84,19 @@ export async function* runMock(input) {
     yield { type: 'stream_event', data: { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 1000, output_tokens: input.mockStreamEvents * 10 } } } };
     yield { type: 'stream_event', data: { type: 'stream_event', event: { type: 'message_stop' } } };
   }
+  // A tool execution that takes real time, in the frames the CLI writes for one:
+  // tool_progress events spread over the duration with no progress frames between
+  // them. This is the shape that triggered the stall in fc4cfb2c: a progress frame
+  // arms the stall timer, and tool_progress events during a long tool (npm test,
+  // node --test) must clear it or the run is killed while the tool is still working.
+  if (input.mockToolProgressMs) {
+    const events = input.mockToolProgressEvents || 3;
+    const gap = Math.max(1, Math.round(input.mockToolProgressMs / events));
+    for (let i = 0; i < events; i++) {
+      if (gap) await sleep(gap, input.signal);
+      yield { type: 'tool_progress', data: { type: 'tool_progress', tool_use_id: 'call_mock_tool', content: `progress ${i + 1}/${events}` } };
+    }
+  }
   // A real agent's stream is mostly tool calls, and the per-role budget counts
   // them. The mock emits them on demand so that budget is exercisable without a
   // provider, in the same shape a claude assistant message carries them.
@@ -611,6 +624,8 @@ export async function* runAgent(provider, model, input) {
         mockStreamEvents: provider.config.streamEvents || 0,
         mockStreamMs: provider.config.streamMs || 0,
         mockStallMs: provider.config.stallMs || 0,
+        mockToolProgressMs: provider.config.toolProgressMs || 0,
+        mockToolProgressEvents: provider.config.toolProgressEvents || 0,
         mockReadPaths: provider.config.readPaths || [],
         mockWrites: provider.config.writes || [],
         mockWriteText: provider.config.writeText || null,
