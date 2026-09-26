@@ -482,7 +482,7 @@ test('the refine route refuses a task that already has a run in flight',async()=
   }finally{srv.stop()}
 });
 
-test('task list passes the project id through and filters by --state',async()=>{const rootA=gitRepo(),rootB=gitRepo();const s=new Service(rootA,{allowMock:true,silent:true});const pa=s.initProject('pa',rootA);const pb=s.initProject('pb',rootB);const t1=s.createTask(pa.id,'in project a, created');const t2=s.createTask(pa.id,'in project a, planning');s.store.updateTask(t2.id,{state:'PLANNING'});const t3=s.createTask(pb.id,'in project b, created');const run=(args)=>new Promise((res)=>{const p=spawn(process.execPath,[cliPath,'task','list',...args],{cwd:rootA,stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});{const {code,out}=await run([pa.id]);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id).sort(),[t1.id,t2.id].sort())}{const {code,out}=await run(['--state','PLANNING']);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id),[t2.id])}{const {code,out}=await run([pa.id,'--state','PLANNING']);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id),[t2.id])}{const {code,err}=await run(['--state','NOT_A_STATE']);assert.equal(code,1);assert.match(err,/Invalid state NOT_A_STATE/);assert.match(err,/CREATED/);assert.match(err,/COMPLETE/)}});
+test('task list passes the project id through and filters by --state',async()=>{const rootA=gitRepo(),rootB=gitRepo();const s=new Service(rootA,{allowMock:true,silent:true});const pa=s.initProject('pa',rootA);const pb=s.initProject('pb',rootB);const t1=s.createTask(pa.id,'in project a, created');const t2=s.createTask(pa.id,'in project a, planning');s.store.updateTask(t2.id,{state:'PLANNING'});const t3=s.createTask(pb.id,'in project b, created');const run=(args)=>new Promise((res)=>{const p=spawn(process.execPath,[cliPath,'task','list',...args],{cwd:rootA,env:{...process.env,AI_CODE_ROOT:rootA},stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});{const {code,out}=await run([pa.id]);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id).sort(),[t1.id,t2.id].sort())}{const {code,out}=await run(['--state','PLANNING']);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id),[t2.id])}{const {code,out}=await run([pa.id,'--state','PLANNING']);assert.equal(code,0);assert.deepEqual(JSON.parse(out).map(r=>r.id),[t2.id])}{const {code,err}=await run(['--state','NOT_A_STATE']);assert.equal(code,1);assert.match(err,/Invalid state NOT_A_STATE/);assert.match(err,/CREATED/);assert.match(err,/COMPLETE/)}});
 
 test('POST /api/tasks/:id/close moves to CANCELLED',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-close-'));git(root,['init','-q']);fs.writeFileSync(path.join(root,'README.md'),'x');git(root,['add','.']);git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);const s=new Service(root,{allowMock:true,silent:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'close me');s.prepare(t.id);const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{const r=await post(`${server.base}/api/tasks/${t.id}/close`);assert.equal(r.status,200);const body=JSON.parse(r.body);assert.equal(body.state,'CANCELLED')}finally{server.stop()}});
 
@@ -490,7 +490,7 @@ test('GET /api/tasks?state=CANCELLED returns closed tasks',async()=>{const root=
 
 test('close refuses a task with a run in flight',async()=>{const {root,taskId}=seeded();const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{await post(`${server.base}/api/tasks/${taskId}/plan`);await post(`${server.base}/api/tasks/${taskId}/approve`);const reading=stream(`${server.base}/api/tasks/${taskId}/stream`,25000);const queued=await post(`${server.base}/api/tasks/${taskId}/execute/background`);await new Promise(r=>setTimeout(r,500));const closeR=await post(`${server.base}/api/tasks/${taskId}/close`);assert.equal(closeR.status,400);assert.match(JSON.parse(closeR.body).error,/task cancel/);await post(`${server.base}/api/tasks/${taskId}/cancel`);const closeR2=await post(`${server.base}/api/tasks/${taskId}/close`);assert.equal(closeR2.status,200)}finally{server.stop()}});
 
-test('ai-code task close exits 0 and prints CANCELLED state',async()=>{const {root,taskId}=seeded();const r=await new Promise((res)=>{const p=spawn(process.execPath,[cliPath,'task','close',taskId],{cwd:root,stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});assert.equal(r.code,0);assert.match(r.out,/CANCELLED/)});
+test('ai-code task close exits 0 and prints CANCELLED state',async()=>{const {root,taskId}=seeded();const r=await new Promise((res)=>{const p=spawn(process.execPath,[cliPath,'task','close',taskId],{cwd:root,env:{...process.env,AI_CODE_ROOT:root},stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});assert.equal(r.code,0);assert.match(r.out,/CANCELLED/)});
 
 // The state an install that added OpenRouter before the catalog changed is in: the
 // retired slug still has a row and the Claude entries were never seeded. Re-running
@@ -503,7 +503,7 @@ test('provider sync re-seeds the openrouter catalog and add-openrouter refuses a
   s.addProvider({id:'openrouter',name:'OpenRouter',kind:'openrouter',enabled:true,config:{apiKeyEnv:'OPENROUTER_API_KEY',effort:'max',routable:true,billingMode:'api'}});
   s.addModel({id:'openrouter:mistralai/codestral-2501',providerId:'openrouter',name:'codestral-2501',capabilities:['coding'],speed:5,quality:5});
   s.addModel({id:'openrouter:anthropic/claude-sonnet-5',providerId:'openrouter',name:'claude-sonnet-5',capabilities:['coding'],speed:1,quality:1,enabled:false});
-  const run=(args)=>new Promise((res)=>{const p=spawn(process.execPath,[cliPath,...args],{cwd:root,stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});
+  const run=(args)=>new Promise((res)=>{const p=spawn(process.execPath,[cliPath,...args],{cwd:root,env:{...process.env,AI_CODE_ROOT:root},stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});
 
   const first=await run(['provider','sync','openrouter']);
   assert.equal(first.code,0);
@@ -1060,7 +1060,7 @@ test('ai-code task create takes --parent without eating the description or the p
   git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
   const s=new Service(root,{allowMock:true,silent:true});
   const p=s.initProject('p',root);
-  const run=(args)=>new Promise((res)=>{const proc=spawn(process.execPath,[cliPath,'task',...args],{cwd:root,stdio:['ignore','pipe','pipe']});let out='',err='';proc.stdout.on('data',c=>out+=c);proc.stderr.on('data',c=>err+=c);proc.on('close',code=>res({code,out,err}))});
+  const run=(args)=>new Promise((res)=>{const proc=spawn(process.execPath,[cliPath,'task',...args],{cwd:root,env:{...process.env,AI_CODE_ROOT:root},stdio:['ignore','pipe','pipe']});let out='',err='';proc.stdout.on('data',c=>out+=c);proc.stderr.on('data',c=>err+=c);proc.on('close',code=>res({code,out,err}))});
   const parent=JSON.parse((await run(['create',p.id,'move the queue into runner.mjs'])).out);
   const created=await run(['create',p.id,'make','it','survive','a','restart','--parent',parent.id]);
   assert.equal(created.code,0,created.err);
@@ -1097,7 +1097,7 @@ test('ai-code task feedback reaches the service rather than falling through the 
   const s=new Service(root,{allowMock:true,silent:true});
   const p=s.initProject('p',root);
   const t=s.createTask(p.id,'build the queue');
-  const r=await new Promise((res)=>{const proc=spawn(process.execPath,[cliPath,'task','feedback',t.id,'do','it','differently'],{cwd:root,stdio:['ignore','pipe','pipe']});let out='',err='';proc.stdout.on('data',c=>out+=c);proc.stderr.on('data',c=>err+=c);proc.on('close',code=>res({code,out,err}))});
+  const r=await new Promise((res)=>{const proc=spawn(process.execPath,[cliPath,'task','feedback',t.id,'do','it','differently'],{cwd:root,env:{...process.env,AI_CODE_ROOT:root},stdio:['ignore','pipe','pipe']});let out='',err='';proc.stdout.on('data',c=>out+=c);proc.stderr.on('data',c=>err+=c);proc.on('close',code=>res({code,out,err}))});
   assert.equal(r.code,1);
   assert.match(r.err,/COMPLETE/);
   assert.doesNotMatch(r.err,/Unhandled task operation/);
