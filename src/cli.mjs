@@ -64,6 +64,7 @@ Automation
   automation add <name> <trigger> <action>
   doctor
   dashboard
+  web
   tui`;
 
 // The Claude Code catalog. Every model runs through the same binary, so all of
@@ -145,7 +146,7 @@ async function enqueueRemote(taskId, kind) {
       body: JSON.stringify({ background: true }),
     });
   } catch {
-    throw new Error(`no dashboard server on :${port}; start one with \`ai-code dashboard\`, or drop --background`);
+    throw new Error(`no dashboard server on :${port}; start one with \`ai-code web\`, or drop --background`);
   }
   const j = await res.json();
   if (!res.ok) throw new Error(j.error || `server returned ${res.status}`);
@@ -343,6 +344,68 @@ async function shellCommand(providerId, args) {
   process.exitCode = code ?? 1;
 }
 
+// One readiness attempt, bounded. A port held by something that accepts the
+// connection and then never answers does not fail the request, it hangs it.
+async function reachable(path, ms = 1000) {
+  try {
+    return await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(ms) });
+  } catch {
+    return null;
+  }
+}
+
+// The TUI's own wait, for the same reason it has one: a start is asynchronous, and
+// the browser should open on a dashboard rather than on whatever the browser does
+// with a refused connection.
+async function waitForServer(attempts = 25) {
+  for (let i = 0; i < attempts; i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    if ((await reachable('/api/overview'))?.ok) return true;
+  }
+  return false;
+}
+
+function openInBrowser(url) {
+  out(`AI Code Mission Control: ${url}`);
+  // Darwin has a command for this. Elsewhere the URL above is the answer, which is
+  // what a terminal on those platforms does with it anyway.
+  if (process.platform === 'darwin') spawn('open', [url], { stdio: 'ignore', detached: true }).unref();
+}
+
+// `ai-code web` - the dashboard, opened, with a server started if there is not one.
+//
+// The ladder is ordered by how much has to be done: a server already answering, then
+// a supervisor holding the port on its behalf, then starting one here. It is the
+// counterpart to the dashboard's own Start button, for the person at a terminal
+// rather than in a browser - which is also the answer the stopped panel gives, so the
+// two name the same command.
+async function webCommand() {
+  const url = `http://localhost:${port}`;
+  if ((await reachable('/api/overview'))?.ok) return openInBrowser(url);
+
+  const sup = await reachable('/api/supervisor/status');
+  if (sup?.ok && sup.headers.get('x-ai-code-supervisor')) {
+    // The supervisor owns the listener, so the supervisor is the process that has to
+    // spawn the server - this one cannot bind a port that is already bound.
+    const started = await fetch(`http://127.0.0.1:${port}/api/supervisor/start`, { method: 'POST' }).catch(() => null);
+    if (!started?.ok) throw new Error(`the supervisor on :${port} refused the start (${started ? started.status : 'no answer'})`);
+    if (await waitForServer()) return openInBrowser(url);
+    throw new Error(`the server did not come up on :${port}; its output is in the supervisor's log`);
+  }
+
+  // Nothing is listening and nothing can be asked to start one, so this starts it.
+  // Detached, because a command that opened a browser and then held the terminal
+  // would be `dashboard` with a surprise in it.
+  const child = spawn(process.execPath, [new URL('./server.mjs', import.meta.url).pathname], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, AI_CODE_ROOT: process.env.AI_CODE_ROOT || s.root, PORT: String(port) },
+  });
+  child.unref();
+  if (await waitForServer()) return openInBrowser(url);
+  throw new Error(`the server did not come up on :${port}; run \`ai-code dashboard\` to see why`);
+}
+
 async function main() {
   const [cmd, sub, ...rest] = a;
 
@@ -458,11 +521,13 @@ async function main() {
   if (cmd === 'doctor') return out(await s.doctor());
 
   // `dashboard` starts the server in this process; `tui` starts the server too if
-  // it cannot find one already listening.
+  // it cannot find one already listening; `web` opens the dashboard in a browser,
+  // starting a server behind it if one is not already there.
   if (cmd === 'dashboard') {
     await import('./server.mjs');
     return;
   }
+  if (cmd === 'web') return webCommand();
   if (cmd === 'tui') {
     const { startTUI } = await import('./tui/app.mjs');
     return startTUI(s);

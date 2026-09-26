@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>AI Code — server stopped</title>
+<meta name="theme-color" content="#0a0c10" />
+<link rel="icon" href="/icons/icon-192.png" type="image/png" />
+<!-- The page the supervisor serves while the dashboard is down, and the only page in
+     this app that is not part of the SPA bundle. It cannot be: the bundle is served by
+     the server, and the server is the thing that is not running. So it is standalone
+     on purpose - no import map, no module graph, nothing to fetch but this file - and
+     the ~20 lines it shares with web/components/server-panel.mjs are two surfaces for
+     two situations rather than one component that could render both. -->
+<style>
+:root{--bg:#0a0c10;--panel:#11151b;--line:#29313c;--text:#edf2f7;--muted:#8e9aaa;--accent:#9fb9ff;--bad:#ff8585;--warn:#ffd37a;--good:#6fe0a1;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+.gate{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+.card{display:flex;flex-direction:column;gap:12px;width:100%;max-width:400px;padding:24px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
+.logo-title{font-weight:800;font-size:20px;letter-spacing:.14em}
+.logo-sub{color:var(--muted);font-size:12px;margin-top:-8px}
+.status{display:flex;align-items:center;gap:8px;font-weight:650;margin-top:8px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--bad);flex:0 0 auto}
+.dot.busy{background:var(--warn)}
+.dot.up{background:var(--good)}
+p{margin:0;color:var(--muted)}
+code{background:#0b0e12;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text)}
+.btn{background:var(--accent);color:#0b0d10;border:0;border-radius:6px;padding:10px 16px;font-weight:650;font-size:14px;cursor:pointer;transition:opacity .15s}
+.btn:hover{opacity:.9}
+.btn:disabled{opacity:.5;cursor:default}
+.btn:focus-visible{outline:2px solid #4a6fa5;outline-offset:2px}
+.err{color:var(--bad);font-size:13px}
+.err[hidden]{display:none}
+</style>
+</head>
+<body>
+  <div class="gate">
+    <div class="card">
+      <div>
+        <div class="logo-title">AI CODE</div>
+        <div class="logo-sub">Mission Control</div>
+      </div>
+      <div class="status"><span class="dot" id="dot"></span><span id="line">The dashboard server is not running</span></div>
+      <p>
+        This page is being served by the supervisor, which holds the port while the dashboard is down. Starting the
+        server from here hands the port over to it.
+      </p>
+      <button class="btn" id="start" type="button">Start server</button>
+      <div class="err" id="err" hidden></div>
+      <p>Or run <code>ai-code web</code> in a terminal.</p>
+    </div>
+  </div>
+<script>
+  var btn = document.getElementById('start');
+  var dot = document.getElementById('dot');
+  var line = document.getElementById('line');
+  var err = document.getElementById('err');
+  var timer = null;
+  var deadline = 0;
+
+  function fail(message) {
+    err.textContent = message;
+    err.hidden = false;
+    btn.disabled = false;
+    btn.textContent = 'Start server';
+    dot.className = 'dot';
+    line.textContent = 'The dashboard server is not running';
+  }
+
+  // Polled rather than awaited: the start answers 202 long before the server answers
+  // anything, because handing the port over is not the same as having a server on it.
+  // A 200 here is the server itself - this page's own responses all carry a header the
+  // server does not send - and a reload is how the dashboard is reached from here.
+  function poll() {
+    clearInterval(timer);
+    deadline = Date.now() + 30000;
+    timer = setInterval(function () {
+      fetch('/api/overview', { cache: 'no-store' })
+        .then(function (res) {
+          if (res.ok) {
+            clearInterval(timer);
+            location.reload();
+          } else if (Date.now() > deadline) {
+            clearInterval(timer);
+            fail('The server did not come up. Its output is in the supervisor\'s log.');
+          }
+        })
+        .catch(function () {
+          // Still starting: the port is briefly bound by nobody.
+        });
+    }, 1000);
+  }
+
+  btn.addEventListener('click', function () {
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+    err.hidden = true;
+    dot.className = 'dot busy';
+    line.textContent = 'Starting the server…';
+    fetch('/api/supervisor/start', { method: 'POST' })
+      .then(function (res) {
+        if (res.status === 409) return; // Another tab asked first.
+        if (!res.ok) throw new Error('the supervisor refused the start (' + res.status + ')');
+        poll();
+      })
+      .catch(function (e) {
+        fail(e.message);
+      });
+  });
+</script>
+</body>
+</html>

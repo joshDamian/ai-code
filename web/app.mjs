@@ -15,6 +15,7 @@ import { Routing } from './views/routing.mjs';
 import { Runs } from './views/runs.mjs';
 import { Usage } from './views/usage.mjs';
 import { Settings, TokenGate } from './views/settings.mjs';
+import { ServerPanel } from './components/server-panel.mjs';
 import { notificationsUrl } from './api.mjs';
 
 const GO = { o: '#/overview', t: '#/tasks', c: '#/chat', p: '#/providers', r: '#/runs' };
@@ -73,6 +74,15 @@ function App() {
   // loopback, so no request from this machine can be refused for the want of a token.
   // A phone sees it once, before it has paired.
   const [unpaired, setUnpaired] = useState(false);
+  // How the last API call found the server, reported on every transition. Null until
+  // something has been asked, so a page that has just rendered does not flash a
+  // stopped panel before its first request has had a chance to fail.
+  const [link, setLink] = useState(null);
+  // Derived here rather than beside the effect that sets them, because the effects
+  // below read both while rendering - a const declared after them would be in the
+  // temporal dead zone when their dependency arrays are evaluated.
+  const serverDown = link ? !link.up : false;
+  const supervisorUp = !!link?.supervisor;
 
   // The keydown listener is bound once; keep the current legend state where it
   // can read it without rebinding on every toggle.
@@ -207,7 +217,10 @@ function App() {
   useEffect(() => {
     // Nothing to watch for while unpaired: the stream would 401 and retry forever,
     // and every frame it did carry would be for a session this browser cannot read.
-    if (unpaired) return undefined;
+    // And nothing while the server is down: EventSource reconnects on a timer, so a
+    // stream opened against a stopped server is a request every few seconds, forever,
+    // against a port that has nothing behind it.
+    if (unpaired || serverDown) return undefined;
     requestPermission();
     const es = new EventSource(notificationsUrl());
     es.addEventListener('run-end', (e) => {
@@ -219,7 +232,7 @@ function App() {
       }
     });
     return () => es.close();
-  }, [unpaired]);
+  }, [unpaired, serverDown]);
 
   // A push notification tapped while the app is already open. The service worker
   // finds the window rather than opening a second copy, and this is what routes that
@@ -238,6 +251,12 @@ function App() {
     const onUnauthorized = () => setUnpaired(true);
     window.addEventListener('ai-code:unauthorized', onUnauthorized);
     return () => window.removeEventListener('ai-code:unauthorized', onUnauthorized);
+  }, []);
+
+  useEffect(() => {
+    const onConnectivity = (e) => setLink(e.detail);
+    window.addEventListener('ai-code:connectivity', onConnectivity);
+    return () => window.removeEventListener('ai-code:connectivity', onConnectivity);
   }, []);
 
   // The pairing screen, and the one early return in this component. It replaces the
@@ -288,12 +307,17 @@ function App() {
       view = html`<${Overview} navigate=${navigate} />`;
   }
 
+  // The server this page was loaded from is gone. Every view would render an error per
+  // call it makes - and keep making them on its own poll - so the routed view is
+  // replaced by the one screen that can say what happened and offer to fix it.
+  if (serverDown) view = html`<${ServerPanel} supervisorUp=${supervisorUp} />`;
+
   const navRoute = route.view === 'task-detail' ? 'tasks' : route.view === 'chat-detail' ? 'chat' : route.view === 'project' ? 'projects' : route.view;
   const title = route.view === 'task-detail' || route.view === 'chat-detail' || route.view === 'project' ? pageTitle : null;
 
   return html`
     <${Fragment}>
-      <${Layout} route=${navRoute} title=${title}>
+      <${Layout} route=${navRoute} title=${title} serverDown=${serverDown}>
         ${view}
       <//>
       <${ShortcutLegend} open=${legendOpen} onClose=${() => setLegendOpen(false)} />

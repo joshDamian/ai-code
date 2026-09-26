@@ -1219,8 +1219,16 @@ test('shell names a provider it does not know',async()=>{
 
 // One request with headers this test chooses. `get` above cannot send a Host or an
 // Authorization, and both are the whole subject here.
-function withHeaders(url,headers={}){
-  return new Promise((res,rej)=>{const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname+u.search,headers},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.end()});
+function withHeaders(url,headers={},method='GET'){
+  return new Promise((res,rej)=>{const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname+u.search,method,headers},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.end()});
+}
+
+// Waits for a spawned process to exit, and answers null when it outlives the
+// deadline. `close` rather than `exit` because the assertions below are about a
+// server that stopped, and a process still holding a socket has not.
+function waitExit(proc,ms){
+  if(proc.exitCode!==null||proc.signalCode)return Promise.resolve({code:proc.exitCode,signal:proc.signalCode});
+  return new Promise((res)=>{const t=setTimeout(()=>res(null),ms);proc.once('close',(code,signal)=>{clearTimeout(t);res({code,signal})})});
 }
 
 // The token the server prints, read off its own stdout. A test that invented its own
@@ -1521,4 +1529,65 @@ test('a run already in flight when the server starts is announced when it ends',
     assert.equal(ends[0].data.run.id,'inflight');
     assert.equal(ends[0].data.task.id,taskId,'the frame names the task, which is what a notification deep-links to');
   }finally{viewer.close();server.stop()}
+});
+
+// ---------------------------------------------------------------------------
+// The server's own control surface: what it is, and how it is stopped.
+
+test('the status route reports the process, and only to a caller on loopback',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-status-'));
+  const s=await startedWithToken(root);
+  try{
+    const r=await withHeaders(`${s.base}/api/server/status`,{host:'localhost:'+s.port});
+    assert.equal(r.status,200);
+    const st=JSON.parse(r.body);
+    assert.equal(st.pid,s.proc.pid,'the pid is the process a Stop button would be ending');
+    assert.equal(st.port,s.port,'the bound port, which is the one the dashboard is on');
+    assert.equal(st.host,'127.0.0.1');
+    assert.equal(st.root,root,'the root is the checkout, which is what names the database being served');
+    assert.equal(typeof st.startedAt,'number');
+    assert.ok(st.uptimeMs>0&&st.uptimeMs<60000,`uptimeMs read ${st.uptimeMs} just after startup`);
+    // Both are empty here; the shape is the point, because the Settings card renders
+    // the two numbers and a missing key would render as undefined rather than as zero.
+    assert.deepEqual(st.jobs,{queued:0,running:0});
+    // The status route sits behind the same gate as every other /api route, so it is
+    // never a way to read the machine without pairing - and never a way to read the
+    // token itself.
+    assert.equal(JSON.stringify(st).includes(s.token),false,'the status route must not repeat the token');
+
+    assert.equal((await withHeaders(`${s.base}/api/server/status`,TS_HOST)).status,401);
+    assert.equal((await withHeaders(`${s.base}/api/server/status`,{...TS_HOST,authorization:`Bearer ${s.token}`})).status,200);
+  }finally{s.stop()}
+});
+
+test('a loopback shutdown answers first, then takes the server down',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-shutdown-'));
+  const s=await startedWithToken(root);
+  // The reply arrives before the shutdown runs, which is the whole reason this is a
+  // 202 rather than a 200: a client that got no answer could not tell a stop that
+  // worked from a socket that was closed under it.
+  const r=await withHeaders(`${s.base}/api/server/shutdown`,{host:'localhost:'+s.port},'POST');
+  assert.equal(r.status,202);
+  assert.deepEqual(JSON.parse(r.body),{stopping:true});
+
+  const exited=await waitExit(s.proc,7000);
+  assert.ok(exited,'the server was still running seven seconds after it was told to stop');
+  assert.equal(exited.code,0,`expected a clean exit, got ${JSON.stringify(exited)}`);
+  // The port is the thing that has to be free: a process that exited but left the
+  // listener to a child would answer here, and the next start would find the port busy.
+  assert.equal(await probe(`${s.base}/api/overview`),null,'the port is still held after the server stopped');
+});
+
+test('a phone holding a valid token cannot stop the server',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-shutdown-remote-'));
+  const s=await startedWithToken(root);
+  try{
+    const r=await withHeaders(`${s.base}/api/server/shutdown`,{...TS_HOST,authorization:`Bearer ${s.token}`},'POST');
+    // The same narrowing the terminal route applies: a valid token is permission to
+    // reach the API, not to end the machine's dashboard - which on a phone in a pocket
+    // is a stop nobody meant to press.
+    assert.equal(r.status,403);
+    assert.match(JSON.parse(r.body).error,/this machine/);
+    assert.equal((await get(`${s.base}/api/overview`)).status,200,'a refused stop left the server running');
+  }finally{s.stop()}
 });

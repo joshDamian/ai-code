@@ -832,6 +832,23 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .token-hint{margin:0;font-size:13px;line-height:1.55;color:var(--muted)}
 .token-hint code{color:var(--text);background:var(--panel3);padding:1px var(--space-1);border-radius:4px;overflow-wrap:anywhere}
 .token-error{font-size:13px;color:var(--bad)}
+/* ---- server control ----
+   The stopped panel shares the pairing screen's centring, because it is the same
+   kind of screen: one card, one thing to do, nothing else to navigate to. The dot
+   is the same 8px mark the provider cards use, under its own name - the header
+   carries one too, and it is the dashboard's own machine that it reports on. */
+.server-panel{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:var(--space-5)}
+.server-card{display:flex;flex-direction:column;gap:var(--space-3);width:100%;max-width:440px;padding:var(--space-6)}
+.server-card .logo-title{font-size:20px;letter-spacing:.14em}
+.server-card p{margin:0;font-size:13px;line-height:1.55}
+.server-card code{color:var(--text);background:var(--panel3);padding:1px var(--space-1);border-radius:4px;overflow-wrap:anywhere}
+.server-status{display:flex;align-items:center;gap:var(--space-2);font-weight:650}
+.status-dot{display:inline-block;flex:0 0 auto;width:8px;height:8px;border-radius:50%}
+.status-dot.good{background:var(--good)}
+.status-dot.warn{background:var(--warn)}
+.status-dot.bad{background:var(--bad)}
+/* In the header it follows the title, so it needs the gap the title does not have. */
+.header-title>.status-dot{margin-left:var(--space-3);vertical-align:middle}
 </style>
 </head>
 <body>

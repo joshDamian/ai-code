@@ -4,6 +4,24 @@
 
 import { authHeaders, withToken, reportUnauthorized } from './auth.mjs';
 
+// Whether the server is there, reported as an event on every transition.
+//
+// Every call in the app goes through `request`, so the answer is already known here -
+// and the app needs it: a dashboard loaded from a service-worker cache outlives the
+// process that served it, and without this it renders one failed request per view with
+// nothing to say about why. An event rather than a return value, because a dozen calls
+// are in flight at once and all of them are answered by the same screen.
+//
+// On transitions only: the overview poll runs every three seconds and a browser that
+// re-rendered the shell on each one would never settle.
+let last = '';
+function reportConnectivity(up, supervisor = false) {
+  const key = `${up}:${supervisor}`;
+  if (key === last) return;
+  last = key;
+  window.dispatchEvent(new CustomEvent('ai-code:connectivity', { detail: { up, supervisor } }));
+}
+
 async function request(path, opts = {}) {
   const init = { ...opts };
   // Empty on desktop, where the server exempts loopback and no token is needed.
@@ -17,8 +35,17 @@ async function request(path, opts = {}) {
   try {
     res = await fetch(path, init);
   } catch (e) {
+    reportConnectivity(false);
     throw new Error(`Network error: ${e.message}`);
   }
+
+  // The supervisor holds the port while the server is down, and it answers 404 to
+  // everything under /api - a 404 that is not "no such route" but "no server". The
+  // header it puts on every response is the only way to tell the two apart, and
+  // reading it before the status is what keeps the stopped page from being read as a
+  // server that is up and simply missing a route.
+  if (res.headers.get('x-ai-code-supervisor')) reportConnectivity(false, true);
+  else reportConnectivity(true, false);
 
   const text = await res.text();
   let data = null;
@@ -143,6 +170,16 @@ export const api = {
   runEvents: (id) => request(`/api/runs/${id}/events`),
 
   doctor: () => request('/api/doctor'),
+
+  // The server's own control surface. `shutdown` answers before it stops - a 202 and
+  // then the process goes - so nothing here waits on the server's death; the
+  // connectivity event above is what reports it.
+  serverStatus: () => request('/api/server/status'),
+  serverShutdown: () => request('/api/server/shutdown', { method: 'POST' }),
+  // The supervisor, when one is holding the port. With no supervisor these are 404s
+  // from the server, which callers read as "there is nothing to start it with".
+  supervisorStatus: () => request('/api/supervisor/status'),
+  supervisorStart: () => request('/api/supervisor/start', { method: 'POST' }),
 
   automations: () => request('/api/automations'),
   updateAutomation: (id, body) => request(`/api/automations/${id}`, { method: 'PATCH', body }),

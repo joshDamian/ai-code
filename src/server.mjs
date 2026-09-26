@@ -29,6 +29,11 @@ const terminals = new TerminalSessions({ reapMs: Number(process.env.AI_CODE_TERM
 // not want the feature at all can say so without patching the code.
 const terminalEnabled = !process.env.AI_CODE_DISABLE_TERMINAL;
 const port = Number(process.env.PORT || 4317);
+// When this process started, for the status route. Read from the process rather than
+// recorded on the first request, because the question it answers is "how long has the
+// dashboard been up", and a server that has been idle since it booted has been up the
+// whole time.
+const startedAt = Date.now();
 
 // Where the server binds. Loopback by default, which is what this process has always
 // meant to do and until now did not say - `listen(port)` binds every interface, so the
@@ -539,6 +544,52 @@ const server = http.createServer(async (req, res) => {
         // is the view that answers "what is happening right now".
         jobs: svc.store.activeJobs(),
       });
+    }
+
+    // What this process is, for the Settings card that offers to stop it. It sits
+    // inside the token gate above like every other route, so nothing here is a way
+    // around pairing - and the token itself is deliberately not one of the fields,
+    // because a status endpoint that hands out the secret is a pairing screen with
+    // no reason to exist.
+    if (u.pathname === '/api/server/status') {
+      const active = svc.store.activeJobs();
+      return json(res, {
+        pid: process.pid,
+        // The bound port rather than the requested one: PORT=0 asks the kernel for a
+        // free port, and the number the dashboard is reachable on is the one that
+        // matters to whoever is reading this.
+        port: server.address()?.port ?? null,
+        host,
+        root,
+        startedAt,
+        uptimeMs: Date.now() - startedAt,
+        jobs: {
+          queued: active.filter((j) => j.state === 'queued').length,
+          running: active.filter((j) => j.state === 'running').length,
+        },
+      });
+    }
+
+    // Stop the server from a browser. This is the Ctrl-C below, reached over HTTP,
+    // and it is the only route in this file that ends the process.
+    //
+    // Loopback or nothing: a paired phone holding a valid token is refused, for the
+    // same reason it is refused a terminal - reaching the API is not the same
+    // permission as stopping the machine's dashboard. The token gate above has
+    // already run, so this is the narrower check on top of it.
+    //
+    // Known and accepted: a server the TUI started in-process is this process, so
+    // stopping it from a browser exits the TUI too. The alternative - a stop that
+    // silently does nothing when the TUI owns the port - is worse.
+    if (u.pathname === '/api/server/shutdown') {
+      if (req.method !== 'POST') return json(res, { error: 'not found' }, 404);
+      if (!fromLocalhost(req)) return json(res, { error: 'The server can only be stopped from this machine.' }, 403);
+      // The response goes out before the shutdown does. `shutdown` closes the socket
+      // and arms a force-exit timer, and a timer that fires while this response is
+      // still in the socket buffer would turn a clean stop into a dropped request.
+      json(res, { stopping: true }, 202);
+      setImmediate(shutdown);
+      return;
     }
 
     if (u.pathname === '/api/projects') {

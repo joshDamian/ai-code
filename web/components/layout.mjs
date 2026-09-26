@@ -45,7 +45,13 @@ const COLLAPSED_KEY = 'ai-code.sidebar-collapsed';
 // `title` is the page's own subject (e.g. a task's title), rendered as a
 // breadcrumb after the section name; it is optional, so `route` alone still
 // labels the header.
-export function Layout({ route, title, children }) {
+//
+// `serverDown` is whether the process this page was loaded from is still answering.
+// It is the same fact the content area swaps its view for, carried into the header
+// so the state is legible from any screen - and it is deliberately a plain dot
+// rather than the provider HealthDot: a circuit that opened is one provider being
+// unwell, and this is the dashboard's own machine being gone.
+export function Layout({ route, title, serverDown = false, children }) {
   // Collapsed-ness is a preference, not view state: it survives navigation and
   // reloads so the shell does not snap back open under the user every visit.
   // localStorage throws in some privacy modes, so the read is guarded - a
@@ -154,6 +160,11 @@ export function Layout({ route, title, children }) {
           <div class="header-title">
             ${current ? current.label : ''}
             ${title ? html`<span class="header-sep">/</span><span class="header-crumb">${title}</span>` : null}
+            <span
+              class="status-dot ${serverDown ? 'bad' : 'good'}"
+              title=${serverDown ? 'The dashboard server is not running' : 'The dashboard server is running'}
+              aria-label=${serverDown ? 'The dashboard server is not running' : 'The dashboard server is running'}
+            ></span>
           </div>
         </header>
         <main class="content">${children}</main>

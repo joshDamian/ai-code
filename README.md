@@ -28,6 +28,8 @@ ai-code doctor
 
 The development command always uses the checked-out source. The installed `ai-code` command is the promoted stable version.
 
+Add `--supervisor` to that install to also keep the dashboard startable from its own page while the server is down — see [Starting and stopping the server](#starting-and-stopping-the-server).
+
 ## Register a project
 
 From the AI Code checkout:
@@ -129,6 +131,14 @@ The dashboard:
 ai-code dashboard
 ```
 
+Open it in a browser, starting the server first if it is not up:
+
+```bash
+ai-code web
+```
+
+`web` is the one a desktop shortcut should call. It finds a server already on the port and opens it, asks a supervisor holding the port to start one, and otherwise starts a server itself — so it does the right thing whether or not either is running. `dashboard` is the foreground server, and stays the command for watching its output.
+
 ### Recovering an interrupted plan
 
 A process that dies between its planner run succeeding and the plan being written to the task leaves that task in `Planning` with a plan that exists only in the run's events. Opening the store repairs it, and every command opens the store — the plan is rebuilt from the run's events and put in front of you for approval rather than being paid for again. The one run that finished in the last few seconds is left alone, because its owner is still about to write that same plan itself.
@@ -163,7 +173,7 @@ ai-code task execute <task-id> --background
 The server owns the queue, so this needs one running. With no server on the port it exits non-zero and says so, rather than quietly starting a second one:
 
 ```
-no dashboard server on :4317; start one with `ai-code dashboard`, or drop --background
+no dashboard server on :4317; start one with `ai-code web`, or drop --background
 ```
 
 `task implement`, `task test`, `task review` and `task repair` take `--background` too. A task may have only one job queued or running at a time.
@@ -335,6 +345,32 @@ Push subscription state is in the `push_subscriptions` table, and the VAPID keyp
 ### Reaching it without Tailscale
 
 `AI_CODE_HOST=<tailnet-ip>` plus `AI_CODE_TOKEN=<a-token>` works, and serves plain HTTP. Without a secure context the browser has no service worker and no push, so this is a debug fallback rather than the way to use it. It is also why the bind refuses to start without a named token: that address is reachable by anything on the network.
+
+
+## Starting and stopping the server
+
+A dashboard page is served by the process it is talking to. Stop that process and the page is still in the browser tab, but every request from it now fails — the app notices and replaces the view with a panel that says the server is down and offers to start it. A page opened when nothing is listening gets the same panel, served by whatever holds the port.
+
+The two controls are served from opposite sides of the thing they control:
+
+- **Start** comes from the supervisor — a separate, machine-resident listener that binds the port while the server is down, serves the stopped page, starts the server when asked, then gets out of the way. A page cannot spawn a process, so this is the only way a browser can start one; with nothing holding the port there is no page to serve in the first place.
+- **Stop** lives in the running dashboard, at Settings → Server. The card shows the server's status, port, PID, host, root, uptime and job counts, and stops it after a two-step confirm.
+
+Install the supervisor:
+
+```bash
+./bin/install-ai-code --supervisor
+```
+
+It installs the release as usual and loads a LaunchAgent, `com.ai-code.supervisor`, which holds `http://localhost:4317` and restarts at login. Idempotent — re-running points it at the release just built. Remove it with `./bin/install-ai-code --uninstall-supervisor`; without the agent the dashboard keeps working, and nothing holds the port or restarts the server while it is down.
+
+The supervisor writes to `~/Library/Logs/ai-code/supervisor.log`, and the server it starts writes to `~/Library/Logs/ai-code/server.log`. `ai-code web` is the terminal equivalent of the Start button.
+
+### What stopping does
+
+Stopping is not a pause. It cancels queued jobs, aborts runs in flight, and closes open terminals — the same shutdown `Ctrl-C` performs on the dashboard. Everything on disk survives, because the store, the tasks, the run history and the events are written as the work happens. A cancel is not a failure: the aborted run is recorded as `cancelled`, and its task is left where it can be run again.
+
+Both routes are loopback-only, checked by Host header, so a phone holding a valid API token can neither stop the server on the machine nor start one there. Deciding which process this machine runs is the machine's own business, and a remote caller is in no position to make that call.
 
 
 ## Model registry
