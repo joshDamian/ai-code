@@ -491,7 +491,7 @@ function chatPrompt(history) {
 // "say what is left" is asked for explicitly because the draft is built from that
 // sentence.
 export const SESSION_PROMPT =
-  'Work in this checkout on the instruction below. You are supervised: every action that writes a file or runs a command is sent to the person watching this session, and it happens only if they approve it. Do not try to avoid that gate. A refusal is final for that action - do not retry it, reword it, or reach the same place another way, whether through a different tool, a shell command, or a file you already had permission to edit. If you are refused, stop and say what you were trying to do and why. Do not commit, merge, push, rebase, tag, or open a pull request: those routes into the repository belong to a task, which has a plan, a review and an approval that this session does not. If the work grows into something that wants a plan and a review - more than a small, self-contained change - stop and say so, and describe what is left to do, rather than doing it here.';
+  'Work in this checkout on the instruction below. You are supervised: every action that writes a file or runs a command is sent to the person watching this session and requires live human approval to proceed. Never bypass this gate - there is no workaround. A denial is final for that action - do not retry it, reword it, or reach the same place another way, whether through a different tool, a shell command, or a file you already had permission to edit. If you are denied, stop and say what you were trying to do and why. Do not commit, merge, push, rebase, tag, or open a pull request: those routes into the repository belong to a task, which has a plan, a review and an approval that this session does not. If the work grows task-shaped - more than a small, self-contained change - stop and say so, and describe what is left to do, rather than doing it here.';
 
 // The instruction is the `TASK` half of the prompt runRole builds, so only what
 // came before it belongs here.
@@ -2087,8 +2087,9 @@ export class Service {
       // question is "did this turn change files", and the only tree that can answer
       // it is the one the turn ran in.
       const before = changedInCheckout(project.path);
+      let result;
       try {
-        const result = await this.runRole(
+        result = await this.runRole(
           // A session's run belongs to no task, and `runRole` writes it to
           // `session_runs` rather than to `runs` - see the sessionId option below.
           // So this is not a task row and is not read as one: it is what runRole
@@ -2117,18 +2118,20 @@ export class Service {
             },
           }
         );
-        const run = this.store.getSessionRun(result.runId);
-        // The session's lifetime spend, which is what the list and the budget meter
-        // both read. Read-modify-write rather than an increment, because the store's
-        // update takes the whole row and this is the only writer that moves it.
-        this.store.updateSession(sessionId, {
-          budget_tally: (this.store.getSession(sessionId)?.budget_tally || 0) + (result.cost || 0),
-        });
-        this.#recordShape(sessionId, result.runId, run, project.path, before);
-        return result;
       } finally {
+        // Budget is tallied whether the run succeeded or was cancelled: the cost is
+        // written to session_runs either way, and the session's lifetime total must
+        // reflect it. This is in finally so cancelled runs do not slip past.
+        if (result) {
+          const run = this.store.getSessionRun(result.runId);
+          this.store.updateSession(sessionId, {
+            budget_tally: (this.store.getSession(sessionId)?.budget_tally || 0) + (result.cost || 0),
+          });
+          this.#recordShape(sessionId, result.runId, run, project.path, before);
+        }
         this.#settleSession(sessionId);
       }
+      return result;
     } finally {
       this.sessionBusy.delete(sessionId);
     }
@@ -2394,7 +2397,7 @@ export class Service {
   // approval queue exactly as every other proposal does. What is new is only the
   // input: a pass with a focus is asked to describe the work that already happened
   // rather than to guess at work that has not.
-  draftSessionTask(sessionId) {
+  async draftSessionTask(sessionId) {
     const s = this.sessionById(sessionId);
     const project = this.project(s.project_id);
     const last = this.store.listSessionRuns(sessionId).filter((r) => r.status === 'succeeded').pop();
@@ -2415,11 +2418,33 @@ export class Service {
       content: `Draft the tasks that describe the work this session did in the checkout.`,
       runId,
     });
+    // Run the proposals prompt immediately to draft the tasks.
+    const result = await this.runRole(
+      {
+        id: null,
+        project_id: project.id,
+        title: `Task from session: ${s.name}`,
+        description: focus || s.name,
+        plan: SESSION_NO_PLAN,
+      },
+      'chat',
+      PROPOSALS_PROMPT(SESSION_NO_PLAN, '', focus),
+      project.path,
+      [],
+      { runId, chatSessionId: chat.id }
+    );
+    const text = this.finalText(result.runId).trim();
+    const parsed = draftPayload(text, (x) => {
+      const tasks = draftTasks(x.tasks);
+      return tasks.length ? { tasks } : null;
+    });
+    this.store.addChatMessage({ id: this.store.id(), sessionId: chat.id, role: 'assistant', content: text || 'The model returned no proposals.', runId: result.runId });
+    const drafts = parsed ? this.addDrafts(project.id, parsed.tasks, 'proposal') : [];
     // The session is done as a session. Its work is on its way to a task, which is
     // the only thing that can review and land it, and a session left running beside
     // that task would be a second agent editing the same files.
     this.store.updateSession(sessionId, { status: 'stopped', nudge_dismissed: 1 });
-    return { project, chatSession: this.chatSession(chat.id) };
+    return { project: this.project(project.id), chatSession: this.chatSession(chat.id), drafts };
   }
 
   // -- execution ------------------------------------------------------------

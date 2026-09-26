@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -4465,6 +4465,20 @@ test('the chat is told the two things the planner is told',()=>{
   assert.match(CHAT_PROMPT,/ambiguous/i);
 });
 
+test('SESSION_PROMPT is pinned with its key guidance',()=>{
+  // Work in the checkout under live approval: the core constraint is that every
+  // action is gated. Denial is final, not a request to refine.
+  assert.match(SESSION_PROMPT,/live human approval/i);
+  assert.match(SESSION_PROMPT,/never bypass/i);
+  assert.match(SESSION_PROMPT,/denial.*final/i);
+  // Dev actions only: sessions do not commit, merge, port, or publish.
+  assert.match(SESSION_PROMPT,/do not commit/i);
+  assert.match(SESSION_PROMPT,/merge/i);
+  // Stop and draft when work is task-shaped: this is the nudge trigger.
+  assert.match(SESSION_PROMPT,/task-shaped/i);
+  assert.match(SESSION_PROMPT,/stop/i);
+});
+
 test('a chat turn stores its answer and leaves no task behind it',async()=>{
   const root=repo();const s=new Service(root,{allowMock:true,silent:true});
   const p=s.initProject('p',root);
@@ -5706,6 +5720,33 @@ test('the daily cap refuses a turn before it starts', async () => {
   s.askSession(session.id, 'Now go.');
   const result = await s.sessionTurn(session.id);
   assert.equal(result.runId, s.sessionById(session.id).pending_run_id || result.runId);
+});
+
+test('draftSessionTask drafts a task-shaped session run into the proposals queue', async()=>{
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  // A provider that can run sessions.
+  s.addProvider({id:'session-provider',name:'Session',kind:'mock',enabled:true,config:{routable:true}});
+  s.addModel({id:'session-m',providerId:'session-provider',name:'session',capabilities:['coding'],speed:10,quality:10,cost:0,contextLength:100000});
+  // A provider that can draft proposals.
+  const chatText='The session wrote a file.\n\n```json\n{"tasks":[{"title":"Review session changes","description":"Check what the session wrote in hello.txt"}]}\n```';
+  s.addProvider({id:'chat-provider',name:'Chat',kind:'mock',enabled:true,config:{routable:true,chatText}});
+  s.addModel({id:'chat-m',providerId:'chat-provider',name:'chat',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const session=s.createSession(p.id,'draft session');
+  s.askSession(session.id,'write hello.txt');
+  await s.sessionTurn(session.id);
+  // The turn has completed; draft it into a task proposal.
+  const draftResult=await s.draftSessionTask(session.id);
+  assert.ok(draftResult.chatSession,'a chat session was created for the proposals');
+  assert.equal(draftResult.chatSession.project_id,p.id);
+  // The session is now stopped, not available for new instructions.
+  const stoppedSession=s.sessionById(session.id);
+  assert.equal(stoppedSession.status,'stopped');
+  // The project has a draft in its proposal queue.
+  const project=s.project(p.id);
+  assert.ok(project.drafts.length>0,'a draft was added to the project');
 });
 
 test('the reaper clears a session whose process died', () => {

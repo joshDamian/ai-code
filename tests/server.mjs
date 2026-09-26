@@ -595,6 +595,120 @@ test('a chat question is answered over HTTP, and its turn is not a task run',asy
   }finally{srv.stop()}
 });
 
+
+// Session HTTP round-trip: POST instruction, stream events, budget accounting.
+test('a supervised session is created, receives an instruction, and streams the response',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-session-e2e-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'session-provider',name:'Session',kind:'mock',enabled:true,config:{routable:true,delayMs:500,chatText:'Session work done.'}});
+  s.addModel({id:'session-m',providerId:'session-provider',name:'session',capabilities:['coding'],speed:10,quality:10,cost:0,contextLength:100000});
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const createResp=await post(`${srv.base}/api/sessions`,{projectId:p.id,name:'test session'});
+    assert.equal(createResp.status,201);
+    const session=JSON.parse(createResp.body);
+    assert.equal(session.name,'test session');
+    assert.equal(session.status,'idle');
+    const reading=stream(`${srv.base}/api/sessions/${session.id}/stream`,25000);
+    const msgResp=await post(`${srv.base}/api/sessions/${session.id}/messages`,{message:'do something'});
+    assert.equal(msgResp.status,202);
+    const {body}=await reading;
+    const fr=frames(body);
+    assert.ok(fr.some(f=>f.type==='state'),'stream carries state frames');
+    assert.ok(fr.some(f=>f.type==='message'),'stream carries message frames');
+    const sessionData=JSON.parse((await get(`${srv.base}/api/sessions/${session.id}`)).body);
+    assert.equal(sessionData.session.status,'idle','session reverts to idle after a turn');
+  }finally{srv.stop()}
+});
+
+// Permission round-trip: the core new mechanism. POST endpoint blocks, GET shows it,
+// POST answer allows/denies, timeout auto-denies.
+test('a session permission request blocks the agent, and is answered via the API',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-perm-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'session-provider',name:'Session',kind:'mock',enabled:true,config:{routable:true,toolCalls:[{tool:'Write',input:{path:'test.txt',content:'x'}}]}});
+  s.addModel({id:'session-m',providerId:'session-provider',name:'session',capabilities:['coding'],speed:10,quality:10,cost:0,contextLength:100000});
+  const policies=s.store.loadPolicies();
+  policies.session.permissionTimeoutMs=500;
+  s.store.savePolicies(policies);
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const session=JSON.parse((await post(`${srv.base}/api/sessions`,{projectId:p.id,name:'perm session'})).body);
+    post(`${srv.base}/api/sessions/${session.id}/messages`,{message:'write a file'});
+    let permReq=null;
+    for(let i=0;i<20;i++){
+      const r=await get(`${srv.base}/api/sessions/${session.id}/permissions`);
+      if(r.status===200){const perm=JSON.parse(r.body);if(perm&&perm.id){permReq=perm;break}}
+      await new Promise(res=>setTimeout(res,100));
+    }
+    assert.ok(permReq,'permission request appeared');
+    assert.equal(permReq.status,'pending');
+    assert.equal(permReq.tool,'Write');
+    const answerResp=await post(`${srv.base}/api/sessions/${session.id}/permissions/${permReq.id}`,{action:'allow'});
+    assert.equal(answerResp.status,200);
+    assert.equal(JSON.parse(answerResp.body).status,'allowed');
+  }finally{srv.stop()}
+});
+
+// Loopback guard: the permission endpoint only accepts loopback.
+test('POST /api/sessions/:id/permissions from a remote Host is refused',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-perm-guard-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const session=s.createSession(p.id,'guard session');
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const loopback=await withHeaders(`${srv.base}/api/sessions/${session.id}/permissions`,{host:'localhost:'+srv.port},'POST');
+    assert.notEqual(loopback.status,403,'loopback is not rejected');
+    const remote=await withHeaders(`${srv.base}/api/sessions/${session.id}/permissions`,TS_HOST,'POST');
+    assert.equal(remote.status,403,'remote Host is rejected');
+    assert.match(JSON.parse(remote.body).error,/this machine/);
+  }finally{srv.stop()}
+});
+
+// Cancel over HTTP: a session run in flight is cancelled and the stream ends.
+test('a session run is cancelled over HTTP and the stream ends',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-session-cancel-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'slow-session',name:'Slow',kind:'mock',enabled:true,config:{routable:true,delayMs:30000}});
+  s.addModel({id:'slow-m',providerId:'slow-session',name:'slow',capabilities:['coding'],speed:10,quality:10,cost:0,contextLength:100000});
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const session=JSON.parse((await post(`${srv.base}/api/sessions`,{projectId:p.id,name:'cancel session'})).body);
+    const reading=stream(`${srv.base}/api/sessions/${session.id}/stream`,25000);
+    await post(`${srv.base}/api/sessions/${session.id}/messages`,{message:'slow task'});
+    await new Promise(r=>setTimeout(r,500));
+    const cancelResp=await post(`${srv.base}/api/sessions/${session.id}/cancel`,{});
+    assert.equal(cancelResp.status,200);
+    const {body}=await reading;
+    const fr=frames(body);
+    assert.ok(fr.some(f=>f.type==='state'&&f.data?.job?.status==='cancelled'),'stream shows cancellation');
+    const sessionData=JSON.parse((await get(`${srv.base}/api/sessions/${session.id}`)).body);
+    assert.equal(sessionData.session.status,'idle');
+  }finally{srv.stop()}
+});
 // One terminal socket. The options exist for the guard tests, which are about the
 // headers a request arrives with rather than about what the shell does.
 function terminalSocket(base,taskId,target,options={}){
