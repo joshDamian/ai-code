@@ -153,3 +153,86 @@ test('a supervisor beside a running server stays out of the way, then takes the 
     assert.equal(held.status,200);
   }finally{await s.stop()}
 });
+
+// One command with an environment of its own. `env` replaces rather than extends, which
+// is the point of the test below: launchd gives a job four system directories, and an
+// environment that inherited this process's PATH would hide exactly what is being asked.
+function runWith(cmd,args,env){
+  return new Promise((res)=>{
+    const p=spawn(cmd,args,{env,stdio:['ignore','pipe','pipe']});
+    let out='',err='';
+    p.stdout.on('data',(c)=>{out+=c});p.stderr.on('data',(c)=>{err+=c});
+    p.on('close',(code)=>res({code,out,err}));
+  });
+}
+
+// The environment launchd hands a LaunchAgent, before the plist's own keys are added.
+const LAUNCHD_ENV={HOME:os.homedir(),PATH:'/usr/bin:/bin:/usr/sbin:/sbin'};
+
+const plistArray=(xml,key)=>[...(new RegExp(`<key>${key}</key>\\s*<array>([\\s\\S]*?)</array>`).exec(xml)?.[1]||'').matchAll(/<string>([\s\S]*?)<\/string>/g)].map((m)=>m[1]);
+const plistString=(xml,key)=>new RegExp(`<key>${key}</key>\\s*<string>([\\s\\S]*?)</string>`).exec(xml)?.[1]??null;
+
+// The installer is the only thing that writes the LaunchAgent, and the agent is the one
+// artifact nothing else here exercises: a supervisor started by hand from a test already
+// has a PATH, and the failure this pins is that the agent does not. Node from nvm, fnm or
+// asdf lives in a directory `~/.zshrc` adds, `~/.zshrc` is sourced for interactive shells
+// only, and `/bin/zsh -l -c` is not one - so `exec node` in the agent ran against four
+// system directories, died on `command not found: node`, and KeepAlive restarted it
+// every ten seconds. The plist has to carry both halves of the answer: the interpreter
+// by absolute path, and the person's PATH for everything the server spawns afterwards.
+test('the installer writes an agent that can find node without an interactive shell',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-install-'));
+  const port=await freePort();
+  // --dry-run is the plist and nothing else: no release is built, no file is written and
+  // no agent is loaded, so this runs against the real installer rather than a copy of it.
+  const r=await runWith('/bin/sh',['bin/install-ai-code','--supervisor','--dry-run'],{...process.env,PORT:String(port)});
+  assert.equal(r.code,0,`the installer refused to run\n${r.out}\n${r.err}`);
+  const xml=r.out;
+
+  const label=plistString(xml,'Label');
+  assert.equal(label,'com.ai-code.supervisor');
+  assert.equal(plistString(xml,'PORT'),String(port),'the agent holds the port the installer was pointed at');
+
+  // The person's directories are in the agent, which is what puts `claude` - and the node
+  // the supervisor's own descendants shell out to - within reach of the server it starts.
+  const envPath=plistString(xml,'PATH');
+  assert.ok(envPath?.includes(path.dirname(process.execPath)),`the agent's PATH does not carry this node's directory (${path.dirname(process.execPath)}): ${envPath}`);
+
+  // The load-bearing assertion, and the one the old agent failed: a login shell started
+  // with nothing but launchd's environment plus this plist's own keys resolves `node`.
+  const resolved=await runWith('/bin/zsh',['-l','-c','command -v node'],{...LAUNCHD_ENV,PATH:envPath});
+  assert.equal(resolved.code,0,`the login shell could not resolve node\n${resolved.err}`);
+  const nodeBin=resolved.out.trim();
+  assert.ok(path.isAbsolute(nodeBin),`command -v node answered with a non-path: ${nodeBin}`);
+  assert.ok(fs.existsSync(nodeBin),`the agent's PATH resolves node to a path that does not exist: ${nodeBin}`);
+
+  // And the interpreter the agent execs is that same binary, named absolutely - so the
+  // supervisor starts whatever PATH ends up being, including none at all.
+  const args=plistArray(xml,'ProgramArguments');
+  assert.deepEqual(args.slice(0,3),['/bin/zsh','-l','-c'],'the agent starts a login shell, which is what supplies Homebrew and OrbStack in ~/.zprofile');
+  const exec=args[3];
+  assert.ok(exec.includes(`"${nodeBin}"`),`the agent execs ${exec}, which does not name the node its own PATH resolves (${nodeBin})`);
+
+  // End to end, in the environment the agent actually gets: the program above, run
+  // verbatim with launchd's environment plus the keys this plist sets. The release path
+  // is the one substitution - a dry run built no release - so the agent starts this
+  // checkout's supervisor, and `$0` in the command string stays literal for zsh to
+  // substitute from the argument that follows, exactly as launchd does it. The data and
+  // log roots are pointed at the fixture for the reason every other test does it: a
+  // suite must not write to the install it is running from.
+  const release=process.cwd();
+  const agentArgs=[...args];
+  agentArgs[4]=release;
+  const proc=spawn(agentArgs[0],agentArgs.slice(1),{env:{...LAUNCHD_ENV,AI_CODE_ROOT:root,AI_CODE_LOG_DIR:path.join(root,'logs'),PORT:String(port),PATH:envPath},cwd:release,stdio:['ignore','pipe','pipe']});
+  let agentOut='';proc.stdout.on('data',(c)=>{agentOut+=c});proc.stderr.on('data',(c)=>{agentOut+=c});
+  try{
+    const base=`http://127.0.0.1:${port}`;
+    const page=await until(async()=>{const g=await tryGet(base+'/');return g?.headers[MARKER]==='1'?g:null},15000);
+    assert.ok(page,`the agent never served the stopped page on :${port}\n${agentOut}`);
+    assert.match(page.body,/Start server/);
+  }finally{
+    proc.kill('SIGTERM');
+    await waitExit(proc);
+    proc.kill('SIGKILL');
+  }
+});

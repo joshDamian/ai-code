@@ -364,6 +364,8 @@ Install the supervisor:
 
 It installs the release as usual and loads a LaunchAgent, `com.ai-code.supervisor`, which holds `http://localhost:4317` — or your `$PORT`, if you export one — and restarts at login. Idempotent — re-running points it at the release just built. Remove it with `./bin/install-ai-code --uninstall-supervisor`; without the agent the dashboard keeps working, and nothing holds the port or restarts the server while it is down.
 
+The agent carries an absolute path to your `node` and your own `PATH`, because launchd starts a job with four system directories and a login shell restores only what `/etc/paths.d` names. A node from nvm, fnm or asdf — and `claude`, which the agents need once the server is up — live in directories your `~/.zshrc` adds, and that is read for interactive shells only. Add `--dry-run` to print the agent without building a release or loading it.
+
 The supervisor writes to `~/Library/Logs/ai-code/supervisor.log`, and the server it starts writes to `~/Library/Logs/ai-code/server.log`. `ai-code web` is the terminal equivalent of the Start button.
 
 ### What stopping does

@@ -14,12 +14,14 @@ DOMAIN="gui/$(id -u)"
 SUP_PORT="${AI_CODE_SUPERVISOR_PORT:-${PORT:-4317}}"
 
 MODE=install
+DRY=0
 for arg in "$@"; do
   case "$arg" in
     --supervisor) MODE=with-supervisor ;;
     --uninstall-supervisor) MODE=uninstall-supervisor ;;
+    --dry-run) DRY=1 ;;
     *)
-      printf '%s\n' "install-ai-code: unknown option: $arg" "usage: install-ai-code [--supervisor | --uninstall-supervisor]" >&2
+      printf '%s\n' "install-ai-code: unknown option: $arg" "usage: install-ai-code [--supervisor | --uninstall-supervisor | --dry-run]" >&2
       exit 2
       ;;
   esac
@@ -28,6 +30,11 @@ done
 # Removing the agent is the whole of --uninstall-supervisor, and it does not install a
 # release first: the point of it is to undo the last one.
 if [ "$MODE" = uninstall-supervisor ]; then
+  # A dry run that uninstalled something would be the opposite of what it says.
+  if [ "$DRY" = 1 ]; then
+    printf '%s\n' "Dry run: $AGENT would be removed and $DOMAIN/$LABEL unloaded. Nothing was changed." >&2
+    exit 0
+  fi
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
   rm -f "$AGENT"
   printf '%s\n' "Supervisor removed ($LABEL)." "The dashboard keeps working; nothing holds the port or restarts it while it is down."
@@ -36,36 +43,61 @@ fi
 
 STAMP="$(date +%Y%m%d%H%M%S)"
 RELEASE="$RELEASE_ROOT/$STAMP"
-mkdir -p "$DEST" "$RELEASE_ROOT" "$RELEASE"
-( cd "$ROOT" && tar --exclude='./.ai-code' --exclude='./node_modules' --exclude='./.git' -cf - . ) | ( cd "$RELEASE" && tar -xf - )
-( cd "$RELEASE" && npm install --omit=dev --ignore-scripts && node -e "
+# A dry run exists for the LaunchAgent below, which is the one artifact here a person
+# cannot read until after it is loaded - and the one that decides whether a Start
+# button appears at all. So it computes the paths, prints the agent, and writes nothing.
+if [ "$DRY" = 0 ]; then
+  mkdir -p "$DEST" "$RELEASE_ROOT" "$RELEASE"
+  ( cd "$ROOT" && tar --exclude='./.ai-code' --exclude='./node_modules' --exclude='./.git' -cf - . ) | ( cd "$RELEASE" && tar -xf - )
+  ( cd "$RELEASE" && npm install --omit=dev --ignore-scripts && node -e "
   const fs = require('fs'), p = require('path');
   const h = p.join(__dirname, 'node_modules/node-pty/prebuilds', process.platform + '-' + process.arch, 'spawn-helper');
   try { if (!(fs.statSync(h).mode & 0o111)) fs.chmodSync(h, 0o755); } catch {}
 " )
-cat > "$DEST/ai-code" <<SCRIPT
+  # `node` here rather than an absolute path: this wrapper is run from a terminal, which
+  # has the person's own PATH. The agent below is the one that does not.
+  cat > "$DEST/ai-code" <<SCRIPT
 #!/bin/sh
 export AI_CODE_ROOT="\${AI_CODE_ROOT:-$DATA_ROOT}"
 exec node "$RELEASE/src/cli.mjs" "\$@"
 SCRIPT
-chmod +x "$DEST/ai-code"
-for wrapper in claude-expensive claude-cheap; do
-  if [ -f "$ROOT/bin/$wrapper" ]; then cp "$ROOT/bin/$wrapper" "$DEST/$wrapper"; chmod +x "$DEST/$wrapper"; fi
-done
+  chmod +x "$DEST/ai-code"
+  for wrapper in claude-expensive claude-cheap; do
+    if [ -f "$ROOT/bin/$wrapper" ]; then cp "$ROOT/bin/$wrapper" "$DEST/$wrapper"; chmod +x "$DEST/$wrapper"; fi
+  done
+fi
 
 if [ "$MODE" = with-supervisor ]; then
-  if [ "$(uname)" != Darwin ]; then
-    printf '%s\n' "The supervisor installs as a macOS LaunchAgent, and this is not macOS." "Start it some other way: PORT=$SUP_PORT AI_CODE_ROOT=$DATA_ROOT node $RELEASE/src/supervisor.mjs" >&2
+  # The node that will run the supervisor, resolved to a path because the agent cannot
+  # resolve it at login. launchd gives a job four system directories, and the login
+  # shell below restores only what /etc/zprofile and /etc/paths.d name - an nvm, fnm or
+  # asdf node lives in a directory `~/.zshrc` adds, and `.zshrc` is sourced for
+  # interactive shells only. Left to the shell, the agent ran `/bin/zsh -l -c 'exec
+  # node …'`, died on `command not found: node`, and KeepAlive restarted it every ten
+  # seconds for as long as the machine was up.
+  NODE_BIN="$(command -v node || true)"
+  if [ -z "$NODE_BIN" ]; then
+    printf '%s\n' "install-ai-code: node is not on PATH, so there is nothing for the agent to run." "Install Node.js, or run this from a shell where \`node\` resolves." >&2
     exit 1
   fi
-  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/ai-code"
-  # A login shell rather than `node` directly, and it is not cosmetic: launchd runs with
-  # a PATH of four system directories, and every agent the server spawns inherits the
-  # server's environment wholesale - so without `path_helper` the dashboard would start
-  # and then fail to find `claude` or `git` on the first run. `-l -c` puts the person's
-  # own shell environment back, and `\$0` inside the command is the release path that
-  # follows it.
-  cat > "$AGENT" <<PLIST
+  if [ "$(uname)" != Darwin ]; then
+    printf '%s\n' "The supervisor installs as a macOS LaunchAgent, and this is not macOS." "Start it some other way: PORT=$SUP_PORT AI_CODE_ROOT=$DATA_ROOT $NODE_BIN $RELEASE/src/supervisor.mjs" >&2
+    exit 1
+  fi
+  if [ "$DRY" = 1 ]; then
+    PLIST_TARGET=/dev/stdout
+  else
+    PLIST_TARGET="$AGENT"
+    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/ai-code"
+  fi
+  # A login shell rather than node alone, and it is not cosmetic: `-l` is what runs
+  # /etc/zprofile and path_helper, which is where Homebrew and OrbStack put themselves.
+  # The PATH below is what puts the person's own directories back - the ones an nvm node
+  # and `claude` itself live in - because everything the server spawns, agents included,
+  # inherits this environment wholesale. `\$0` inside the command is the release path
+  # that follows it, and `"$NODE_BIN"` is absolute so the supervisor starts whatever
+  # PATH ends up being.
+  cat > "$PLIST_TARGET" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -76,13 +108,14 @@ if [ "$MODE" = with-supervisor ]; then
     <string>/bin/zsh</string>
     <string>-l</string>
     <string>-c</string>
-    <string>exec node "\$0/src/supervisor.mjs" "\$0"</string>
+    <string>exec "$NODE_BIN" "\$0/src/supervisor.mjs" "\$0"</string>
     <string>$RELEASE</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>AI_CODE_ROOT</key><string>$DATA_ROOT</string>
     <key>PORT</key><string>$SUP_PORT</string>
+    <key>PATH</key><string>$PATH</string>
   </dict>
   <key>WorkingDirectory</key><string>$RELEASE</string>
   <key>RunAtLoad</key><true/>
@@ -92,12 +125,23 @@ if [ "$MODE" = with-supervisor ]; then
 </dict>
 </plist>
 PLIST
+  if [ "$DRY" = 1 ]; then
+    printf '%s\n' "Dry run: the agent above would be written to $AGENT and loaded as $DOMAIN/$LABEL." "Nothing was written and no release was built." "It holds http://localhost:$SUP_PORT while the server is down." >&2
+    exit 0
+  fi
   # Idempotent: a re-install points the agent at the release it has just written, which
   # the one already loaded is not.
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
   launchctl bootstrap "$DOMAIN" "$AGENT"
   launchctl kickstart -k "$DOMAIN/$LABEL" 2>/dev/null || true
-  printf '%s\n' "Supervisor installed: $DOMAIN/$LABEL" "It holds http://localhost:$SUP_PORT while the server is down, and serves the page the Start button lives on." "Remove it with: $0 --uninstall-supervisor"
+  # The agent's stdout is where the reason a start failed is recorded, so it is worth
+  # naming at the end of a successful install: without it the file is discovered by
+  # someone who has already worked out that something is wrong.
+  printf '%s\n' "Supervisor installed: $DOMAIN/$LABEL" "It holds http://localhost:$SUP_PORT while the server is down, and serves the page the Start button lives on." "Remove it with: $0 --uninstall-supervisor" "Logs: $HOME/Library/Logs/ai-code/supervisor.log"
 fi
 
-printf '%s\n' "Installed AI Code release: $RELEASE" "Stable command: $DEST/ai-code"
+if [ "$DRY" = 1 ]; then
+  printf '%s\n' "Dry run: nothing was written. A release would be built at $RELEASE," "and $DEST/ai-code would point at it."
+else
+  printf '%s\n' "Installed AI Code release: $RELEASE" "Stable command: $DEST/ai-code"
+fi
