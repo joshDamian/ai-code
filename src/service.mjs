@@ -2122,12 +2122,23 @@ export class Service {
         // Budget is tallied whether the run succeeded or was cancelled: the cost is
         // written to session_runs either way, and the session's lifetime total must
         // reflect it. This is in finally so cancelled runs do not slip past.
-        if (result) {
-          const run = this.store.getSessionRun(result.runId);
+        //
+        // `result` is undefined when runRole throws (for CANCELLED, BUDGET_CODES
+        // exhaustion, or exhausted fallback), but the run row is still written to
+        // the database before the throw, so we read it from there. The run always
+        // exists at this point when an instruction was pending.
+        const run = pending?.runId ? this.store.getSessionRun(pending.runId) : null;
+        if (run) {
           this.store.updateSession(sessionId, {
-            budget_tally: (this.store.getSession(sessionId)?.budget_tally || 0) + (result.cost || 0),
+            budget_tally: (this.store.getSession(sessionId)?.budget_tally || 0) + (run.cost || 0),
           });
-          this.#recordShape(sessionId, result.runId, run, project.path, before);
+        }
+        // #recordShape must be called even when runRole threw, so the nudge detects
+        // task-shaped work on aborted turns (e.g., two file writes before hitting
+        // COST_LIMIT). The nudge itself filters for runs that actually succeeded,
+        // but the changed_paths and task_shaped flags are set here.
+        if (pending?.runId) {
+          this.#recordShape(sessionId, pending.runId, run, project.path, before);
         }
         this.#settleSession(sessionId);
       }

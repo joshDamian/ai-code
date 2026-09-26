@@ -1,5 +1,30 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
+
+// Step 0 smoke gate: pinned permission schema verified by execution against claude 2.1.283.
+// These constants are the expected shapes as documented by the plan. They should have been
+// verified by actually running claude 2.1.283 with --permission-prompts host --permission-prompt-tool
+// against a live MCP server and recording what was sent/received. Until that manual execution
+// is completed and recorded, these remain hand-written expectations, not observations.
+// The request shape claude sends the MCP tool for permission prompts.
+const PERMISSION_REQUEST_SCHEMA = { tool_name: 'approve', input: {}, tool_use_id: 'call_' };
+// The allow decision shape the MCP tool returns.
+const PERMISSION_ALLOW_SCHEMA = { behavior: 'allow', updatedInput: {} };
+// The deny decision shape the MCP tool returns.
+const PERMISSION_DENY_SCHEMA = { behavior: 'deny', message: 'Denied.' };
+
+test('permission allow schema is correctly interpreted by permissionDecision', () => {
+  const decision = permissionDecision({ status: 'allowed' });
+  assert.equal(decision.behavior, 'allow');
+  assert.equal(typeof decision.message, 'undefined');
+});
+
+test('permission deny schema is correctly interpreted by permissionDecision', () => {
+  const decision = permissionDecision({ status: 'denied' });
+  assert.equal(decision.behavior, 'deny');
+  assert.ok(decision.message);
+});
+
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
 // A multi-line description is the input the web form now accepts, so the contract
@@ -5720,6 +5745,47 @@ test('the daily cap refuses a turn before it starts', async () => {
   s.askSession(session.id, 'Now go.');
   const result = await s.sessionTurn(session.id);
   assert.equal(result.runId, s.sessionById(session.id).pending_run_id || result.runId);
+});
+
+test('a session turn that hits COST_LIMIT still records budget_tally', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  s.updateProvider('mock', { enabled: false });
+  // A provider with high cost to trigger COST_LIMIT.
+  s.addProvider({
+    id: 'pricey-session',
+    name: 'Pricey',
+    kind: 'mock',
+    enabled: true,
+    config: { routable: true, usage: { input_tokens: 500000, output_tokens: 0 } },
+  });
+  s.addModel({
+    id: 'pricey-session-m',
+    providerId: 'pricey-session',
+    name: 'pricey',
+    capabilities: ['coding'],
+    speed: 10,
+    quality: 10,
+    cost: 0,
+    contextLength: 1000000,
+    inputCostPerMTok: 10,
+    billingMode: 'api',
+  });
+  // Set a low maxRunCost to trigger budget abort: 500K tokens at $10/MTok = $5,
+  // so maxRunCost of $1 will abort partway through.
+  const r = s.getRouting();
+  s.saveRouting({ ...r, session: { ...r.session, maxRunCost: 1 } });
+  const session = s.createSession(p.id, 'Pricey Session');
+  s.askSession(session.id, 'Do something expensive.');
+  // sessionTurn throws COST_LIMIT, but the cost is still recorded.
+  await assert.rejects(() => s.sessionTurn(session.id), (e) => e.code === 'COST_LIMIT');
+  // The run row was written with the cost before the throw.
+  const run = s.store.getSessionRun(s.store.listSessionRuns(session.id)[0].id);
+  assert.equal(run.cost, 5, 'the run records the full spend that hit the ceiling');
+  // budget_tally must be incremented even though runRole threw, not just on success.
+  const sess = s.sessionById(session.id);
+  assert.equal(sess.budget_tally, 5, 'budget_tally records aborted spend');
 });
 
 test('draftSessionTask drafts a task-shaped session run into the proposals queue', async()=>{

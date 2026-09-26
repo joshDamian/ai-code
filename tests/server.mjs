@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';import https from 'node:https';import crypto from 'node:crypto';import {spawn,execFileSync} from 'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import net from 'node:net';import {Service} from '../src/service.mjs';import {loadPolicies,savePolicies} from '../src/policy.mjs';import {WebSocket} from 'ws';import {TerminalSessions} from '../src/terminal.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';import https from 'node:https';import crypto from 'node:crypto';import {spawn,execFileSync} from 'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import net from 'node:net';import {Service,permissionDecision} from '../src/service.mjs';import {loadPolicies,savePolicies} from '../src/policy.mjs';import {WebSocket} from 'ws';import {TerminalSessions} from '../src/terminal.mjs';
 function get(url){return new Promise((res,rej)=>http.get(url,r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))}).on('error',rej))}
 function post(url,payload){return new Promise((res,rej)=>{const data=JSON.stringify(payload||{});const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)}},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.write(data);req.end()})}
 function patch(url,payload){return new Promise((res,rej)=>{const data=JSON.stringify(payload||{});const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname,method:'PATCH',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)}},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.write(data);req.end()})}
@@ -668,6 +668,83 @@ test('a session permission request blocks the agent, and is answered via the API
     const held=await permPost;
     const decision=JSON.parse(held.body);
     assert.equal(decision.behavior,'allow');
+  }finally{srv.stop()}
+});
+
+test('a session permission request can be denied via the API',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-perm-deny-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'session-provider',name:'Session',kind:'mock',enabled:true,config:{routable:true,delayMs:5000}});
+  s.addModel({id:'session-m',providerId:'session-provider',name:'session',capabilities:['coding'],speed:10,quality:10,cost:0,contextLength:100000});
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const session=JSON.parse((await post(`${srv.base}/api/sessions`,{projectId:p.id,name:'deny session'})).body);
+    post(`${srv.base}/api/sessions/${session.id}/messages`,{message:'write a file'});
+    await new Promise(res=>setTimeout(res,300));
+    const permPost=post(`${srv.base}/api/sessions/${session.id}/permissions`,{tool:'Write',input:{path:'test.txt',content:'x'},cwd:root});
+    await new Promise(res=>setTimeout(res,200));
+    const r=await get(`${srv.base}/api/sessions/${session.id}/permissions`);
+    const permBody=JSON.parse(r.body);
+    // Deny the request.
+    const answerResp=await post(`${srv.base}/api/sessions/${session.id}/permissions/${permBody.permission.id}`,{action:'deny'});
+    assert.equal(answerResp.status,200);
+    assert.equal(JSON.parse(answerResp.body).permission.status,'denied');
+    // The held POST resolves with the deny decision.
+    const held=await permPost;
+    const decision=JSON.parse(held.body);
+    assert.equal(decision.behavior,'deny');
+    assert.ok(decision.message);
+  }finally{srv.stop()}
+});
+
+test('a session permission request timeout resolves as a deny',()=>{
+  // Verify the timeout decision schema without waiting for a real timeout.
+  // The timeout sweep is tested at the Service level in test.mjs.
+  const timedOutRequest={status:'timeout'};
+  const decision=permissionDecision(timedOutRequest);
+  assert.equal(decision.behavior,'deny');
+  assert.match(decision.message,/Nobody answered/);
+});
+
+test('a session permission request times out end-to-end over HTTP',async()=>{
+  // Verify that when an agent's permission request is unanswered, the server's
+  // timeout sweep marks it as timeout and the held HTTP POST resolves with a deny.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-perm-timeout-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  // Short timeout so the held request resolves quickly instead of blocking.
+  const policies=loadPolicies(root);
+  policies.session.permissionTimeoutMs=50;
+  savePolicies(root,policies);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'slow-session',name:'Slow',kind:'mock',enabled:true,config:{routable:true,delayMs:30000}});
+  s.addModel({id:'slow-m',providerId:'slow-session',name:'slow',capabilities:['coding'],speed:10,quality:10,cost:0,contextLength:100000});
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const session=JSON.parse((await post(`${srv.base}/api/sessions`,{projectId:p.id,name:'timeout session'})).body);
+    // Start the session running so it will attempt to make permission requests.
+    await post(`${srv.base}/api/sessions/${session.id}/messages`,{message:'test instruction'});
+    // Post a permission request to the loopback endpoint without answering it.
+    // The server will hold the POST until the timeout elapses.
+    const heldPost=post(`${srv.base}/api/sessions/${session.id}/permissions`,{tool:'Write',input:{},cwd:root});
+    // Wait a bit for the request to be registered, then let the timeout elapse.
+    await new Promise(resolve=>setTimeout(resolve,150));
+    // The held POST should now resolve with a deny decision.
+    const result=await heldPost;
+    assert.equal(result.status,200);
+    const body=JSON.parse(result.body);
+    assert.equal(body.behavior,'deny');
+    assert.match(body.message,/Nobody answered/);
   }finally{srv.stop()}
 });
 
