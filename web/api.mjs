@@ -192,6 +192,24 @@ export const api = {
   chatSession: (id) => request(`/api/chat/sessions/${id}`),
   sendChatMessage: (sessionId, message) => request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', body: { message } }),
 
+  // Supervised sessions. `message` is one turn, and the reply is the run's job
+  // rather than its result - the turn is read back through the stream, for the same
+  // reason a chat turn is.
+  sessions: (projectId) => request(`/api/sessions${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
+  createSession: (projectId, name) => request('/api/sessions', { method: 'POST', body: { projectId, name } }),
+  session: (id) => request(`/api/sessions/${id}`),
+  updateSession: (id, body) => request(`/api/sessions/${id}`, { method: 'PATCH', body }),
+  archiveSession: (id) => request(`/api/sessions/${id}/archive`, { method: 'POST' }),
+  stopSession: (id) => request(`/api/sessions/${id}/cancel`, { method: 'POST' }),
+  resumeSession: (id) => request(`/api/sessions/${id}/resume`, { method: 'POST' }),
+  dismissSessionNudge: (id) => request(`/api/sessions/${id}/nudge`, { method: 'POST' }),
+  sendSessionMessage: (id, message) => request(`/api/sessions/${id}/messages`, { method: 'POST', body: { message } }),
+  draftSessionTask: (id) => request(`/api/sessions/${id}/draft-task`, { method: 'POST' }),
+  // `allow` is the only action that grants; the server reads every other word as a
+  // denial, so this is a verb and not a boolean.
+  answerSessionPermission: (sessionId, reqId, action) =>
+    request(`/api/sessions/${sessionId}/permissions/${reqId}`, { method: 'POST', body: { action } }),
+
   // Web Push. `pushKey` answers 503 when the server has no web-push installed, which
   // the notifier treats as "no background push on this install" and nothing more.
   pushKey: () => request('/api/push/key'),
@@ -209,6 +227,10 @@ export function taskStreamUrl(id) {
 
 export function chatStreamUrl(id) {
   return withToken(`/api/chat/sessions/${id}/stream`);
+}
+
+export function sessionStreamUrl(id) {
+  return withToken(`/api/sessions/${id}/stream`);
 }
 
 // The app-wide notification stream: run completions, for the in-page notifier.

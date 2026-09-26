@@ -85,6 +85,56 @@ export class Store {
       -- none - the task row can be deleted and its decision still has to be readable.
       CREATE TABLE IF NOT EXISTS decisions(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,task_id TEXT,content TEXT NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL,approved_at TEXT);
 
+      -- A supervised session: a named agent acting in the user's own checkout on
+      -- freeform instructions, with every write and exec gated by a live
+      -- permission prompt. Not a task and not a chat - it has no state machine
+      -- and no plan, and unlike a chat it may change the tree it runs in. Its own
+      -- table because every list product filters on 'tasks', and a session is not
+      -- a row any of them should see.
+      --
+      -- 'status' is idle|running|stopped|archived. 'pending_run_id' is the run the
+      -- waiting instruction names, which is what makes "is this session busy" a
+      -- question the database answers rather than one a process remembers.
+      -- 'budget_tally' is what the session has spent in total across its runs;
+      -- sessions are budgeted where read-only chat deliberately is not.
+      --
+      -- 'task_shaped' and 'nudge_dismissed' are the nudge's two halves: the first
+      -- is written when a settled turn changed enough to be a task, the second when
+      -- a person has said they are not drafting it. The card shows while the first
+      -- is set and the second is not, and 'changed_paths' is what the card and the
+      -- draft are built from - read at the moment the turn ended, because what the
+      -- checkout looks like after a later turn is not evidence about this one.
+      CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'idle',provider_id TEXT,model_id TEXT,budget_tally REAL NOT NULL DEFAULT 0,cancel_requested INTEGER NOT NULL DEFAULT 0,pending_run_id TEXT,task_shaped INTEGER NOT NULL DEFAULT 0,nudge_dismissed INTEGER NOT NULL DEFAULT 0,changed_paths TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+
+      -- A session turn's run row, the same shape as chat_runs and for the same
+      -- reason: a session run belongs to no task, and a row in 'runs' belonging
+      -- to no task is a row every task-keyed surface has to know to exclude.
+      --
+      -- The claude resume id is named 'resume_session_id' rather than 'session_id'
+      -- because in 'runs' and 'chat_runs' that column already means the resume id,
+      -- and here 'session_id' is the session the turn belongs to - the parent. One
+      -- name cannot be both, so the parent claims it and the resume id is spelled
+      -- out. runRole hands the same patch to this writer as to the other two; the
+      -- translation is here, where the column names are.
+      CREATE TABLE IF NOT EXISTS session_runs(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT,provider_id TEXT,model_id TEXT,status TEXT,started_at TEXT,ended_at TEXT,error TEXT,fallback_from TEXT,tokens INTEGER DEFAULT 0,cost REAL DEFAULT 0,duration_ms INTEGER DEFAULT 0,resume_session_id TEXT,input_tokens INTEGER DEFAULT 0,output_tokens INTEGER DEFAULT 0,cache_read_tokens INTEGER DEFAULT 0,cache_write_tokens INTEGER DEFAULT 0,cost_basis TEXT,context_tokens INTEGER DEFAULT 0,relevant_files INTEGER DEFAULT 0,context_budget INTEGER DEFAULT 0,context_state TEXT);
+
+      -- One row per gated action an agent asked for and has not been answered on.
+      -- A row rather than a held request because a blocked agent must survive a
+      -- page reload, a backgrounded phone and the process that was watching it:
+      -- the prompted action is written here before anything waits, and every
+      -- surface answers the same question by reading it back.
+      --
+      -- The lifecycle is pending -> allowed|denied|timeout, and 'answered_at' is
+      -- the moment it left pending, whichever of the three it left by. A row left
+      -- pending past the policy's permissionTimeoutMs is swept to 'timeout', which
+      -- is a denial - the fail-closed answer, not an absence of one.
+      -- run_id is nullable, and that is the fail-closed shape rather than a
+      -- loosening of it: the asker is an HTTP client, and a request that arrives
+      -- without one still has to be recorded and answered. A NOT NULL here would
+      -- turn a missing field into a 500, which the MCP tool reads as a denial -
+      -- denying an action because of a bug in the thing that asks about it.
+      CREATE TABLE IF NOT EXISTS permission_requests(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,run_id TEXT,tool TEXT NOT NULL,input TEXT,cwd TEXT,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL,answered_at TEXT);
+
       -- Values that belong to the install rather than to any project: the API token
       -- a phone pairs with, and the VAPID keypair push is signed with. A table
       -- rather than a file because the database is already the one thing every
@@ -209,7 +259,15 @@ export class Store {
       // A conversation can be scoped to a task, which is how a question about a
       // completed task is asked with that task's plan and review in hand. NULL is
       // the project-scoped chat every session written before this column was.
-      chat_sessions: [['task_id', 'TEXT']],
+      chat_sessions: [
+        ['task_id', 'TEXT'],
+        // The work a drafting pass was opened to describe, when it was opened for
+        // one. Null for every speculative pass - an intake, an ordinary proposals
+        // batch - which is what lets `proposeTasks` tell "propose the next thing"
+        // from "write up what already happened in the checkout" without reading the
+        // question's text, where the two would look alike.
+        ['focus', 'TEXT'],
+      ],
     })) {
       for (const [column, type] of columns) this.ensureColumn(table, column, type);
     }
@@ -296,6 +354,31 @@ export class Store {
       .prepare(
         `UPDATE chat_runs SET status='interrupted',ended_at=?,error='Process interrupted'
          WHERE status='running' AND id NOT IN (SELECT run_id FROM run_leases)`
+      )
+      .run(now);
+    // And for a session turn, for the same reason and by the same test.
+    this.db
+      .prepare(
+        `UPDATE session_runs SET status='interrupted',ended_at=?,error='Process interrupted'
+         WHERE status='running' AND id NOT IN (SELECT run_id FROM run_leases)`
+      )
+      .run(now);
+    // The session's own status is derived from its runs, so it is derived here
+    // too: a session left saying 'running' with no run holding a lease is a
+    // session nothing is driving, and the UI would offer a Stop button for a
+    // process that is gone. The subquery rather than a second pass, so the two
+    // statements cannot disagree about which rows were just interrupted.
+    //
+    // `pending_run_id` is cleared with it. That column is the instruction nothing
+    // is answering, and the process that was going to answer it is the one that
+    // just died - so left set it would make the session permanently unaskable,
+    // refusing every new instruction with "already working on one". The events
+    // stay, so the instruction is still in the transcript; it simply stops being
+    // pending, which after the process died is the truth.
+    this.db
+      .prepare(
+        `UPDATE sessions SET status='idle',pending_run_id=NULL,updated_at=?
+         WHERE status='running' AND id NOT IN (SELECT session_id FROM session_runs WHERE status='running')`
       )
       .run(now);
   }
@@ -670,6 +753,9 @@ export class Store {
     // exactly as a task's is - which is what this limit is about, since a gateway
     // fronting one subscription cannot serve two - so counting only `runs` would
     // let a chat and an implementer both start against a provider that allows one.
+    // A session turn is the same claim for the same reason: it is an agent on a
+    // lease, and a session that is not counted would start against a provider that
+    // is already full.
     return this.db
       .prepare(
         `SELECT provider_id pid,count(*) c FROM (
@@ -678,6 +764,9 @@ export class Store {
            UNION ALL
            SELECT c.provider_id,l.heartbeat_at FROM chat_runs c
              JOIN run_leases l ON l.run_id=c.id
+           UNION ALL
+           SELECT s.provider_id,l.heartbeat_at FROM session_runs s
+             JOIN run_leases l ON l.run_id=s.id
          ) WHERE heartbeat_at>=?
          GROUP BY provider_id`
       )
@@ -845,12 +934,16 @@ export class Store {
     return new Map(rows.map((r) => [r.provider_id, r.c]));
   }
 
-  // The columns the failure window is counted from, over both tables that record
-  // an attempt. `chat_runs.role` is a literal so the two halves line up.
+  // The columns the failure window is counted from, over the three tables that
+  // record an attempt. The role is a literal in the two that are not `runs`, so
+  // the halves line up - a session turn is a turn of the same conversation shape
+  // as a chat's, and the breaker should count it the same way.
   failureRows() {
     return `SELECT provider_id,status,ended_at,error,role FROM runs
             UNION ALL
-            SELECT provider_id,status,ended_at,error,'chat' AS role FROM chat_runs`;
+            SELECT provider_id,status,ended_at,error,'chat' AS role FROM chat_runs
+            UNION ALL
+            SELECT provider_id,status,ended_at,error,'session' AS role FROM session_runs`;
   }
 
   // What routing should believe about every provider right now.
@@ -911,9 +1004,9 @@ export class Store {
   // uuid cannot be one. The `*` is expanded first so an explicit column list
   // would shadow nothing - `seq` is the only added name.
 
-  createChatSession({ id, projectId, title, taskId }) {
+  createChatSession({ id, projectId, title, taskId, focus }) {
     const now = new Date().toISOString();
-    this.db.prepare('INSERT INTO chat_sessions(id,project_id,title,created_at,updated_at,task_id) VALUES(?,?,?,?,?,?)').run(id, projectId, title, now, now, taskId ?? null);
+    this.db.prepare('INSERT INTO chat_sessions(id,project_id,title,created_at,updated_at,task_id,focus) VALUES(?,?,?,?,?,?,?)').run(id, projectId, title, now, now, taskId ?? null, focus ?? null);
     return this.getChatSession(id);
   }
 
@@ -1057,6 +1150,223 @@ export class Store {
       ? 'SELECT * FROM chat_runs WHERE chat_session_id=? ORDER BY started_at'
       : 'SELECT * FROM chat_runs ORDER BY started_at';
     return this.db.prepare(q).all(...(sessionId ? [sessionId] : []));
+  }
+
+  // -- sessions -------------------------------------------------------------
+  // A supervised session and the turns it has taken. The CRUD is the chat
+  // session's, pointed at a row that carries a status, a budget and a cancel flag
+  // as well - so the differences from `createChatSession` are exactly those three
+  // and everything else is the same row shape.
+
+  createSession({ id, projectId, name, providerId, modelId }) {
+    const now = new Date().toISOString();
+    this.db
+      .prepare('INSERT INTO sessions(id,project_id,name,status,provider_id,model_id,budget_tally,cancel_requested,pending_run_id,task_shaped,nudge_dismissed,changed_paths,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, projectId, name, 'idle', providerId ?? null, modelId ?? null, 0, 0, null, 0, 0, null, now, now);
+    return this.getSession(id);
+  }
+
+  getSession(id) {
+    return this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id) || null;
+  }
+
+  listSessions(projectId) {
+    const q = projectId
+      ? 'SELECT * FROM sessions WHERE project_id=? ORDER BY updated_at DESC'
+      : 'SELECT * FROM sessions ORDER BY updated_at DESC';
+    return this.db.prepare(q).all(...(projectId ? [projectId] : []));
+  }
+
+  // Only the columns a caller may change are read from `patch`, and `status` is
+  // one of them: the reaper and the run lifecycle both write it, and a PATCH route
+  // that could not name it would be a second way to change a session's state.
+  updateSession(id, patch = {}) {
+    const s = this.getSession(id);
+    if (!s) return null;
+    const n = { ...s, ...patch };
+    this.db
+      .prepare('UPDATE sessions SET name=?,status=?,provider_id=?,model_id=?,budget_tally=?,cancel_requested=?,pending_run_id=?,task_shaped=?,nudge_dismissed=?,changed_paths=?,updated_at=? WHERE id=?')
+      .run(
+        n.name,
+        n.status,
+        n.provider_id ?? null,
+        n.model_id ?? null,
+        n.budget_tally ?? 0,
+        n.cancel_requested ? 1 : 0,
+        n.pending_run_id ?? null,
+        n.task_shaped ? 1 : 0,
+        n.nudge_dismissed ? 1 : 0,
+        n.changed_paths ?? null,
+        // Touched rather than stamped, for the reason `#touch` exists: a session
+        // created and first written to inside one millisecond would otherwise
+        // sort by creation order in the list it is meant to be moving in.
+        patch.updated_at ?? this.#touch(s.updated_at),
+        id
+      );
+    return this.getSession(id);
+  }
+
+  // The cancel channels, mirroring the task pair. `sessions.cancel_requested` is
+  // the durable one and it is a session column rather than a lease column because
+  // a session's leases carry `task_id = null` - there is no task id to mark, so
+  // the task-scoped `requestCancel` cannot reach them.
+  setSessionCancel(sessionId, on) {
+    this.db.prepare('UPDATE sessions SET cancel_requested=? WHERE id=?').run(on ? 1 : 0, sessionId);
+  }
+
+  sessionCancelRequested(sessionId) {
+    const r = this.db.prepare('SELECT cancel_requested FROM sessions WHERE id=?').get(sessionId);
+    return !!r?.cancel_requested;
+  }
+
+  // What supervised sessions have spent since an instant, for the daily cap. Every
+  // session's, not one session's: the cap is a ceiling on what this machine spends
+  // driving agents in people's checkouts, and a per-session reading of it would let
+  // five sessions spend five times it. Summed from the run rows rather than from
+  // `budget_tally`, because the tally is one session's lifetime and this is about
+  // today - and a run still in flight has already been priced on its own row as it
+  // went.
+  sessionSpendSince(iso) {
+    const r = this.db
+      .prepare("SELECT COALESCE(SUM(cost),0) c FROM session_runs WHERE started_at >= ?")
+      .get(iso);
+    return r?.c || 0;
+  }
+
+  // -- session runs ---------------------------------------------------------
+
+  addSessionRun(r, sessionId) {
+    this.db
+      .prepare(
+        `INSERT INTO session_runs(id,session_id,role,provider_id,model_id,status,started_at,ended_at,error,fallback_from,
+           tokens,cost,duration_ms,resume_session_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,
+           cost_basis,context_tokens,relevant_files,context_budget,context_state)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        r.id, sessionId, r.role, r.providerId, r.modelId, r.status, r.startedAt,
+        null, null, r.fallbackFrom ?? null,
+        0, 0, 0, null, 0, 0, 0, 0,
+        null,
+        r.contextTokens ?? 0, r.relevantFiles ?? 0, r.contextBudget ?? 0, r.contextState ?? null
+      );
+    return r;
+  }
+
+  // runRole's patch names the claude resume id `session_id`, because that is what
+  // it is called in `runs` and `chat_runs`. Here that name belongs to the parent,
+  // so it is translated rather than written - a resume id landing in the parent
+  // column would silently reparent the run to a session id that is not a session.
+  updateSessionRun(id, patch) {
+    const p = patch.status === 'succeeded' && !('error' in patch) ? { ...patch, error: null } : patch;
+    const r = this.db.prepare('SELECT * FROM session_runs WHERE id=?').get(id);
+    if (!r) return null;
+    if ('session_id' in p) {
+      p.resume_session_id = p.session_id;
+      delete p.session_id;
+    }
+    const n = { ...r, ...p };
+    this.db
+      .prepare(
+        `UPDATE session_runs SET status=?,ended_at=?,error=?,fallback_from=?,tokens=?,cost=?,duration_ms=?,resume_session_id=?,
+           input_tokens=?,output_tokens=?,cache_read_tokens=?,cache_write_tokens=?,cost_basis=?,
+           context_tokens=?,relevant_files=?,context_budget=?,context_state=? WHERE id=?`
+      )
+      .run(
+        n.status, n.ended_at ?? null, n.error ?? null, n.fallback_from ?? null, n.tokens ?? 0, n.cost ?? 0,
+        n.duration_ms ?? 0, n.resume_session_id ?? null, n.input_tokens ?? 0, n.output_tokens ?? 0,
+        n.cache_read_tokens ?? 0, n.cache_write_tokens ?? 0, n.cost_basis ?? null,
+        n.context_tokens ?? 0, n.relevant_files ?? 0, n.context_budget ?? 0, n.context_state ?? null,
+        id
+      );
+    return n;
+  }
+
+  getSessionRun(id) {
+    return this.db.prepare('SELECT * FROM session_runs WHERE id=?').get(id) || null;
+  }
+
+  listSessionRuns(sessionId) {
+    const q = sessionId
+      ? 'SELECT * FROM session_runs WHERE session_id=? ORDER BY started_at'
+      : 'SELECT * FROM session_runs ORDER BY started_at';
+    return this.db.prepare(q).all(...(sessionId ? [sessionId] : []));
+  }
+
+  // Everything that settled since a moment, for the notification watcher. A run
+  // still in flight is not news, so it is not returned - the same reading
+  // watchRuns takes of the runs table.
+  listSessionRunsSince(since, status = null) {
+    const q = status
+      ? 'SELECT * FROM session_runs WHERE started_at > ? AND status = ? ORDER BY started_at'
+      : 'SELECT * FROM session_runs WHERE started_at > ? ORDER BY started_at';
+    return this.db.prepare(q).all(...(status ? [since, status] : [since]));
+  }
+
+  // The run this session has in flight, as told by the leases rather than by a
+  // status column - the same reading `liveRun` takes of a task, and for the same
+  // reason: a status lingers as 'running' after the process that owned it is gone.
+  liveSessionRun(sessionId) {
+    const cutoff = new Date(Date.now() - LEASE_STALE_MS).toISOString();
+    return (
+      this.db
+        .prepare('SELECT r.* FROM session_runs r JOIN run_leases l ON l.run_id=r.id WHERE r.session_id=? AND l.heartbeat_at>=? ORDER BY r.started_at DESC')
+        .get(sessionId) || null
+    );
+  }
+
+  // -- permission requests --------------------------------------------------
+
+  addPermissionRequest(p) {
+    this.db
+      .prepare('INSERT INTO permission_requests(id,session_id,run_id,tool,input,cwd,status,created_at,answered_at) VALUES(?,?,?,?,?,?,?,?,?)')
+      .run(p.id, p.sessionId, p.runId, p.tool, p.input ?? null, p.cwd ?? null, p.status || 'pending', p.createdAt, p.answeredAt ?? null);
+    return this.getPermissionRequest(p.id);
+  }
+
+  getPermissionRequest(id) {
+    return this.db.prepare('SELECT * FROM permission_requests WHERE id=?').get(id) || null;
+  }
+
+  // The one unanswered request a session has, or null. Newest first, because an
+  // agent that has been blocked twice in a row is waiting on the later one and the
+  // earlier was answered to let it get there.
+  pendingPermission(sessionId) {
+    return (
+      this.db
+        .prepare("SELECT * FROM permission_requests WHERE session_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1")
+        .get(sessionId) || null
+    );
+  }
+
+  listPermissionRequests(sessionId) {
+    return this.db.prepare('SELECT * FROM permission_requests WHERE session_id=? ORDER BY created_at').all(sessionId);
+  }
+
+  updatePermissionRequest(id, patch = {}) {
+    const p = this.getPermissionRequest(id);
+    if (!p) return null;
+    const n = { ...p, ...patch };
+    this.db
+      .prepare('UPDATE permission_requests SET status=?,answered_at=? WHERE id=?')
+      .run(n.status, n.answered_at ?? null, id);
+    return this.getPermissionRequest(id);
+  }
+
+  // Every request still pending when the deadline passed, moved to `timeout`.
+  // A sweep rather than a timer per row, because the request that matters is the
+  // one whose process died: a timer dies with the process that armed it, and this
+  // still finds the row. Returns the ids so the caller can release any waiter it
+  // is still holding in memory.
+  sweepTimeoutPermissions(cutoffIso) {
+    const rows = this.db
+      .prepare("SELECT id FROM permission_requests WHERE status='pending' AND created_at < ?")
+      .all(cutoffIso);
+    if (!rows.length) return [];
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare("UPDATE permission_requests SET status='timeout',answered_at=? WHERE id=? AND status='pending'");
+    for (const r of rows) stmt.run(now, r.id);
+    return rows.map((r) => r.id);
   }
 
   // -- decision log ---------------------------------------------------------

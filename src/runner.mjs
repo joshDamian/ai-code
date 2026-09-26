@@ -114,16 +114,22 @@ export class Runner {
   // Which service call a job kind names. Every kind is one step of the workflow,
   // so this table is also the list of things that can be run in the background.
   //
-  // `chat` and `intake` are the kinds whose `task_id` is not a task: it is the id
-  // of the chat session, because that is what the job is bound to. The unique index
-  // on (task_id, active) is what makes it the right thing to put there - one turn of
-  // one conversation at a time is exactly the constraint a conversation needs, and
-  // the database enforces it rather than a flag in the server. An intake is a
-  // conversation too (a chat with a different prompt and a payload to read), so it
-  // sits under the same constraint for the same reason.
+  // `chat`, `session` and `intake` are the kinds whose `task_id` is not a task: it
+  // is the id of the chat session or the supervised session, because that is what
+  // the job is bound to. The unique index on (task_id, active) is what makes it the
+  // right thing to put there - one turn of one conversation at a time is exactly the
+  // constraint a conversation needs, and the database enforces it rather than a flag
+  // in the server. An intake is a conversation too (a chat with a different prompt
+  // and a payload to read), and a session is one with a permission gate in front of
+  // its tools, so both sit under the same constraint for the same reason.
   #step(job) {
     switch (job.kind) {
       case 'chat': return this.service.chat(job.task_id);
+      // A session is the third kind whose `task_id` is not a task but the id of the
+      // thing the turn belongs to. The same unique index on (task_id, active) is
+      // what makes it safe to put a session id there: one turn of one session at a
+      // time, enforced by the database rather than by a flag in the server.
+      case 'session': return this.service.sessionTurn(job.task_id);
       case 'intake': return this.service.draftIntake(job.task_id);
       case 'proposals': return this.service.proposeTasks(job.task_id);
       case 'infer-spec': return this.service.inferSpec(job.task_id);

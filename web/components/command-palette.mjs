@@ -13,6 +13,8 @@ const NAV = [
   { label: 'Overview', href: '#/overview' },
   { label: 'Projects', href: '#/projects' },
   { label: 'Tasks', href: '#/tasks' },
+  { label: 'Chat', href: '#/chat' },
+  { label: 'Sessions', href: '#/sessions' },
   { label: 'Providers', href: '#/providers' },
   { label: 'Routing', href: '#/routing' },
   { label: 'Runs', href: '#/runs' },

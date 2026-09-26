@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 test('approval is mandatory',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await assert.rejects(()=>s.execute(t.id),/approval/i)});
 test('mock full workflow completes',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'COMPLETE');assert.ok(s.store.listRuns(t.id).length>=3)});
@@ -5384,4 +5384,345 @@ test('a decision pass that fails does not take the completed task back out of CO
   // state that says it is finished.
   await assert.rejects(() => s.draftDecisions(t.id));
   assert.equal(s.task(t.id).state, 'COMPLETE');
+});
+
+// -- supervised sessions ---------------------------------------------------
+//
+// A session is the one role that writes in the user's own checkout, so the tests
+// that matter most here are the ones that pin the gate rather than the ones that
+// pin the feature: what the argv says, what a decision shape resolves to, and what
+// happens when nobody answers. The run lifecycle it shares with the other roles is
+// covered by their tests; these cover what is new.
+
+test('a session run is started gated, and refuses to start ungated', () => {
+  const base = { model: 'm', prompt: 'x', role: 'session' };
+  const argv = claudeArgs({ ...base, permissionTool: 'mcp__ai-code-permissions__approve', mcpConfig: '/tmp/mcp.json' });
+  // The four flags are the whole of the safety story, so each is pinned by name
+  // and by value rather than by the presence of the group.
+  assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'default');
+  assert.equal(argv[argv.indexOf('--permission-prompts') + 1], 'host');
+  assert.equal(argv[argv.indexOf('--permission-prompt-tool') + 1], 'mcp__ai-code-permissions__approve');
+  assert.equal(argv[argv.indexOf('--mcp-config') + 1], '/tmp/mcp.json');
+  // The one flag this role may never carry. A session that reached it would have
+  // every permission the gate exists to withhold.
+  assert.ok(!argv.includes('--dangerously-skip-permissions'));
+  // And the gate is not optional: a caller that forgets to build one is refused
+  // rather than started without it.
+  assert.throws(() => claudeArgs({ ...base, permissionTool: 'mcp__x__y' }), /ungated/);
+  assert.throws(() => claudeArgs({ ...base, mcpConfig: '/tmp/mcp.json' }), /ungated/);
+});
+
+test('a role that is not named in the allowlist still falls through to skip-permissions', () => {
+  // The branch above has to sit above this one, and this is what saying so looks
+  // like as a test: the fallthrough is load-bearing for every workflow role, and a
+  // session is the single exception to it.
+  const argv = claudeArgs({ model: 'm', prompt: 'x', role: 'implementer' });
+  assert.ok(argv.includes('--dangerously-skip-permissions'));
+});
+
+test('the permission config names the tool the argv asks for, and is removed afterwards', () => {
+  const gate = permissionMcpConfig('run-1', { endpoint: 'http://127.0.0.1:4317', sessionId: 's-1', timeoutMs: 5000 });
+  assert.equal(gate.permissionTool, 'mcp__ai-code-permissions__approve');
+  const cfg = JSON.parse(fs.readFileSync(gate.configPath, 'utf8'));
+  const server = cfg.mcpServers['ai-code-permissions'];
+  assert.equal(server.env.AI_CODE_PERMISSION_ENDPOINT, 'http://127.0.0.1:4317');
+  assert.equal(server.env.AI_CODE_SESSION_ID, 's-1');
+  assert.equal(server.env.AI_CODE_RUN_ID, 'run-1');
+  // The server a session runs against spawns this file by path, so the path has to
+  // point at the real one rather than at a name that only resolves in a checkout.
+  assert.ok(server.args[0].endsWith('permission-mcp.mjs'));
+  assert.ok(fs.existsSync(server.args[0]), 'the MCP server the config names has to exist');
+  removeMcpConfig(gate.configPath);
+  assert.ok(!fs.existsSync(gate.configPath));
+  // Removing nothing is not an error: the caller does not know whether it ever had
+  // a gate.
+  removeMcpConfig(null);
+});
+
+test('a permission decision denies unless a person allowed it', () => {
+  assert.deepEqual(permissionDecision({ status: 'allowed', input: '{"file_path":"a.mjs"}' }), {
+    behavior: 'allow',
+    updatedInput: { file_path: 'a.mjs' },
+  });
+  // An allowed row whose input will not parse is still an allow, and the tool is
+  // handed an empty object rather than a parse error - the decision is the row's
+  // status and not its payload.
+  assert.deepEqual(permissionDecision({ status: 'allowed', input: 'not json' }), { behavior: 'allow', updatedInput: {} });
+  for (const [status, re] of [
+    ['denied', /denied this action/i],
+    // A timeout says something different from a denial on purpose: the agent reads
+    // that sentence and decides what to do next, and "nobody answered" and
+    // "somebody said no" call for different next moves.
+    ['timeout', /nobody answered/i],
+    ['pending', /denied this action/i],
+    [undefined, /denied this action/i],
+  ]) {
+    const d = permissionDecision({ status, input: null });
+    assert.equal(d.behavior, 'deny', `${status} must deny`);
+    assert.match(d.message, re);
+  }
+});
+
+test('task-shaped counts what a turn wrote, not that it wrote', () => {
+  const write = (name) => ({ data: { message: { content: [{ type: 'tool_use', name }] } } });
+  // One edit is a session doing what a session is for. Two is a change with a
+  // shape to it, which is the thing worth offering to draft as a task.
+  assert.equal(taskShaped({ status: 'succeeded', events: [write('Write')] }), false);
+  assert.equal(taskShaped({ status: 'succeeded', events: [write('Write'), write('Edit')] }), true);
+  // Reading is not writing, however much of it there is.
+  assert.equal(taskShaped({ status: 'succeeded', events: [write('Read'), write('Grep'), write('Read')] }), false);
+  // A command that made the edits is not a writing tool, which is why the checkout
+  // is the second signal.
+  assert.equal(taskShaped({ status: 'succeeded', events: [write('Bash')], changedPaths: ['a.mjs', 'b.mjs'] }), true);
+  assert.equal(taskShaped({ status: 'succeeded', events: [write('Bash')], changedPaths: ['a.mjs'] }), false);
+  // A turn that failed is never task-shaped: there is nothing to draft from it.
+  assert.equal(taskShaped({ status: 'failed', events: [write('Write'), write('Edit')], changedPaths: ['a', 'b'] }), false);
+  assert.equal(taskShaped({}), false);
+});
+
+test('a session is created, renamed, listed and archived', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, '  Tidy the docs  ');
+  // Trimmed, because the name is what the list and the breadcrumb render and a
+  // stray space is a row that sorts and aligns differently from its neighbours.
+  assert.equal(session.name, 'Tidy the docs');
+  assert.equal(session.status, 'idle');
+  assert.throws(() => s.createSession(p.id, '   '), /needs a name/);
+  assert.equal(s.listSessions(p.id).length, 1);
+  assert.equal(s.renameSession(session.id, 'Tidy the docs harder').name, 'Tidy the docs harder');
+  assert.equal(s.archiveSession(session.id).status, 'archived');
+  assert.throws(() => s.sessionById('nope'), /not found/);
+  // A stopped session is not archived, so it is listed beside the live ones.
+  assert.equal(s.listSessions(p.id).length, 1);
+});
+
+test('a session turn runs in the project checkout and tallies what it cost', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Do a thing');
+  const asked = s.askSession(session.id, 'Rename the readme heading.');
+  // Written before anything runs, and carrying the run id that will answer it -
+  // which is what makes "still waiting" a question the database answers.
+  assert.equal(asked.status, 'running');
+  assert.ok(asked.pending_run_id);
+  const result = await s.sessionTurn(session.id);
+  assert.equal(result.runId, asked.pending_run_id, 'the run the instruction named is the run that answered it');
+  // The row is a session run and not a task run, which is the whole reason the
+  // table exists: nothing task-keyed has to know to exclude it.
+  assert.equal(s.store.listRuns(null).length, 0);
+  const run = s.store.getSessionRun(result.runId);
+  assert.equal(run.session_id, session.id);
+  assert.equal(run.status, 'succeeded');
+  const after = s.sessionById(session.id);
+  assert.equal(after.status, 'idle');
+  assert.equal(after.pending_run_id, null, 'a settled turn leaves nothing waiting behind it');
+  // The transcript reads back as one instruction and one answer.
+  const turns = s.sessionTurns(session.id);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].instruction, 'Rename the readme heading.');
+  assert.ok(turns[0].answer.length > 0);
+});
+
+test('the next turn is handed what happened in the last one', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Two turns');
+  const prompts = [];
+  const real = s.runRole.bind(s);
+  s.runRole = (task, role, prompt, ...rest) => {
+    prompts.push(prompt);
+    return real(task, role, prompt, ...rest);
+  };
+  s.askSession(session.id, 'First instruction.');
+  await s.sessionTurn(session.id);
+  s.askSession(session.id, 'Second instruction.');
+  await s.sessionTurn(session.id);
+  assert.equal(prompts.length, 2);
+  // The first prompt is the prompt and nothing else: there is no history yet.
+  assert.doesNotMatch(prompts[0], /WHAT HAS HAPPENED SO FAR/);
+  assert.match(prompts[0], /supervised/i);
+  assert.match(prompts[1], /WHAT HAS HAPPENED SO FAR/);
+  assert.match(prompts[1], /USER: First instruction\./);
+  // And the instruction it is answering appears once, as the task text, rather
+  // than being replayed under the history it opens.
+  assert.doesNotMatch(prompts[1], /USER: Second instruction\./);
+});
+
+test('a second instruction while one is in flight is refused', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Busy');
+  s.askSession(session.id, 'One.');
+  assert.throws(() => s.askSession(session.id, 'Two.'), /already working/);
+  await s.sessionTurn(session.id);
+  // And accepted once the turn settles, which is what makes the refusal a queue
+  // of one rather than a dead session.
+  s.askSession(session.id, 'Two.');
+  assert.equal(s.sessionById(session.id).status, 'running');
+});
+
+test('a stopped session takes no instruction until it is resumed', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Stopped');
+  assert.equal(s.stopSession(session.id).status, 'stopped');
+  assert.throws(() => s.askSession(session.id, 'Go.'), /stopped/);
+  assert.equal(s.resumeSession(session.id).status, 'idle');
+  assert.equal(s.askSession(session.id, 'Go.').status, 'running');
+});
+
+test('a permission request is answered once, and the second answer is refused', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Asking');
+  const req = s.addPermissionRequest({ sessionId: session.id, runId: null, tool: 'Bash', input: { command: 'rm -rf build' }, cwd: root });
+  const pending = s.permissionFor(session.id);
+  assert.equal(pending.tool, 'Bash');
+  assert.deepEqual(pending.input, { command: 'rm -rf build' });
+  // The deadline is derived from the policy rather than stored, so raising
+  // permissionTimeoutMs applies to a request already in flight.
+  assert.ok(Date.parse(pending.timeout_at) > Date.parse(pending.created_at));
+  assert.equal(s.answerPermission(req.id, 'allow').status, 'allowed');
+  assert.equal(s.permissionFor(session.id), null, 'an answered request is not pending');
+  assert.throws(() => s.answerPermission(req.id, 'deny'), (e) => e.code === 'CONFLICT');
+  // A decision recorded as allowed resolves to an allow, and the input travels
+  // with it - claude is handed back the arguments it proposed.
+  const row = s.store.getPermissionRequest(req.id);
+  assert.equal(permissionDecision(row).behavior, 'allow');
+  assert.deepEqual(permissionDecision(row).updatedInput, { command: 'rm -rf build' });
+});
+
+test('anything that is not the allow word denies', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Words');
+  for (const word of ['deny', 'Deny', 'yes', 'allow ', '', null]) {
+    const req = s.addPermissionRequest({ sessionId: session.id, tool: 'Bash', input: {} });
+    s.answerPermission(req.id, word);
+    assert.equal(s.store.getPermissionRequest(req.id).status, 'denied', `${JSON.stringify(word)} must not grant`);
+    assert.equal(permissionDecision(s.store.getPermissionRequest(req.id)).behavior, 'deny');
+  }
+  const req = s.addPermissionRequest({ sessionId: session.id, tool: 'Bash', input: {} });
+  s.answerPermission(req.id, 'allow');
+  assert.equal(s.store.getPermissionRequest(req.id).status, 'allowed');
+});
+
+test('a request nobody answered is swept to a timeout, which is a denial', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Waiting');
+  s.policies.session.permissionTimeoutMs = 0.001;
+  const req = s.addPermissionRequest({ sessionId: session.id, tool: 'Bash', input: {} });
+  // Backdated rather than slept through: the sweep is a query over `created_at`,
+  // and a test that waits two minutes to exercise it is a test nobody runs.
+  s.store.db.prepare('UPDATE permission_requests SET created_at=? WHERE id=?').run(new Date(Date.now() - 60000).toISOString(), req.id);
+  assert.deepEqual(s.sweepPermissions(), [req.id]);
+  assert.equal(s.store.getPermissionRequest(req.id).status, 'timeout');
+  assert.equal(permissionDecision(s.store.getPermissionRequest(req.id)).behavior, 'deny');
+  // Sweeping again is a no-op rather than a second write: the lifecycle is one-way.
+  assert.deepEqual(s.sweepPermissions(), []);
+});
+
+test('a held permission is released by the answer, and by the clock', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Held');
+  // The MCP tool's side of the round trip: a promise that resolves only when
+  // something settles the row, whichever of the two gets there first.
+  const held = [];
+  const hold = (req) => {
+    const promise = new Promise((resolve) => s.holdPermission(req.id, resolve));
+    held.push(promise);
+    return promise;
+  };
+  const granted = s.addPermissionRequest({ sessionId: session.id, tool: 'Write', input: {} });
+  const waiting = hold(granted);
+  s.answerPermission(granted.id, 'allow');
+  s.resolvePermission(granted.id);
+  assert.equal(await waiting, 'allowed');
+  // The clock's release: a request swept while something is still holding it has
+  // to free the waiter, or the agent blocks until its own longer timer fires.
+  s.policies.session.permissionTimeoutMs = 0.001;
+  const expired = s.addPermissionRequest({ sessionId: session.id, tool: 'Write', input: {} });
+  const waitingExpired = hold(expired);
+  s.store.db.prepare('UPDATE permission_requests SET created_at=? WHERE id=?').run(new Date(Date.now() - 60000).toISOString(), expired.id);
+  s.sweepPermissions();
+  assert.equal(await waitingExpired, 'timeout');
+});
+
+test('stopping a session cancels its run and releases the prompt it was blocked on', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Blocked');
+  s.askSession(session.id, 'Do the thing.');
+  const pending = s.addPermissionRequest({ sessionId: session.id, tool: 'Bash', input: { command: 'ls' } });
+  const released = new Promise((resolve) => s.holdPermission(pending.id, resolve));
+  const stopped = s.stopSession(session.id);
+  // The prompt is denied rather than left pending: a request held over a session
+  // that is not running is a panel the dashboard can never clear.
+  assert.equal(s.store.getPermissionRequest(pending.id).status, 'timeout');
+  assert.equal(await released, 'timeout');
+  assert.equal(stopped.status, 'stopped');
+  assert.equal(stopped.pending_run_id, null, 'a stop clears the instruction it was working on');
+  // The cancel is written to the session and to the run row, so the process
+  // driving the run - whichever one it is - sees it on its next tick.
+  assert.equal(s.store.sessionCancelRequested(session.id), true);
+});
+
+test('the daily cap refuses a turn before it starts', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Capped');
+  // A session run already priced today, which is what the cap is spent against.
+  // The spend is read from the run rows rather than from the session's tally,
+  // because the cap is about today and the tally is the session's lifetime.
+  s.store.addSessionRun({ id: s.store.id(), role: 'session', providerId: 'mock', modelId: 'mock-strong', status: 'succeeded', startedAt: new Date().toISOString() }, session.id);
+  s.store.updateSessionRun(s.store.listSessionRuns(session.id)[0].id, { cost: 5 });
+  s.policies.session.dailyCap = 1;
+  s.askSession(session.id, 'Spend more.');
+  await assert.rejects(() => s.sessionTurn(session.id), (e) => e.code === 'COST_LIMIT');
+  // Refused before anything was spawned, reported where a reader will find it, and
+  // the session is left settled rather than stuck showing a turn in flight.
+  const events = s.store.listEvents(s.store.getSession(session.id).pending_run_id || s.store.listSessionRuns(session.id)[0].id);
+  const run = s.store.listSessionRuns(session.id).find((r) => r.id !== undefined && r.status === 'running');
+  assert.equal(run, undefined, 'no run row is opened for a refused turn');
+  assert.equal(s.sessionById(session.id).status, 'idle');
+  assert.equal(s.sessionById(session.id).pending_run_id, null);
+  // Raising the cap is the way back in, and it is read per turn rather than
+  // latched at startup.
+  s.policies.session.dailyCap = 0;
+  s.askSession(session.id, 'Now go.');
+  const result = await s.sessionTurn(session.id);
+  assert.equal(result.runId, s.sessionById(session.id).pending_run_id || result.runId);
+});
+
+test('the reaper clears a session whose process died', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Orphaned');
+  s.askSession(session.id, 'Work.');
+  // A run with no lease is a run whose process is gone: the row says running and
+  // nothing is driving it. Left alone the session stays `running` forever, and a
+  // session that is running takes no instruction - so the reap is what makes a
+  // killed process recoverable rather than a session that has to be replaced.
+  const runId = s.store.getSession(session.id).pending_run_id;
+  s.store.addSessionRun({ id: runId, role: 'session', providerId: 'mock', modelId: 'mock-strong', status: 'running', startedAt: new Date().toISOString() }, session.id);
+  s.store.reapStaleRuns();
+  assert.equal(s.store.getSessionRun(runId).status, 'interrupted');
+  const after = s.store.getSession(session.id);
+  assert.equal(after.status, 'idle');
+  assert.equal(after.pending_run_id, null);
 });

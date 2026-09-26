@@ -700,6 +700,33 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .chat-live{color:var(--muted);font-size:12px;font-style:italic}
 .chat-error{color:var(--bad);font-size:13px;padding:var(--space-2) var(--space-3);background:rgba(255,133,133,.08);border:1px solid #5c2c2c;border-radius:var(--radius-sm);margin:var(--space-2) 0}
 
+/* ---- supervised sessions ---- */
+/* The permission panel is the one element on the page that is blocking something,
+   so it is drawn as a raised surface above the transcript rather than as another
+   card in the column: an agent that has asked a question has stopped, and the
+   answer is the only thing that moves it. The warm border is what makes it read as
+   a prompt rather than as another panel. */
+.session-permission{margin:0 var(--space-4) var(--space-3);padding:var(--space-4);background:var(--panel2);border:1px solid var(--warn);border-radius:var(--radius);box-shadow:0 4px 18px rgba(0,0,0,.35)}
+.session-permission-head{display:flex;align-items:center;gap:var(--space-3);margin-bottom:var(--space-2)}
+.session-permission-tool{font-weight:650;font-size:14px}
+/* Tabular figures and a right-aligned slot: a number that changes width every
+   second shifts the tool name beside it, which is a panel that twitches. */
+.session-permission-clock{margin-left:auto;font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.session-permission-clock.urgent{color:var(--bad);font-weight:650}
+.session-permission-path{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;color:var(--text);word-break:break-all;white-space:pre-wrap}
+.session-permission-body{margin:var(--space-2) 0 0;padding:var(--space-3);max-height:240px;overflow:auto;background:var(--bg,var(--panel));border:1px solid var(--line);border-radius:var(--radius-sm);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-all}
+.session-permission-foot{display:flex;align-items:center;gap:var(--space-3);margin-top:var(--space-3)}
+.session-permission-foot .muted{font-size:12px;word-break:break-all}
+.session-permission-foot .row{margin-left:auto}
+.session-banner{padding:var(--space-3) var(--space-4);font-size:13px}
+.session-controls{gap:var(--space-2)}
+/* The meter sits above the activity list rather than beside it, because the two
+   answer the same question in different units: what this session is costing. */
+.session-budget{padding:0 var(--space-4) var(--space-3);font-size:12.5px}
+.session-budget-figure{font-size:20px;font-weight:650;color:var(--text);margin-top:2px}
+.session-budget-figure .muted{font-size:12px;font-weight:400}
+.session-caveat{margin:var(--space-3) 0 0;font-size:12.5px}
+
 /* ---- data table ---- */
 .data-table{width:100%;border-collapse:collapse}
 .data-table th,.data-table td{padding:var(--space-3);border-bottom:1px solid var(--line);text-align:left;vertical-align:top}

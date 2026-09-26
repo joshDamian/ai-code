@@ -9,7 +9,7 @@ import {
   currentBranch, revParse, isAncestor, mergeBase, findCommit, branches, checkedOut, mergeTree, commitTree, setBranch, commitAll, removeWorktree, commitDiff,
   landingCommit, commitRef,
 } from './git.mjs';
-import { runAgent, classify } from './agents.mjs';
+import { runAgent, classify, permissionMcpConfig, removeMcpConfig } from './agents.mjs';
 import { loadPolicies, savePolicies } from './policy.mjs';
 import { isTransient, healthThresholds, effectiveHealth } from './health.mjs';
 import { unifiedDiff } from './format.mjs';
@@ -48,7 +48,13 @@ export const transitions = {
 // would find an empty chain and every question would fail with "no available
 // model capable of chat". It is the same read-only reasoning over the same tree,
 // which is why the planner's capability is the honest one to require.
-const capability = { planner: 'planning', implementer: 'coding', reviewer: 'review', repair: 'repair', chat: 'planning' };
+// A session asks for `coding` for the same reason a chat asks for `planning`: a
+// session writes, so the models that can do it are the ones that can code, and
+// requiring anything narrower would find an empty chain and fail every session
+// with "no available model capable of session". Being the cheapest coding-capable
+// model is the point - a session is a long conversation of small gated actions,
+// and the routing weight below sends it to the cheap end of that set.
+const capability = { planner: 'planning', implementer: 'coding', reviewer: 'review', repair: 'repair', chat: 'planning', session: 'coding' };
 
 // The tools whose input names something the planner read. A file it opened is a
 // file whose uncommitted changes the plan may quietly rest on; a path it recorded
@@ -465,6 +471,90 @@ function chatPrompt(history) {
   return history ? `${CHAT_PROMPT}\n\nCONVERSATION SO FAR, oldest first:\n\n${history}` : CHAT_PROMPT;
 }
 
+// The supervised session's preamble. Pinned by test for the reason CHAT_PROMPT is:
+// every clause is a promise the harness makes the model, and a clause edited away
+// is a promise broken silently.
+//
+// The first two clauses are the design in one sentence. A session may write in the
+// user's checkout - which no other role may do, and which is the whole reason it
+// exists - and it may only do so through the live prompt, so a denial is the end of
+// that action and not an obstacle to route around. The second clause names the
+// routes around it by hand, because "do not bypass it" is a rule a model can read
+// its way past: it says the denial is final, and it names the tempting detours.
+//
+// The third clause is the boundary between a session and a task. A session is for
+// work that is not yet shaped like anything: exploring, a small fix, trying an
+// approach. The moment it has become a change worth reviewing and landing, it
+// belongs to a task - which is the only route from this checkout into the repo's
+// history, and which carries a plan, a reviewer and a budget that a session has
+// none of. So the instruction is to stop and say so rather than to carry on, and
+// "say what is left" is asked for explicitly because the draft is built from that
+// sentence.
+export const SESSION_PROMPT =
+  'Work in this checkout on the instruction below. You are supervised: every action that writes a file or runs a command is sent to the person watching this session, and it happens only if they approve it. Do not try to avoid that gate. A refusal is final for that action - do not retry it, reword it, or reach the same place another way, whether through a different tool, a shell command, or a file you already had permission to edit. If you are refused, stop and say what you were trying to do and why. Do not commit, merge, push, rebase, tag, or open a pull request: those routes into the repository belong to a task, which has a plan, a review and an approval that this session does not. If the work grows into something that wants a plan and a review - more than a small, self-contained change - stop and say so, and describe what is left to do, rather than doing it here.';
+
+// The instruction is the `TASK` half of the prompt runRole builds, so only what
+// came before it belongs here.
+function sessionPrompt(history) {
+  return history ? `${SESSION_PROMPT}\n\nWHAT HAS HAPPENED SO FAR, oldest first:\n\n${history}` : SESSION_PROMPT;
+}
+
+// What a session's turn is about, as the prompt's APPROVED PLAN slot.
+//
+// A session has no plan and will never have one - that is what makes it a session
+// rather than a task, and the slot is not optional in the shape runRole builds.
+// The honest text is what it gets, because a model handed a plan that does not
+// exist would plan against it.
+const SESSION_NO_PLAN =
+  'No plan: this is a supervised session, not a task. Nothing here has been approved for implementation, and the person watching approves each action as it happens rather than a plan in advance.';
+
+// The file-modifying tools, as the task-shape check below counts them. Named as a
+// set rather than a pattern because the question is "did this change files", and a
+// regex over tool names is the kind of thing that quietly widens when a CLI adds
+// an `EditNotebook` nobody thought about.
+const FILE_WRITING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+
+// Whether a finished session turn looks like a task.
+//
+// This is the nudge's whole input, and it is deliberately a pure function of the
+// events: the dashboard asks it of a run it reads back from the database, and a
+// test asks it of a hand-written list. Two signals, either of which is enough - a
+// turn that wrote two files through the gate, or a checkout that came out of the
+// turn carrying two changed paths. The first is what the agent did; the second is
+// what the tree looks like, which catches a turn that made its edits through a
+// command rather than through a writing tool.
+//
+// Two rather than one: a single edit is a session doing what a session is for, and
+// a nudge after every one of those is a nudge nobody reads.
+export function taskShaped({ status, events = [], changedPaths = [] } = {}) {
+  if (status !== 'succeeded') return false;
+  let writes = 0;
+  for (const e of events) {
+    const content = e?.data?.message?.content;
+    if (!Array.isArray(content)) continue;
+    // Subagent frames are counted, unlike in the budget: this question is what the
+    // checkout looks like afterwards, and a file a subagent wrote is a file that
+    // changed. The budget excludes them because it is about what the parent spent.
+    for (const block of content) {
+      if (block?.type === 'tool_use' && FILE_WRITING_TOOLS.has(block.name)) writes++;
+    }
+  }
+  return writes >= 2 || changedPaths.length >= 2;
+}
+
+// The changed paths a run left in the checkout, as `git status` reports them. The
+// second signal above, read at the moment the turn ends rather than reconstructed
+// later: what the tree looks like after a later turn is not evidence about this one.
+function changedInCheckout(root) {
+  try {
+    return status(root).map((line) => line.slice(3).trim()).filter(Boolean);
+  } catch {
+    // An unreadable tree is not evidence of a change, and a nudge built on a guess
+    // is worse than no nudge.
+    return [];
+  }
+}
+
 // The payload half of every drafting prompt. Three prompts below ask a model for
 // something the harness has to read rather than a person has to - a spec, a batch of
 // tasks, a set of decisions - and the shape is the contract. Written once because a
@@ -486,8 +576,21 @@ export const INTAKE_PROMPT =
 // that is not already on the list. `open` is the harness's own reading of that list,
 // which is the point: a model asked to remember what it proposed last time is
 // guessing, and a model handed the list is not.
-export const PROPOSALS_PROMPT = (spec, open) =>
-  `Propose the next tasks for this project. You are read-only: do not modify source files, create files, run mutating commands, or commit. Ground every proposal in the spec below and in the repository as it is - name the files a task would touch where you can see them. Propose only work that is not already open, and propose nothing you would not start next: three good tasks are worth more than ten plausible ones. If there is nothing worth building next, return an empty list and say so in your reply.\n\nSPEC:\n${spec || 'No spec has been written for this project yet. Propose tasks from the repository alone.'}\n\nALREADY OPEN (${open.length}):\n${open.length ? open.map((t) => `- ${t.state}: ${t.title}`).join('\n') : '(nothing)'}\n\n` +
+// `focus` is the third way in and the only one that is not speculative. A session
+// that has grown task-shaped has already done the work in the user's checkout, as
+// uncommitted changes with no plan, no review and no branch behind them - and a
+// pass asked only "what else should I build" would propose the next thing rather
+// than the task that describes what is sitting in the tree. Given the summary, the
+// instruction is to write the task that would have produced it.
+//
+// It goes after the opening instruction and before the spec, because it changes
+// what is being asked for rather than what it is grounded in.
+export const PROPOSALS_PROMPT = (spec, open, focus = '') =>
+  `Propose the next tasks for this project. You are read-only: do not modify source files, create files, run mutating commands, or commit. Ground every proposal in the spec below and in the repository as it is - name the files a task would touch where you can see them. Propose only work that is not already open, and propose nothing you would not start next: three good tasks are worth more than ten plausible ones. If there is nothing worth building next, return an empty list and say so in your reply.\n\n` +
+  (focus
+    ? `The work below has already been done in this checkout by a supervised session, outside any task: it exists as uncommitted changes and nothing else, with no plan, no review and no branch behind it. Propose the tasks that describe it - what the change is, what it should be checked against, and anything it left unfinished - rather than new work beside it. Say in the description which files it touched.\n\nALREADY DONE IN THE CHECKOUT:\n${focus}\n\n`
+    : '') +
+  `SPEC:\n${spec || 'No spec has been written for this project yet. Propose tasks from the repository alone.'}\n\nALREADY OPEN (${open.length}):\n${open.length ? open.map((t) => `- ${t.state}: ${t.title}`).join('\n') : '(nothing)'}\n\n` +
   payloadInstruction('{"tasks":[{"title":"<one line>","description":"<what done looks like, and how it would be checked>"}]}');
 
 // The question that opens a proposals conversation, and the text the waiting run is
@@ -592,6 +695,56 @@ const DEFAULT_CHAT_TITLE = 'New chat';
 // context check rather than trimmed. Newest last, so the recency that matters is
 // the part that survives the cut.
 const CHAT_HISTORY_CHARS = 24000;
+
+// The same cap for a session, and the same reasoning. A session's history is
+// thinner than a chat's - one instruction and one answer per turn - so the cap is
+// reached more slowly, but a session that has been running all afternoon will
+// reach it, and the turn that does is the turn where the newest instruction
+// matters most.
+const SESSION_HISTORY_CHARS = 24000;
+
+// Midnight today, as an instant. The session daily cap is spent against it, and it
+// is local rather than UTC because "today" is what a person means when they set a
+// daily budget - a cap that reset at 5pm would be a cap nobody could reason about.
+function startOfDayIso() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString();
+}
+
+// A stored JSON column read back out. Null for anything that does not parse, which
+// is the shape every caller here wants: the input of an unreadable permission
+// request, the changed paths of a session whose column was never written. A
+// throw here would take down a dashboard read for a row that is merely old.
+function parseJson(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+// What an answered permission request resolves to, in the exact shape the MCP tool
+// hands back to claude - `{behavior:'allow',updatedInput}` or `{behavior:'deny',
+// message}` - read off the wire from a real run before this file had any of this.
+//
+// It is a function of the stored row rather than of the answer that was sent, which
+// is the point: the held HTTP response is released by whatever settled the row, so
+// a timeout and a denial travel the same path, and the decision the agent is given
+// cannot be a different one from the decision the dashboard recorded.
+//
+// Everything that is not `allowed` denies, and each refusal says which one it was,
+// because the agent reads that sentence and acts on it - "somebody said no" and
+// "nobody answered" call for different next moves.
+export function permissionDecision(row) {
+  if (row?.status === 'allowed') return { behavior: 'allow', updatedInput: parseJson(row.input) ?? {} };
+  const message =
+    row?.status === 'timeout'
+      ? 'Nobody answered this request in time, so it was not approved. Do not retry it.'
+      : 'The person watching this session denied this action. Do not retry it or reach the same result another way.';
+  return { behavior: 'deny', message };
+}
 
 // What a task-scoped question is handed about the task it is asking about. The
 // assembler caps file bodies and the review section, but the plan and this
@@ -769,11 +922,26 @@ export class Service {
     // no task id, so there is nothing in the lease table to key this on - an
     // in-process guard on purpose, with the job row holding off a second server.
     this.chatBusy = new Set();
+    // The same guard for supervised sessions, keyed the same way and for the same
+    // reason: a session run has no task id, so there is no lease row to hold this
+    // in - which is also why `sessions.pending_run_id` is written before the run
+    // starts, so a second server is held off by a column rather than by this set.
+    this.sessionBusy = new Set();
+    // Where a session's permission MCP server should POST its questions, set to
+    // the server's own bound address once it is listening. Null everywhere else -
+    // a CLI run, a runner without a server - and a session started with it null is
+    // refused in `claudeArgs` rather than run ungated.
+    this.permissionEndpoint = null;
     // Opening a store is also the only repair opportunity there is: the process
     // that abandoned a run is gone, and this is what picks up after it. Every
     // command does this, which is what makes the recovery reachable at all - and
     // is why the store's own reap is lease-aware rather than unconditional.
     this.recoverPlans();
+    // And the same repair for the new thing that can be abandoned. A permission
+    // request left pending by a process that died is a session the dashboard will
+    // say is blocked on a question nobody can answer, so it is swept to `timeout`
+    // - which is a denial - on the way in.
+    this.sweepPermissions();
   }
 
   // -- task lifecycle -------------------------------------------------------
@@ -1135,7 +1303,10 @@ export class Service {
           plan: spec || 'No plan: this is a question about the project, not a task.',
         },
         'chat',
-        PROPOSALS_PROMPT(spec, open),
+        // A pass opened to describe work already sitting in the checkout is asked
+        // for the tasks that work implies; every other pass is asked what to build
+        // next. One prompt, one parser, one place drafts land.
+        PROPOSALS_PROMPT(spec, open, cap(session.focus || '', DECISION_DIFF_CHARS)),
         project.path,
         [],
         { runId: pending.run_id, chatSessionId: sessionId }
@@ -1645,7 +1816,7 @@ export class Service {
   // is asked with that task's own record in hand. Optional, and null is the
   // project-wide chat every session without it has always been - the two are one
   // feature with one difference in the prompt, not two surfaces.
-  createChatSession(projectId, title, taskId) {
+  createChatSession(projectId, title, taskId, focus = null) {
     this.project(projectId);
     let scoped = null;
     if (taskId) {
@@ -1659,6 +1830,7 @@ export class Service {
     return this.store.createChatSession({
       id: this.store.id(),
       projectId,
+      focus,
       // A scoped session is named for its subject, so a list of conversations reads
       // as what was asked about. It is deliberately not DEFAULT_CHAT_TITLE: the
       // first question renames a session carrying that title, and a conversation
@@ -1772,6 +1944,482 @@ export class Service {
       text = text ? `${lines[i]}\n\n${text}` : lines[i];
     }
     return text;
+  }
+
+  // -- sessions -------------------------------------------------------------
+  //
+  // A supervised session: a named agent working in the project's own checkout on
+  // freeform instructions, with every write and every command routed through a
+  // live permission prompt. It is neither of the two things it sits between. It is
+  // not a chat - a chat is read-only, and the whole point of a session is that it
+  // acts in the tree. It is not a task - a task has a plan, an approval gate and a
+  // worktree, and a session has none of those, which is exactly what makes it the
+  // right shape for work that is not yet shaped like anything.
+  //
+  // What it does share is the run lifecycle, and it shares it by calling the same
+  // `runRole`: lease, cross-process cancel, budget abort, timeout, stall detection
+  // and the circuit breaker are one implementation with three sets of callers. The
+  // only new mechanism is the permission round trip, and even that is a row in a
+  // table rather than a channel held in memory.
+
+  createSession(projectId, name, { providerId, modelId } = {}) {
+    const p = this.project(projectId);
+    const label = String(name || '').trim();
+    if (!label) throw new Error('A session needs a name');
+    return this.store.createSession({
+      id: this.store.id(),
+      projectId: p.id,
+      name: label,
+      providerId: providerId ?? null,
+      modelId: modelId ?? null,
+    });
+  }
+
+  listSessions(projectId) {
+    return this.store.listSessions(projectId);
+  }
+
+  sessionById(id) {
+    const s = this.store.getSession(id);
+    if (!s) throw new Error('Session not found');
+    return s;
+  }
+
+  renameSession(id, name) {
+    this.sessionById(id);
+    const label = String(name || '').trim();
+    if (!label) throw new Error('A session needs a name');
+    return this.store.updateSession(id, { name: label });
+  }
+
+  // Archiving is a person saying they are done with this one. It refuses while a
+  // turn is in flight rather than cancelling silently: a session stopped by an
+  // archive is a session whose work was abandoned by a click on a different button.
+  archiveSession(id) {
+    const s = this.sessionById(id);
+    if (s.pending_run_id) throw new Error('This session has a turn in flight; stop it first');
+    return this.store.updateSession(id, { status: 'archived' });
+  }
+
+  // Stop is a cancel plus the state that says a person asked for it. The two are
+  // not the same: a cancelled turn on an idle session is a turn that was cut short,
+  // while `stopped` is a session that will not take another instruction until it is
+  // resumed, and only the second can be read back after the process that wrote it
+  // is gone.
+  stopSession(id) {
+    this.sessionById(id);
+    this.cancelSessionRun(id);
+    return this.store.updateSession(id, { status: 'stopped', pending_run_id: null });
+  }
+
+  // The instruction waiting for an answer, or null. Read from the events rather
+  // than from a messages table, because the instruction is the first thing a run
+  // produces and there is no moment at which it exists without a run - the pairing
+  // IS the run id, and `sessions.pending_run_id` is the column that says which one
+  // is still unanswered.
+  #pendingInstruction(sessionId) {
+    const s = this.store.getSession(sessionId);
+    if (!s?.pending_run_id) return null;
+    const event = this.store.listEvents(s.pending_run_id).filter((e) => e.type === 'instruction').pop();
+    const text = event?.data?.text || '';
+    return text ? { runId: s.pending_run_id, text } : null;
+  }
+
+  // Writes the instruction down before anything runs, and marks the session busy in
+  // the same call. Cloned from askChat for the one reason that method gives: the
+  // instruction carries the id of the run that will answer it, so "still waiting"
+  // is answered from the database rather than from one process's memory.
+  askSession(sessionId, text) {
+    const s = this.sessionById(sessionId);
+    const instruction = String(text || '').trim();
+    if (!instruction) throw new Error('A session needs an instruction');
+    if (s.status === 'archived') throw new Error('This session is archived; restore it before sending an instruction');
+    if (s.status === 'stopped') throw new Error('This session is stopped; resume it before sending an instruction');
+    // A turn at a time, for the reason chat has one: two runs reading the same
+    // history and both appending to it is a duplicated action against the user's
+    // checkout, which is worse here than a duplicated answer.
+    if (s.pending_run_id) throw new Error('This session is already working on an instruction');
+    const runId = this.store.id();
+    this.store.addEvent({ runId, type: 'instruction', data: { text: instruction } });
+    // The cancel of a previous turn is spent by the time a new instruction is
+    // accepted; left set it would abort this one the moment it started.
+    this.store.setSessionCancel(sessionId, false);
+    return this.store.updateSession(sessionId, { status: 'running', pending_run_id: runId });
+  }
+
+  // Resuming is clearing `stopped` and nothing else. Separated from `askSession`
+  // because a person who stopped a session and then typed an instruction meant to
+  // start a new turn, while a person clicking Resume meant to unsay the stop - and
+  // a UI with only the first would make them guess which one it was.
+  resumeSession(sessionId) {
+    const s = this.sessionById(sessionId);
+    if (s.status !== 'stopped') return s;
+    return this.store.updateSession(sessionId, { status: 'idle' });
+  }
+
+  // One turn: the instruction waiting in this session, worked and left in the
+  // checkout. The runner calls this with nothing to say - the instruction is
+  // already in the events - and the shape is `chat()`'s for the same reasons.
+  async sessionTurn(sessionId) {
+    const s = this.sessionById(sessionId);
+    const pending = this.#pendingInstruction(sessionId);
+    if (!pending) throw new Error('This session has no instruction waiting for an answer');
+    if (this.sessionBusy.has(sessionId)) throw new Error('This session is already working on an instruction');
+    this.sessionBusy.add(sessionId);
+    try {
+      const project = this.project(s.project_id);
+      const policy = this.policies.session || {};
+      const cap = Number(policy.dailyCap) || 0;
+      if (cap > 0) {
+        const spent = this.store.sessionSpendSince(startOfDayIso());
+        if (spent >= cap) {
+          // Refused before anything is spawned, and written where a reader will see
+          // it: a refusal that only lands in whoever called this is a session that
+          // looks like it silently did nothing.
+          const text = `Refused: this session has spent $${spent.toFixed(2)} today against a daily cap of $${cap.toFixed(2)}. No turn will start until tomorrow, or until session.dailyCap in .ai-code/routing.json is raised.`;
+          this.store.addEvent({ runId: pending.runId, type: 'error', data: { message: text } });
+          this.#settleSession(sessionId);
+          throw Object.assign(new Error(text), { code: 'COST_LIMIT' });
+        }
+      }
+      // What the checkout looked like before, so the nudge can tell what this turn
+      // added to it. Read here rather than compared against a stored baseline: the
+      // question is "did this turn change files", and the only tree that can answer
+      // it is the one the turn ran in.
+      const before = changedInCheckout(project.path);
+      try {
+        const result = await this.runRole(
+          // A session's run belongs to no task, and `runRole` writes it to
+          // `session_runs` rather than to `runs` - see the sessionId option below.
+          // So this is not a task row and is not read as one: it is what runRole
+          // reads for the prompt, which is the instruction as the task text.
+          {
+            id: null,
+            project_id: s.project_id,
+            title: s.name,
+            description: pending.text,
+            plan: SESSION_NO_PLAN,
+          },
+          'session',
+          sessionPrompt(this.#sessionHistory(sessionId, pending.runId)),
+          // The project root, named explicitly. This is the one role that may write
+          // there, and it is why the prompt spends two clauses on the gate: nothing
+          // below this line confines it to a worktree, so the permission round trip
+          // is the whole of the confinement.
+          project.path,
+          [],
+          {
+            runId: pending.runId,
+            sessionId,
+            permission: {
+              endpoint: this.permissionEndpoint,
+              timeoutMs: (Number(policy.permissionTimeoutMs) || 120) * 1000,
+            },
+          }
+        );
+        const run = this.store.getSessionRun(result.runId);
+        // The session's lifetime spend, which is what the list and the budget meter
+        // both read. Read-modify-write rather than an increment, because the store's
+        // update takes the whole row and this is the only writer that moves it.
+        this.store.updateSession(sessionId, {
+          budget_tally: (this.store.getSession(sessionId)?.budget_tally || 0) + (result.cost || 0),
+        });
+        this.#recordShape(sessionId, result.runId, run, project.path, before);
+        return result;
+      } finally {
+        this.#settleSession(sessionId);
+      }
+    } finally {
+      this.sessionBusy.delete(sessionId);
+    }
+  }
+
+  // The nudge's two halves, written once at the end of a turn that succeeded.
+  //
+  // Nothing is written for a turn that did not succeed: a failed turn is a thing to
+  // read and retry, and it is not a task. A new instruction clears the pair, so the
+  // card belongs to the turn above the composer rather than to the session.
+  #recordShape(sessionId, runId, run, root, before) {
+    const after = changedInCheckout(root);
+    const changed = [...new Set([...before, ...after])];
+    const shaped = taskShaped({ status: run?.status, events: this.store.listEvents(runId), changedPaths: changed });
+    this.store.updateSession(sessionId, {
+      task_shaped: shaped ? 1 : 0,
+      nudge_dismissed: 0,
+      changed_paths: JSON.stringify(changed),
+    });
+  }
+
+  // The session's status after a turn, derived rather than declared. Only a session
+  // this turn put in `running` goes back to `idle`: one a person stopped while the
+  // turn was in flight stays stopped, because their instruction was the later one
+  // and a settle that overwrote it would leave a stopped session looking ready.
+  #settleSession(sessionId) {
+    const s = this.store.getSession(sessionId);
+    if (!s) return null;
+    return this.store.updateSession(sessionId, {
+      status: s.status === 'running' ? 'idle' : s.status,
+      pending_run_id: null,
+    });
+  }
+
+  // What the session has done so far, as the model will read it, oldest first. The
+  // instruction this turn is about to answer is excluded - it is the `TASK` half of
+  // the prompt, and repeating it under WHAT HAS HAPPENED would have the model
+  // reading its own instruction twice and answering the copy.
+  //
+  // The two things a turn leaves are its instruction and its final text, so those
+  // are the two things replayed. The tool calls are not: they are already in the
+  // checkout, which is the context this role actually has and the reason it can get
+  // away with a history this thin.
+  #sessionHistory(sessionId, runId) {
+    const prior = this.store.listSessionRuns(sessionId).filter((r) => r.id !== runId);
+    const lines = [];
+    for (const r of prior) {
+      const instruction = this.store.listEvents(r.id).filter((e) => e.type === 'instruction').pop();
+      if (instruction?.data?.text) lines.push(`USER: ${instruction.data.text}`);
+      const answer = (this.finalText(r.id) || '').trim();
+      if (answer) lines.push(`SESSION: ${answer}`);
+    }
+    let text = '';
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (text.length + lines[i].length > SESSION_HISTORY_CHARS) break;
+      text = text ? `${lines[i]}\n\n${text}` : lines[i];
+    }
+    return text;
+  }
+
+  // The session's turns, oldest first, each with the instruction that opened it and
+  // the answer it ended on. Assembled here rather than in the view for the reason
+  // `#sessionHistory` is: the two halves live in two tables, and a client that has
+  // to join them is a client that has to know the events table to draw a transcript.
+  //
+  // An answer is only read for a run that succeeded. A failed or cancelled turn has
+  // its error in the run row and its last words in its events, and neither is an
+  // answer - `finalText` would hand back whatever streamed before the turn was cut
+  // short, which reads as a reply the agent never finished making.
+  sessionTurns(sessionId) {
+    return this.store.listSessionRuns(sessionId).map((run) => {
+      const instruction = this.store.listEvents(run.id).filter((e) => e.type === 'instruction').pop();
+      return {
+        run_id: run.id,
+        at: run.started_at,
+        ended_at: run.ended_at,
+        status: run.status,
+        error: run.error,
+        cost: run.cost || 0,
+        instruction: instruction?.data?.text || '',
+        answer: run.status === 'succeeded' ? (this.finalText(run.id) || '').trim() : '',
+      };
+    });
+  }
+
+  // A cancel, durable first, for the reason cancelTask gives: the session column is
+  // the only channel to a run owned by another process, and that process notices
+  // within one tick. Aborting a controller this process owns is the fast path on
+  // top of it.
+  cancelSessionRun(sessionId) {
+    this.sessionById(sessionId);
+    this.store.setSessionCancel(sessionId, true);
+    const live = [...this.active.entries()].filter(([, v]) => v.sessionId === sessionId);
+    for (const [, v] of live) v.controller.abort(cancelled());
+    if (!live.length) {
+      // Nothing here owns the run, so the rows are written directly. A live owner
+      // writes the same values a tick from now, which is harmless.
+      for (const r of this.store.listSessionRuns(sessionId).filter((r) => r.status === 'running')) {
+        this.store.updateSessionRun(r.id, { status: 'cancelled', ended_at: new Date().toISOString(), error: 'Cancelled by user' });
+      }
+    }
+    // A prompt still pending belongs to the run being stopped. Left pending it
+    // would hold the dashboard's countdown panel open over a session that is doing
+    // nothing, and the agent process blocked on it may already be gone.
+    const pending = this.store.pendingPermission(sessionId);
+    if (pending) this.timeoutPermission(pending.id);
+    return this.store.getSession(sessionId);
+  }
+
+  // -- permissions ----------------------------------------------------------
+  //
+  // The one new mechanism. A gated action is written down as a row before anything
+  // waits, which is what makes the wait survive a page reload, a backgrounded phone
+  // and the process that started it: every surface answers "what is this session
+  // blocked on" by reading the table rather than by holding a channel.
+  //
+  // The lifecycle is pending -> allowed | denied | timeout. It is one-way, and the
+  // route that answers checks it: a request that has already left pending cannot be
+  // answered again, so an Allow landing after the countdown expired is refused
+  // rather than quietly rewriting a denial the agent has already acted on.
+
+  addPermissionRequest({ sessionId, runId, tool, input, cwd }) {
+    this.sessionById(sessionId);
+    return this.store.addPermissionRequest({
+      id: this.store.id(),
+      sessionId,
+      runId: runId || null,
+      tool: String(tool || 'unknown'),
+      // Stored as JSON: the input is the provider's own shape, and a second schema
+      // here would be a second thing to keep in step with a CLI that changes.
+      input: input === undefined || input === null ? null : JSON.stringify(input),
+      cwd: cwd ?? null,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  // `allow` is the only action that grants. Anything else - an unknown word, a
+  // missing field, a UI sending `deny` - is a denial, so the route cannot grant an
+  // action by misspelling it.
+  answerPermission(reqId, action) {
+    const r = this.store.getPermissionRequest(reqId);
+    if (!r) throw Object.assign(new Error('Permission request not found'), { code: 'NOT_FOUND' });
+    if (r.status !== 'pending') {
+      throw Object.assign(new Error(`This request was already answered (${r.status})`), { code: 'CONFLICT' });
+    }
+    return this.store.updatePermissionRequest(reqId, {
+      status: action === 'allow' ? 'allowed' : 'denied',
+      answered_at: new Date().toISOString(),
+    });
+  }
+
+  timeoutPermission(reqId) {
+    const r = this.store.getPermissionRequest(reqId);
+    if (!r || r.status !== 'pending') return null;
+    const updated = this.store.updatePermissionRequest(reqId, { status: 'timeout', answered_at: new Date().toISOString() });
+    this.#releasePermission(reqId, 'timeout');
+    return updated;
+  }
+
+  // Every request still pending past the policy's deadline, moved to `timeout`.
+  // Called on read rather than only on a timer, because the case it exists for is
+  // the one no timer survives: the process that armed it is gone, and the row is
+  // what is left.
+  sweepPermissions() {
+    const ms = (Number(this.policies.session?.permissionTimeoutMs) || 120) * 1000;
+    const cutoff = new Date(Date.now() - ms).toISOString();
+    const expired = this.store.sweepTimeoutPermissions(cutoff);
+    // The in-process waiters are released by the same sweep. Without this the
+    // MCP tool would sit blocked until its own longer timer fired, which is a
+    // slower way of reaching the same denial.
+    for (const id of expired) this.#releasePermission(id, 'timeout');
+    return expired;
+  }
+
+  // What a surface reads to draw the prompt: the request, with its input parsed
+  // back out and the moment it will expire resolved. The deadline is computed
+  // rather than stored so that raising permissionTimeoutMs in routing.json applies
+  // to a request already in flight, which is what somebody raising it is asking for.
+  permissionFor(sessionId) {
+    const r = this.store.pendingPermission(sessionId);
+    if (!r) return null;
+    const ms = (Number(this.policies.session?.permissionTimeoutMs) || 120) * 1000;
+    return {
+      id: r.id,
+      tool: r.tool,
+      input: parseJson(r.input),
+      cwd: r.cwd,
+      run_id: r.run_id,
+      created_at: r.created_at,
+      timeout_at: new Date(Date.parse(r.created_at) + ms).toISOString(),
+    };
+  }
+
+  // The in-process waiters: request id -> the function that releases the held HTTP
+  // response. Module scope would be wrong here, because a Service is what owns the
+  // requests - the server holds one Service and one map is the whole of the state.
+  #waiters = new Map();
+
+  // Holds a response open until a person answers. Returns a promise the server
+  // awaits; the timeout is the server's to arm, and this registers the hook that
+  // releases it early.
+  holdPermission(reqId, release) {
+    this.#waiters.set(reqId, release);
+  }
+
+  #releasePermission(reqId, reason) {
+    const release = this.#waiters.get(reqId);
+    if (!release) return;
+    this.#waiters.delete(reqId);
+    release(reason);
+  }
+
+  // Answering releases the held response with the decision that was recorded, so
+  // the row and what the agent was told cannot disagree.
+  resolvePermission(reqId) {
+    const r = this.store.getPermissionRequest(reqId);
+    this.#releasePermission(reqId, r?.status || 'denied');
+    return r;
+  }
+
+  pendingPermission(sessionId) {
+    return this.permissionFor(sessionId);
+  }
+
+  // What the meter draws: what this session has spent, and the ceilings it is
+  // spending against. Read together because one without the other is a bar with no
+  // scale - and `todaySpent` is every session's, because the daily cap is a ceiling
+  // on the machine rather than on this conversation.
+  sessionBudget(sessionId) {
+    const s = this.sessionById(sessionId);
+    const policy = this.policies.session || {};
+    return {
+      spent: s.budget_tally || 0,
+      runCap: Number(policy.maxRunCost) || 0,
+      dailyCap: Number(policy.dailyCap) || 0,
+      todaySpent: this.store.sessionSpendSince(startOfDayIso()),
+    };
+  }
+
+  // -- the nudge ------------------------------------------------------------
+
+  // The card is shown while the last settled turn was task-shaped and a person has
+  // not said they are not drafting it. Both are read from the session row, so a
+  // reload and a second tab agree.
+  nudgeFor(sessionId) {
+    const s = this.sessionById(sessionId);
+    if (!s.task_shaped || s.nudge_dismissed) return null;
+    return { changedPaths: parseJson(s.changed_paths) || [] };
+  }
+
+  dismissNudge(sessionId) {
+    this.sessionById(sessionId);
+    return this.store.updateSession(sessionId, { nudge_dismissed: 1 });
+  }
+
+  // "Draft as task": the session has grown task-shaped, and task creation is the
+  // only route from this checkout into the repository's history.
+  //
+  // The draft is not invented here. It is a proposals pass - the same prompt, the
+  // same parser, the same `addDrafts` - opened on a chat session carrying the
+  // session's own summary as its focus, so the batch lands in the project's
+  // approval queue exactly as every other proposal does. What is new is only the
+  // input: a pass with a focus is asked to describe the work that already happened
+  // rather than to guess at work that has not.
+  draftSessionTask(sessionId) {
+    const s = this.sessionById(sessionId);
+    const project = this.project(s.project_id);
+    const last = this.store.listSessionRuns(sessionId).filter((r) => r.status === 'succeeded').pop();
+    const answer = last ? (this.finalText(last.id) || '').trim() : '';
+    const paths = parseJson(s.changed_paths) || [];
+    const focus = [
+      answer,
+      paths.length ? `Files changed in the checkout:\n${paths.map((p) => `- ${p}`).join('\n')}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+    const chat = this.createChatSession(project.id, `Task from session: ${s.name}`, null, focus || s.name);
+    const runId = this.store.id();
+    this.store.addChatMessage({
+      id: this.store.id(),
+      sessionId: chat.id,
+      role: 'user',
+      content: `Draft the tasks that describe the work this session did in the checkout.`,
+      runId,
+    });
+    // The session is done as a session. Its work is on its way to a task, which is
+    // the only thing that can review and land it, and a session left running beside
+    // that task would be a second agent editing the same files.
+    this.store.updateSession(sessionId, { status: 'stopped', nudge_dismissed: 1 });
+    return { project, chatSession: this.chatSession(chat.id) };
   }
 
   // -- execution ------------------------------------------------------------
@@ -3006,13 +3654,21 @@ export class Service {
   // Refresh the lease and honour a cancel requested by another process. The tick
   // that redraws the spinner calls this, so cancellation latency equals the
   // redraw interval without needing a second timer.
-  #pollLease(runId, taskId, controller) {
+  #pollLease(runId, taskId, controller, sessionId = null) {
     this.#beat(runId, taskId);
     try {
-      // Two channels. The lease covers a run already in flight - including the test
+      // Three channels. The lease covers a run already in flight - including the test
       // command, which holds one of its own now; the task flag covers the gap between
-      // two steps of the same task, where no run exists to be marked.
-      if (this.store.cancelRequested(runId) || (taskId && this.store.taskCancelRequested(taskId))) controller.abort(cancelled());
+      // two steps of the same task, where no run exists to be marked; the session flag
+      // is the task flag's counterpart for a run whose leases carry `task_id = null`,
+      // where the task-scoped channel has nothing to mark and cannot reach it.
+      if (
+        this.store.cancelRequested(runId) ||
+        (taskId && this.store.taskCancelRequested(taskId)) ||
+        (sessionId && this.store.sessionCancelRequested(sessionId))
+      ) {
+        controller.abort(cancelled());
+      }
     } catch {
       /* treat an unreadable flag as "not cancelled" and check again next tick */
     }
@@ -3128,8 +3784,15 @@ export class Service {
     // is what says so, and it is also what the row records, so a caller cannot
     // route the writes somewhere the row does not name.
     const chat = options.chatSessionId || null;
-    const addRun = (row) => (chat ? this.store.addChatRun(row, chat) : this.store.addRun(row));
-    const updateRun = (id, patch) => (chat ? this.store.updateChatRun(id, patch) : this.store.updateRun(id, patch));
+    // A session turn is the third kind of run, and it is routed the same way: its
+    // row goes to the table of the thing it belongs to. Written to `runs` with a
+    // null task_id it would be a row every task-keyed surface has to exclude, which
+    // is the reason chat_runs exists and the reason session_runs does too.
+    const session = options.sessionId || null;
+    const addRun = (row) =>
+      session ? this.store.addSessionRun(row, session) : chat ? this.store.addChatRun(row, chat) : this.store.addRun(row);
+    const updateRun = (id, patch) =>
+      session ? this.store.updateSessionRun(id, patch) : chat ? this.store.updateChatRun(id, patch) : this.store.updateRun(id, patch);
     // The run the conversation's waiting question names, kept current as one
     // attempt hands the turn to the next.
     let turnRunId = chat ? options.runId || null : null;
@@ -3202,7 +3865,7 @@ export class Service {
       const controller = new AbortController();
       // providerId is carried so the concurrency gate can count what a provider is
       // already doing without a second query.
-      this.active.set(run.id, { controller, taskId: task.id, role, providerId: p.id });
+      this.active.set(run.id, { controller, taskId: task.id, role, providerId: p.id, sessionId: session });
       // Claim the lease before anything can take time, so other processes can see
       // this run immediately rather than only after the first tick.
       this.#beat(run.id, task.id);
@@ -3249,7 +3912,7 @@ export class Service {
           // The spinner shares the tick with the lease work but respects silence:
           // concurrent runs write to one shared stderr and interleave into garbage.
           if (!quiet) process.stderr.write(`\r  [${role}] working${'·'.repeat(dots % 4).padEnd(3)} ${Math.round((Date.now() - started) / 1000)}s`);
-          this.#pollLease(run.id, task.id, controller);
+          this.#pollLease(run.id, task.id, controller, session);
         }, this.options.tickMs ?? TICK_MS);
 
         // The wall clock a run is held to, over work it is answerable for. Time
@@ -3342,6 +4005,37 @@ export class Service {
           }, stallMs);
         };
 
+        // The permission gate, for a session run. Written per attempt rather than
+        // once per turn: the file is named by the run id and claude is handed the
+        // path in its argv, and a fallback is a second process that needs a config
+        // of its own naming its own run.
+        //
+        // No endpoint means no gate, and no gate means no session run - `claudeArgs`
+        // throws rather than letting the role fall through to
+        // `--dangerously-skip-permissions`, so the failure is loud and lands here
+        // rather than on the user's checkout.
+        const gate =
+          session && options.permission?.endpoint
+            ? permissionMcpConfig(run.id, {
+                endpoint: options.permission.endpoint,
+                sessionId: session,
+                timeoutMs: options.permission.timeoutMs,
+              })
+            : null;
+        // The same four values again as environment, which is belt and braces on
+        // purpose: the MCP config carries them in its own `env` block, and the child
+        // claude spawns inherits this process's environment too. Either path alone
+        // would do; both means a session whose gate cannot find its endpoint is not
+        // the failure mode of a config key this binary reads differently.
+        const gateEnv = gate
+          ? {
+              AI_CODE_PERMISSION_ENDPOINT: options.permission.endpoint,
+              AI_CODE_SESSION_ID: session,
+              AI_CODE_RUN_ID: run.id,
+              AI_CODE_PERMISSION_TIMEOUT_MS: String(options.permission.timeoutMs ?? 120000),
+            }
+          : {};
+
         try {
           for await (const e of runAgent(p, m, {
             role,
@@ -3353,6 +4047,7 @@ export class Service {
             effort: policy.effort || p.config?.effort || undefined,
             signal: controller.signal,
             resumeSession,
+            ...(gate ? { permissionTool: gate.permissionTool, mcpConfig: gate.configPath, env: gateEnv } : {}),
           })) {
             this.store.addEvent({ runId: run.id, type: e.type, data: e.data });
             noteWait(e);
@@ -3385,6 +4080,10 @@ export class Service {
           clearTimeout(timeoutId);
           clearStall();
           clearInterval(tick);
+          // The process this registered a gate for is gone, so the registration goes
+          // with it. A temp file naming a session and an endpoint is not something to
+          // leave behind once per turn.
+          removeMcpConfig(gate?.configPath);
           if (!quiet) process.stderr.write('\r\x1b[K');
         }
 
@@ -3435,6 +4134,10 @@ export class Service {
           // The cancel has been delivered, so it is spent. Leaving the flag set
           // would abort the next agent the moment it started.
           this.store.setTaskCancel(task.id, false);
+          // The same clearing for a session, whose flag lives on the session row
+          // rather than on a lease. `task.id` is null for a session run, so the
+          // line above is a no-op here and this one is the whole of it.
+          if (session) this.store.setSessionCancel(session, false);
           throw e;
         }
 

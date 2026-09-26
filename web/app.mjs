@@ -10,6 +10,7 @@ import { Project } from './views/project.mjs';
 import { Tasks } from './views/tasks.mjs';
 import { TaskDetail } from './views/task-detail.mjs';
 import { Chat } from './views/chat.mjs';
+import { Sessions } from './views/sessions.mjs';
 import { Providers } from './views/providers.mjs';
 import { Routing } from './views/routing.mjs';
 import { Runs } from './views/runs.mjs';
@@ -18,7 +19,7 @@ import { Settings, TokenGate } from './views/settings.mjs';
 import { ServerPanel } from './components/server-panel.mjs';
 import { notificationsUrl } from './api.mjs';
 
-const GO = { o: '#/overview', t: '#/tasks', c: '#/chat', p: '#/providers', r: '#/runs' };
+const GO = { o: '#/overview', t: '#/tasks', c: '#/chat', s: '#/sessions', p: '#/providers', r: '#/runs' };
 
 function parseHash() {
   const hash = location.hash.replace(/^#\/?/, '');
@@ -26,6 +27,7 @@ function parseHash() {
   if (!parts.length) return { view: 'overview' };
   if (parts[0] === 'tasks' && parts[1]) return { view: 'task-detail', id: parts[1] };
   if (parts[0] === 'chat' && parts[1]) return { view: 'chat-detail', id: parts[1] };
+  if (parts[0] === 'sessions' && parts[1]) return { view: 'session-detail', id: parts[1] };
   if (parts[0] === 'project' && parts[1]) return { view: 'project', id: parts[1] };
   return { view: parts[0] };
 }
@@ -288,6 +290,12 @@ function App() {
     case 'chat-detail':
       view = html`<${Chat} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
       break;
+    case 'sessions':
+      view = html`<${Sessions} navigate=${navigate} onTitle=${setPageTitle} />`;
+      break;
+    case 'session-detail':
+      view = html`<${Sessions} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
+      break;
     case 'providers':
       view = html`<${Providers} navigate=${navigate} />`;
       break;
@@ -312,8 +320,8 @@ function App() {
   // replaced by the one screen that can say what happened and offer to fix it.
   if (serverDown) view = html`<${ServerPanel} supervisorUp=${supervisorUp} />`;
 
-  const navRoute = route.view === 'task-detail' ? 'tasks' : route.view === 'chat-detail' ? 'chat' : route.view === 'project' ? 'projects' : route.view;
-  const title = route.view === 'task-detail' || route.view === 'chat-detail' || route.view === 'project' ? pageTitle : null;
+  const navRoute = route.view === 'task-detail' ? 'tasks' : route.view === 'chat-detail' ? 'chat' : route.view === 'session-detail' ? 'sessions' : route.view === 'project' ? 'projects' : route.view;
+  const title = route.view === 'task-detail' || route.view === 'chat-detail' || route.view === 'session-detail' || route.view === 'project' ? pageTitle : null;
 
   return html`
     <${Fragment}>

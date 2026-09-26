@@ -4,7 +4,7 @@ import path from 'node:path';
 // routing.json holds one object per role plus a top-level `health` block. Only
 // the roles are per-role, so anything that walks the file must walk this list
 // rather than Object.keys, or it will treat `health` as a fifth role.
-const ROLES = ['planner', 'implementer', 'reviewer', 'repair'];
+const ROLES = ['planner', 'implementer', 'reviewer', 'repair', 'session'];
 
 // Per-role routing policy. The four weights are only meaningful relative to each
 // other: scoring multiplies each model's quality/speed/cost by the policy's own
@@ -71,6 +71,24 @@ const defaults = {
   implementer: { strategy: 'balanced', preferred: [], fallback: [], quality: 0.5, cost: 0.2, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5, subagentWait: 600 },
   reviewer: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.1, speed: 0.3, effort: 'high', timeout: 900, stall: 120, maxToolCalls: 40, maxRunCost: 1, subagentWait: 600 },
   repair: { strategy: 'speed', preferred: [], fallback: [], quality: 0.2, cost: 0.4, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5, subagentWait: 600, maxRepairs: 5 },
+  // A supervised session is budgeted where a chat deliberately is not. A chat is a
+  // person asking and reading, and the person is the loop that stops it; a session
+  // is an agent acting in the user's checkout, and its loop is its own. So it takes
+  // the same four budgets the workflow roles take, at the size of one working
+  // session rather than one task: a narrower call count than an implementer's 200,
+  // because every one of those calls is a person answering a prompt, and $2 rather
+  // than $5 for the same reason.
+  //
+  // permissionTimeoutMs is the one budget with no counterpart above. It is the
+  // seconds an agent waits, blocked, for a human to answer a permission prompt
+  // before the request is swept to `timeout` - which is a denial. It is short on
+  // purpose: nobody is reading the prompt if two minutes have passed, and the
+  // agent is holding a provider slot while it waits for an answer that is not
+  // coming. dailyCap is the optional ceiling in dollars on what supervised sessions
+  // together may spend in a day - the machine's, not one session's, because a cap
+  // read per session would let five of them spend five times it. Absent or
+  // non-positive means the per-run budget is the only bound.
+  session: { strategy: 'balanced', preferred: [], fallback: [], quality: 0.5, cost: 0.3, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 100, maxRunCost: 2, subagentWait: 600, permissionTimeoutMs: 120, dailyCap: 0 },
   // Circuit-breaker thresholds. Absent means the defaults in src/health.mjs apply.
   health: {},
   // Prompt budget for the context assembler. Absent means the defaults in

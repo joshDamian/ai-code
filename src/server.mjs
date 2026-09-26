@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { Service } from './service.mjs';
+import { Service, permissionDecision } from './service.mjs';
 import { Runner } from './runner.mjs';
 import { TerminalSessions, TERMINAL_TARGETS, terminalTargets } from './terminal.mjs';
 
@@ -301,6 +301,121 @@ function chatStream(req, res, id) {
     }
   }, 500);
   req.on('close', () => clearInterval(timer));
+}
+
+// A supervised session's progress, in the same frame shapes: `meta` once with the
+// session and its runs, `event` per agent event of the turn in flight, `state` on
+// every tick with the session, the run, whether it is still working, and the
+// permission being asked right now.
+//
+// The permission is in the state frame rather than in one of its own because it is
+// state: a reload, a second tab and a reconnect all have to arrive at the same
+// answer to "what is this session blocked on", and the request id is what the
+// client keys its panel on. The countdown is not sent as a remaining-seconds number
+// - it is derived from the request's own deadline, so a page opened late shows the
+// time actually left rather than the time the frame was written.
+function sessionStream(req, res, id) {
+  sse(res);
+  let lastEvent = 0;
+  let streamed = null;
+  let seeded = false;
+  let ticks = 0;
+  // Whether this stream has ever seen a turn running. A session with nothing in
+  // flight is the resting case, and ending there would have the browser reconnect
+  // once a second for as long as the page is open - the same reason the chat stream
+  // waits until it has seen a question being answered.
+  let sawWorking = false;
+  const timer = setInterval(() => {
+    try {
+      const session = svc.store.getSession(id);
+      if (!session) {
+        clearInterval(timer);
+        res.write(`event: error\ndata: ${JSON.stringify({ error: 'Session not found' })}\n\n`);
+        return res.end();
+      }
+      const runs = svc.store.listSessionRuns(id);
+      // The run in flight, or the last one if nothing is. Read from the session row
+      // rather than from this process's memory, so the events a reload sees are the
+      // events the process driving the run is writing.
+      const runId = session.pending_run_id || runs[runs.length - 1]?.id || null;
+      if (!seeded) {
+        seeded = true;
+        // The transcript travels in the one frame that is sent once, and again after
+        // a turn settles - which is why the client re-reads the session rather than
+        // assembling the answer out of event frames. What it read before a reload is
+        // what it reads after one.
+        res.write(`event: meta\ndata: ${JSON.stringify({ session, runs, turns: svc.sessionTurns(id) })}\n\n`);
+      }
+      // Event ids are global, but a cursor is only meaningful within one run's
+      // events: when the run being watched changes, the cursor starts over.
+      if (runId !== streamed) {
+        streamed = runId;
+        lastEvent = 0;
+      }
+      for (const e of runId ? svc.store.listEvents(runId, lastEvent) : []) {
+        lastEvent = Math.max(lastEvent, e.id);
+        res.write(`event: event\ndata: ${JSON.stringify(e)}\n\n`);
+      }
+      const job = svc.store.listJobs(id)[0] || null;
+      const queued = !!job && (job.state === 'queued' || job.state === 'running');
+      const working = !!session.pending_run_id && (queued || svc.store.hasLiveLease(session.pending_run_id));
+      if (working) sawWorking = true;
+      res.write(
+        `event: state\ndata: ${JSON.stringify({ session, runId, working, job, permission: svc.permissionFor(id) })}\n\n`
+      );
+      if ((sawWorking && !working) || ticks++ > STREAM_MAX_TICKS) {
+        clearInterval(timer);
+        res.end();
+      }
+    } catch (e) {
+      clearInterval(timer);
+      res.write(`event: error\ndata: ${JSON.stringify({ error: e.message })}\n\n`);
+      res.end();
+    }
+  }, 500);
+  req.on('close', () => clearInterval(timer));
+}
+
+// The permission response, held open until a person answers or the deadline passes.
+//
+// This is the far end of the round trip the whole feature rests on: the agent's MCP
+// server POSTs here and blocks, and nothing else happens in that agent until this
+// function writes something. Both ways out go through the Service, so both reach
+// the same `permissionDecision` - the row is the record, and what the agent is told
+// is read back out of it rather than out of whatever settled it. A release that
+// raced an answer therefore reports the answer, not the race.
+function holdPermission(req, res, request) {
+  let settled = false;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    const row = svc.store.getPermissionRequest(request.id) || { ...request, status: 'denied' };
+    json(res, permissionDecision(row));
+  };
+  const ms = (Number(svc.policies.session?.permissionTimeoutMs) || 120) * 1000;
+  // Unref'd, because a pending prompt must not be what keeps the process alive when
+  // somebody closes the dashboard.
+  const timer = setTimeout(() => {
+    svc.timeoutPermission(request.id);
+    finish();
+  }, ms);
+  timer.unref?.();
+  svc.holdPermission(request.id, finish);
+  // The asker hanging up is the asker being gone: the agent process was killed, or
+  // its socket dropped. A request nobody is waiting on is denied rather than left
+  // pending, so the dashboard does not show a live prompt for an agent that is not
+  // there - and `answerPermission` refuses if a person answered in the same instant,
+  // which is the case this must not overwrite.
+  req.on('close', () => {
+    if (settled) return;
+    try {
+      svc.answerPermission(request.id, 'deny');
+    } catch {
+      /* already settled by the person, which is the answer that stands */
+    }
+    finish();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -869,6 +984,162 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // -------------------------------------------------------------------------
+    // Supervised sessions.
+    //
+    // A session is an agent working in the project's own checkout on freeform
+    // instructions, with every write and every command held at a permission prompt.
+    // Two things about these routes are not like the rest of this file.
+    //
+    // The first is the permission routes. `POST .../permissions` is not a normal API
+    // call and its client is not the dashboard: it is the MCP server inside the
+    // agent's own process, and it blocks on this response for as long as a person
+    // takes to answer. So the handler deliberately does not return - it registers a
+    // release with the Service, arms the deadline, and answers when whichever of
+    // them finishes first. Because of that it must never be reachable from anywhere
+    // but this machine: it is a loopback-only route by its own check, not merely by
+    // the token gate above, since a token on a phone would otherwise be a way to
+    // have an agent ask itself a question and answer it.
+    //
+    // The second is that the answer routes take an action word and nothing else.
+    // `allow` is the only word that grants; the Service reads everything else as a
+    // denial, so a misspelled verb cannot become an approval.
+    if (u.pathname === '/api/sessions') {
+      if (req.method === 'GET') return json(res, svc.listSessions(u.searchParams.get('projectId') || undefined));
+      const b = await body(req);
+      return json(res, svc.createSession(b.projectId, b.name, { providerId: b.providerId, modelId: b.modelId }), 201);
+    }
+
+    const session = u.pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(messages|stream|archive|cancel|resume|permissions|draft-task|nudge)(?:\/([^/]+))?)?$/);
+    if (session) {
+      const id = session[1];
+      const what = session[2] || null;
+      const rest = session[3] || null;
+
+      if (what === 'stream') return sessionStream(req, res, id);
+
+      // The MCP tool's question, held open until a person answers or the deadline
+      // passes. See the block comment above: this is the one route in this file that
+      // is expected to still be open minutes after the request arrived.
+      if (what === 'permissions' && req.method === 'POST') {
+        if (!fromLocalhost(req)) return json(res, { error: 'Permissions can only be asked from this machine.' }, 403);
+        const b = await body(req);
+        const request = svc.addPermissionRequest({
+          sessionId: id,
+          runId: b.run_id || null,
+          tool: b.tool,
+          input: b.input ?? null,
+          cwd: b.cwd ?? null,
+        });
+        return holdPermission(req, res, request);
+      }
+
+      // What is being asked right now, which is what a page reads on load before its
+      // stream has delivered a state frame.
+      if (what === 'permissions' && req.method === 'GET') {
+        return json(res, { permission: svc.pendingPermission(id), history: svc.store.listPermissionRequests(id) });
+      }
+
+      if (what === 'permissions' && rest && req.method === 'POST') {
+        const b = await body(req);
+        // A request that has already left `pending` is refused rather than rewritten:
+        // the countdown this route exists beside is a real deadline, and an Allow
+        // clicked a second after it fired would otherwise approve an action the agent
+        // has already been told was denied.
+        try {
+          svc.answerPermission(rest, b.action);
+        } catch (e) {
+          const status = e?.code === 'NOT_FOUND' ? 404 : e?.code === 'CONFLICT' ? 409 : 400;
+          return json(res, { error: e.message }, status);
+        }
+        // Released after the row is written, so the held response builds its answer
+        // from the recorded decision rather than from this request's body.
+        return json(res, { permission: svc.resolvePermission(rest) });
+      }
+
+      if (what === 'messages' && req.method === 'POST') {
+        const b = await body(req);
+        const text = String(b.message || '').trim();
+        if (!text) return json(res, { error: 'message is required' }, 400);
+        // The same two checks the chat route makes, in the same order and for the
+        // same reason: the set catches the run this process is driving, the job row
+        // catches one another process queued, and both are read before the write.
+        if (svc.sessionBusy.has(id) || svc.store.activeJobs().some((j) => j.task_id === id)) {
+          return json(res, { error: 'This session is already working on an instruction' }, 409);
+        }
+        let asked;
+        try {
+          asked = svc.askSession(id, text);
+        } catch (e) {
+          return json(res, { error: e.message }, 400);
+        }
+        return json(res, { session: asked, job: runner.enqueue(id, 'session') }, 202);
+      }
+
+      if (what === 'archive' && req.method === 'POST') {
+        try {
+          return json(res, svc.archiveSession(id));
+        } catch (e) {
+          return json(res, { error: e.message }, 409);
+        }
+      }
+
+      // Stop, not cancel. A session that is working gets its run cancelled; one that
+      // is idle simply stops. Both are the same column, which is what makes the
+      // button work whichever state the session is in when it is pressed.
+      if ((what === 'cancel' || what === 'resume') && req.method === 'POST') {
+        if (what === 'cancel') return json(res, svc.stopSession(id));
+        return json(res, svc.resumeSession(id));
+      }
+
+      if (what === 'nudge' && req.method === 'POST') {
+        return json(res, svc.dismissNudge(id));
+      }
+
+      if (what === 'draft-task' && req.method === 'POST') {
+        let drafted;
+        try {
+          drafted = svc.draftSessionTask(id);
+        } catch (e) {
+          return json(res, { error: e.message }, 400);
+        }
+        // Queued, not awaited: this is a proposals pass, and a proposals pass is a
+        // planner run. The job's `task_id` is the chat session the drafts will land
+        // in, which is the same binding every other drafting pass uses.
+        return json(res, { session: drafted.chatSession, job: runner.enqueue(drafted.chatSession.id, 'proposals') }, 202);
+      }
+
+      if (!what) {
+        if (req.method === 'GET') {
+          const s = svc.sessionById(id);
+          return json(res, {
+            session: s,
+            runs: svc.store.listSessionRuns(id),
+            turns: svc.sessionTurns(id),
+            // The question being asked right now, resolved with its deadline, and
+            // the ones already answered - the panel and its history in one read.
+            permission: svc.permissionFor(id),
+            history: svc.store.listPermissionRequests(id),
+            nudge: svc.nudgeFor(id),
+            budget: svc.sessionBudget(id),
+            job: svc.store.listJobs(id)[0] || null,
+          });
+        }
+        if (req.method === 'PATCH') {
+          const b = await body(req);
+          if ('name' in b) svc.renameSession(id, b.name);
+          // Read back rather than returned from the write, so a rename and a model
+          // change in one request produce one row from one read.
+          const patch = {};
+          if ('providerId' in b) patch.provider_id = b.providerId ?? null;
+          if ('modelId' in b) patch.model_id = b.modelId ?? null;
+          if (Object.keys(patch).length) svc.store.updateSession(id, patch);
+          if (b.dismissNudge) svc.dismissNudge(id);
+          return json(res, svc.sessionById(id));
+        }
+      }
+    }
+
     if (u.pathname === '/api/providers') {
       if (req.method === 'GET') return json(res, { providers: svc.store.listProviders(), models: svc.store.listModels(), health: svc.providerHealthList() });
       const b = await body(req);
@@ -1058,6 +1329,13 @@ process.on('SIGTERM', shutdown);
 // port test, which reads the first one, and that one is unchanged.
 server.listen(port, host, () => {
   const bound = server.address().port;
+  // Where a supervised session's permission MCP server asks its questions. Set here
+  // and not before, because the port is not known until the socket is bound - and
+  // set to loopback explicitly rather than to `host`, because the agent runs on this
+  // machine whatever address the dashboard was told to listen on. A session started
+  // before this line has no endpoint, and `claudeArgs` refuses to start it at all
+  // rather than running it ungated.
+  svc.permissionEndpoint = `http://127.0.0.1:${bound}`;
   // The requested port is not always the bound port: PORT=0 asks the kernel for a free
   // one, and every agent run is handed PORT=0 (see AGENT_PORT in src/agents.mjs) so a
   // smoke-test server can never collide with the dashboard that spawned the agent. A log

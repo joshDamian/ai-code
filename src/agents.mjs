@@ -1,6 +1,16 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// The MCP server a supervised session's permission prompts are delegated to, and
+// the one tool it exposes. The name is a constant because two places have to agree
+// on it exactly - the config written below, and the `--permission-prompt-tool`
+// value claude is handed - and a typo there is a session that cannot ask for
+// anything, which reads as a session that can do nothing.
+const PERMISSION_SERVER = 'ai-code-permissions';
+const PERMISSION_TOOL = 'approve';
 
 // Ordered failure classification. First match wins, so the order is the design:
 // a 429 has to read as RATE_LIMIT before the broader patterns can claim it, and
@@ -281,6 +291,37 @@ export function claudeArgs(input) {
     // Anthropic-compatible endpoint, which is the same binary with a different
     // base URL.
     args.push('--json-schema', JSON.stringify(REVIEWER_SCHEMA));
+  } else if (input.role === 'session') {
+    // A supervised session is the one role whose permissions are decided live.
+    // Everything it wants to write or run is delegated to a local MCP tool, which
+    // asks the ai-code server and blocks until a person answers - so the four
+    // flags below are the whole of the safety story, and this branch must stay
+    // above the skip-permissions fallthrough. Reaching that branch would hand a
+    // session in the user's own checkout the one permission it exists not to have.
+    //
+    // Verified against claude 2.1.283 by execution, not inspection: with these
+    // flags the tool is called once per gated action, its answer gates the action,
+    // and a malformed or failed answer denies. `--permission-prompts host` is what
+    // routes the prompt to the tool rather than to the SDK host, and it takes
+    // effect only with `--print`, which is always in `args` above.
+    //
+    // `--permission-mode default` is pinned rather than left to the CLI's own
+    // default, and deliberately not `acceptEdits`: a mode that auto-accepts an edit
+    // is exactly the leak this role exists to close, and pinning it here is what
+    // stops an ambient setting from turning one on.
+    //
+    // No `--disallowedTools` list. An allowlist of read tools would be a second
+    // policy beside the live one, and the two would disagree the first time
+    // somebody widened one of them.
+    if (!input.permissionTool || !input.mcpConfig) {
+      throw new Error('A session run needs permissionTool and mcpConfig; refusing to start it ungated');
+    }
+    args.push(
+      '--permission-mode', 'default',
+      '--permission-prompts', 'host',
+      '--permission-prompt-tool', input.permissionTool,
+      '--mcp-config', input.mcpConfig
+    );
   } else {
     args.push('--dangerously-skip-permissions');
   }
@@ -306,6 +347,58 @@ export function claudeArgs(input) {
 // inherit-from-server behaviour it had rather than being given a surprise root.
 export function agentCwd(input) {
   return input?.cwd || input?.worktree || undefined;
+}
+
+// The MCP server a session's permission prompts are delegated to, registered for
+// one run. Returns the file to hand `--mcp-config` and the tool to hand
+// `--permission-prompt-tool`, so the two names claude has to see are produced by
+// the same function that writes them down.
+//
+// A file per run rather than one shared config, because the environment in it is
+// per-run: the endpoint names the port this server actually bound, and the session
+// id is what the tool posts against. Two concurrent sessions sharing one config
+// would each be answering the other's prompts with their own session's name.
+//
+// The file is written 0600 although nothing in it is a credential. What it does
+// name is a route into this server and the session id it may act on, and a file in
+// a shared temp directory is readable by default - so the default is wrong here.
+export function permissionMcpConfig(runId, { endpoint, sessionId, timeoutMs }) {
+  const configPath = path.join(os.tmpdir(), `ai-code-mcp-${runId}.json`);
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify(
+      {
+        mcpServers: {
+          [PERMISSION_SERVER]: {
+            command: process.execPath,
+            args: [fileURLToPath(new URL('./permission-mcp.mjs', import.meta.url))],
+            env: {
+              AI_CODE_PERMISSION_ENDPOINT: endpoint,
+              AI_CODE_SESSION_ID: sessionId,
+              AI_CODE_RUN_ID: runId,
+              AI_CODE_PERMISSION_TIMEOUT_MS: String(timeoutMs ?? 120000),
+            },
+          },
+        },
+      },
+      null,
+      2
+    ),
+    { mode: 0o600 }
+  );
+  return { configPath, permissionTool: `mcp__${PERMISSION_SERVER}__${PERMISSION_TOOL}` };
+}
+
+// The other half of the pair above. A run that has finished leaves a config file
+// naming an endpoint that is about to stop existing, and a temp directory that
+// accumulates one per session turn is a leak with no reader.
+export function removeMcpConfig(configPath) {
+  if (!configPath) return;
+  try {
+    fs.unlinkSync(configPath);
+  } catch {
+    /* already gone, or never written; either way there is nothing to remove */
+  }
 }
 
 // Drives the claude binary.
@@ -686,7 +779,12 @@ export async function* runAgent(provider, model, input) {
       ...input,
       model: model.invocationModelId || model.providerModelId || model.name,
       effort: input.effort,
-      env: providerEnv(provider, model),
+      // The provider's own routing first, then the caller's environment over it.
+      // That order is the whole point: a session's permission endpoint is an extra
+      // variable beside ANTHROPIC_BASE_URL rather than a replacement for it, and
+      // spreading only `providerEnv` would drop it - which would leave the MCP tool
+      // with no endpoint to post to, so every gated action would deny.
+      env: { ...providerEnv(provider, model), ...(input.env || {}) },
     });
     return;
   }
