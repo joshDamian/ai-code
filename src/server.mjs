@@ -459,6 +459,7 @@ const ROLE_LABEL = {
   repair: 'Repair',
   'context-enrich': 'Context enrichment',
   chat: 'Chat',
+  session: 'Session',
 };
 
 // What a finished run says, composed once. Same shape as the in-page notifier, plus the
@@ -538,12 +539,19 @@ function publishRunEnd(run, task) {
 // interval, and a real agent can do on a retry that fails immediately.
 function watchRuns() {
   for (const r of svc.store.listRuns()) if (r.status !== 'running') announcedRuns.add(r.id);
+  for (const r of svc.store.listSessionRuns()) if (r.status !== 'running') announcedRuns.add(r.id);
   const timer = setInterval(() => {
     try {
       for (const r of svc.store.listRuns()) {
         if (r.status === 'running' || announcedRuns.has(r.id)) continue;
         announcedRuns.add(r.id);
         publishRunEnd(r, r.task_id ? svc.store.getTask(r.task_id) : null);
+      }
+      for (const r of svc.store.listSessionRuns()) {
+        if (r.status === 'running' || announcedRuns.has(r.id)) continue;
+        announcedRuns.add(r.id);
+        // Session runs have no associated task
+        publishRunEnd(r, null);
       }
     } catch {
       // Store read failed; skip this tick.
