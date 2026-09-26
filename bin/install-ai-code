@@ -7,10 +7,11 @@ DATA_ROOT="${AI_CODE_DATA_DIR:-$HOME/.ai-code}"
 LABEL=com.ai-code.supervisor
 AGENT="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
-# The port the supervisor holds while the server is down. Named explicitly rather than
-# taken from $PORT, so a shell that exports PORT for something else does not silently
-# move the dashboard.
-SUP_PORT="${AI_CODE_SUPERVISOR_PORT:-4317}"
+# The port the supervisor holds while the server is down. Follows $PORT like the server
+# itself does (src/server.mjs): a supervisor pinned to 4317 in a shell that runs the
+# dashboard on another port is a Start button on a port nobody visits. AI_CODE_SUPERVISOR_PORT
+# still pins the supervisor alone.
+SUP_PORT="${AI_CODE_SUPERVISOR_PORT:-${PORT:-4317}}"
 
 MODE=install
 for arg in "$@"; do

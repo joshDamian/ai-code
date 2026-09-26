@@ -1,5 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
@@ -40,6 +41,10 @@ const startedAt = Date.now();
 // dashboard was reachable from the LAN by accident. A reachable bind is opt-in and
 // costs an explicitly named token.
 const host = process.env.AI_CODE_HOST || '127.0.0.1';
+// Where the installer put the supervisor LaunchAgent, so the status route can say which
+// port a Start button will live on. Overridable for tests, which must not read the
+// developer's real launch agent.
+const supervisorPlist = process.env.AI_CODE_SUPERVISOR_PLIST || path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.ai-code.supervisor.plist');
 // An address `listen` accepts, so no brackets on the IPv6 form - the Host header's own
 // regex, which does carry them, is separate and lives with the gate.
 const loopbackHost = /^(localhost|127\.\d+\.\d+\.\d+|::1)$/;
@@ -442,6 +447,27 @@ function notificationStream(req, res) {
   req.on('close', () => notifiers.delete(res));
 }
 
+// The port the installed supervisor holds, or null when there is none to read. The
+// dashboard is visited on whatever port this server bound, and the Start button only
+// exists on a port something is holding while this process is down - so a disagreement
+// between the two is a Start button on a port nobody visits, which is exactly what the
+// status route reports it for. Read per request rather than once at startup: a reinstall
+// while the server keeps running is the state this exists to surface, and the route is
+// hit rarely enough that the read costs nothing.
+//
+// The Label check keeps a foreign or hand-replaced file from posing as ours, and a
+// binary plist fails both patterns and reads as absent. That is acceptable - a file the
+// installer did not write is not one worth shelling out to plutil to interpret.
+function readSupervisorPort() {
+  try {
+    const text = fs.readFileSync(supervisorPlist, 'utf8');
+    if (!/<key>Label<\/key>\s*<string>com\.ai-code\.supervisor<\/string>/.test(text)) return null;
+    return Number(/<key>PORT<\/key>\s*<string>(\d+)<\/string>/.exec(text)?.[1]) || null;
+  } catch {
+    return null;
+  }
+}
+
 const webDir = new URL('../web/', import.meta.url).pathname;
 // The dashboard and the CLI share one set of formatters. The one file is
 // published to the browser rather than copied into the web bundle, where it would
@@ -561,6 +587,11 @@ const server = http.createServer(async (req, res) => {
         port: server.address()?.port ?? null,
         host,
         root,
+        // Where a Start button would appear once this process stops, which is not
+        // necessarily where this process is: a supervisor configured for another port
+        // is invisible from here until the day it matters. Null when no supervisor is
+        // installed, which is the honest answer rather than a guess at 4317.
+        supervisorPort: readSupervisorPort(),
         startedAt,
         uptimeMs: Date.now() - startedAt,
         jobs: {

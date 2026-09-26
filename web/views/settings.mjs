@@ -211,6 +211,16 @@ export function Settings() {
                   are closed. Nothing restarts it unless a supervisor is holding this port, or it is started again by
                   hand.
                 </p>
+                ${
+                  server.supervisorPort != null && server.port != null && server.supervisorPort !== server.port
+                    ? html`
+                        <p class="muted">
+                          The installed supervisor is configured for port <code>${server.supervisorPort}</code>, not the port this
+                          server is on. If the server stops, the Start button will not appear here. Align it with
+                          <code>AI_CODE_SUPERVISOR_PORT=${server.port} ./bin/install-ai-code --supervisor</code>.
+                        </p>`
+                    : null
+                }
                 <div class="kv-grid">
                   <span class="muted">Status</span>
                   <span><${StatusBadge} status="ok" /> running</span>
@@ -262,7 +272,7 @@ export function Settings() {
         ${onLocalhost() && !paired
           ? html`<div class="muted">
               This browser is on the server's own machine, which needs no token. To use a phone, run
-              <code>tailscale serve https / http://127.0.0.1:4317</code> on this machine, open the
+              <code>tailscale serve https / http://127.0.0.1:${server?.port ?? 4317}</code> on this machine, open the
               <code>.ts.net</code> address it prints, and paste the token the server logged at startup.
             </div>`
           : html`

@@ -60,7 +60,10 @@ function probe(url,ms=750){
 // stale process on the same port that makes the difference invisible.
 async function startServer(root,extra={}){
   const port=await freePort();
-  const proc=spawn(process.execPath,['src/server.mjs'],{cwd:process.cwd(),env:{...process.env,AI_CODE_ROOT:root,PORT:String(port),...extra},stdio:['ignore','pipe','pipe']});
+  // The supervisor override is a missing file under the fixture root, so no test reads
+  // the developer's own LaunchAgent: the status route reports that machine's installed
+  // supervisor, and a test asserting on the shape of the payload must not be reading it.
+  const proc=spawn(process.execPath,['src/server.mjs'],{cwd:process.cwd(),env:{...process.env,AI_CODE_ROOT:root,PORT:String(port),AI_CODE_SUPERVISOR_PLIST:path.join(root,'supervisor.plist'),...extra},stdio:['ignore','pipe','pipe']});
   const base=`http://localhost:${port}`;
   let stderr='';let exited=null;
   proc.stderr.on('data',(c)=>{stderr+=c});
@@ -1235,7 +1238,9 @@ function waitExit(proc,ms){
 // would be testing a comparison rather than the announcement a person pairs from.
 async function startedWithToken(root,extra={}){
   const port=await freePort();
-  const proc=spawn(process.execPath,['src/server.mjs'],{cwd:process.cwd(),env:{...process.env,AI_CODE_ROOT:root,PORT:String(port),...extra},stdio:['ignore','pipe','pipe']});
+  // Same override as startServer: the status route reads a plist, and which one it reads
+  // is the test's business rather than this machine's.
+  const proc=spawn(process.execPath,['src/server.mjs'],{cwd:process.cwd(),env:{...process.env,AI_CODE_ROOT:root,PORT:String(port),AI_CODE_SUPERVISOR_PLIST:path.join(root,'supervisor.plist'),...extra},stdio:['ignore','pipe','pipe']});
   const base=`http://localhost:${port}`;
   // Whatever the ambient environment holds would otherwise decide the answer for a
   // test that is about what happens when no token is configured.
@@ -1545,6 +1550,7 @@ test('the status route reports the process, and only to a caller on loopback',as
     assert.equal(st.port,s.port,'the bound port, which is the one the dashboard is on');
     assert.equal(st.host,'127.0.0.1');
     assert.equal(st.root,root,'the root is the checkout, which is what names the database being served');
+    assert.equal(st.supervisorPort,null,'no launch agent to read - the helper points the override at a missing file');
     assert.equal(typeof st.startedAt,'number');
     assert.ok(st.uptimeMs>0&&st.uptimeMs<60000,`uptimeMs read ${st.uptimeMs} just after startup`);
     // Both are empty here; the shape is the point, because the Settings card renders
@@ -1557,6 +1563,44 @@ test('the status route reports the process, and only to a caller on loopback',as
 
     assert.equal((await withHeaders(`${s.base}/api/server/status`,TS_HOST)).status,401);
     assert.equal((await withHeaders(`${s.base}/api/server/status`,{...TS_HOST,authorization:`Bearer ${s.token}`})).status,200);
+  }finally{s.stop()}
+});
+
+// The port the supervisor holds and the port the dashboard is on are two different facts,
+// and the Settings card warns when they disagree. It can only do that if the server
+// reports the first, which is what this covers.
+test('the status route reports the port the installed supervisor holds',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-sup-port-'));
+  const plist=path.join(root,'supervisor.plist');
+  // Written the way the installer writes it: the Label is what says the file is ours,
+  // and the PORT key is the one the warning compares against.
+  const fixture=(label,port)=>fs.writeFileSync(plist,
+    `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key><string>${label}</string>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>AI_CODE_ROOT</key><string>${root}</string>\n    <key>PORT</key><string>${port}</string>\n  </dict>\n</dict>\n</plist>\n`);
+  fixture('com.ai-code.supervisor',4599);
+  const s=await startedWithToken(root,{AI_CODE_SUPERVISOR_PLIST:plist});
+  const read=async()=>JSON.parse((await withHeaders(`${s.base}/api/server/status`,{host:'localhost:'+s.port})).body);
+  try{
+    const st=await read();
+    assert.equal(st.supervisorPort,4599,'the port the installed supervisor would hold');
+    // 4599 is below the ephemeral range freePort hands out, so the two really do differ:
+    // this is the disagreement the dashboard warns about.
+    assert.notEqual(st.supervisorPort,st.port,'the fixture disagrees with the port the server bound');
+
+    // Rewritten under a running server, and read again without a restart: a reinstall
+    // while the dashboard stays up is the state this field exists to surface.
+    fixture('com.ai-code.supervisor',s.port);
+    assert.equal((await read()).supervisorPort,s.port,'a reinstall is reported without restarting the server');
+
+    // A file another tool wrote is not one this may read a Start port out of, whatever
+    // it says - the Label check is why a hand-replaced agent reads as absent.
+    fixture('com.example.something-else',7777);
+    assert.equal((await read()).supervisorPort,null,'a foreign Label is not this app\'s supervisor');
+
+    fs.writeFileSync(plist,'not a plist, just bytes\n');
+    assert.equal((await read()).supervisorPort,null,'a file that is not a plist reads as absent');
+
+    fs.rmSync(plist);
+    assert.equal((await read()).supervisorPort,null,'a supervisor that is not installed reads as absent, not as a default port');
   }finally{s.stop()}
 });
 

@@ -37,7 +37,11 @@ function waitExit(proc,ms=7000){if(proc.exitCode!==null||proc.signalCode)return 
 async function startSupervisor(root,port,{passive=false,...extra}={}){
   port=port||await freePort();
   const logDir=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-sup-log-'));
-  const proc=spawn(process.execPath,['src/supervisor.mjs',process.cwd()],{cwd:process.cwd(),env:{...process.env,AI_CODE_ROOT:root,PORT:String(port),AI_CODE_SUPERVISOR_TICK_MS:'150',AI_CODE_LOG_DIR:logDir,...extra},stdio:['ignore','pipe','pipe']});
+  // AI_CODE_SUPERVISOR_PLIST is pointed at a file that is not there, so the server the
+  // supervisor starts reports no installed supervisor rather than reading the one this
+  // machine happens to have. The child inherits this environment, which is what carries
+  // the override across.
+  const proc=spawn(process.execPath,['src/supervisor.mjs',process.cwd()],{cwd:process.cwd(),env:{...process.env,AI_CODE_ROOT:root,PORT:String(port),AI_CODE_SUPERVISOR_TICK_MS:'150',AI_CODE_LOG_DIR:logDir,AI_CODE_SUPERVISOR_PLIST:path.join(root,'supervisor.plist'),...extra},stdio:['ignore','pipe','pipe']});
   const base=`http://127.0.0.1:${port}`;
   let out='';let stderr='';let exited=null;
   proc.stdout.on('data',(c)=>{out+=c});proc.stderr.on('data',(c)=>{stderr+=c});
