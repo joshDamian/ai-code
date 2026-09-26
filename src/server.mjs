@@ -1029,7 +1029,7 @@ const server = http.createServer(async (req, res) => {
       // The MCP tool's question, held open until a person answers or the deadline
       // passes. See the block comment above: this is the one route in this file that
       // is expected to still be open minutes after the request arrived.
-      if (what === 'permissions' && req.method === 'POST') {
+      if (what === 'permissions' && !rest && req.method === 'POST') {
         if (!fromLocalhost(req)) return json(res, { error: 'Permissions can only be asked from this machine.' }, 403);
         const b = await body(req);
         const request = svc.addPermissionRequest({

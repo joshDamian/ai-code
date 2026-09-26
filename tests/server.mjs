@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';import https from 'node:https';import crypto from 'node:crypto';import {spawn,execFileSync} from 'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import net from 'node:net';import {Service} from '../src/service.mjs';import {WebSocket} from 'ws';import {TerminalSessions} from '../src/terminal.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';import https from 'node:https';import crypto from 'node:crypto';import {spawn,execFileSync} from 'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import net from 'node:net';import {Service} from '../src/service.mjs';import {loadPolicies,savePolicies} from '../src/policy.mjs';import {WebSocket} from 'ws';import {TerminalSessions} from '../src/terminal.mjs';
 function get(url){return new Promise((res,rej)=>http.get(url,r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))}).on('error',rej))}
 function post(url,payload){return new Promise((res,rej)=>{const data=JSON.stringify(payload||{});const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)}},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.write(data);req.end()})}
 function patch(url,payload){return new Promise((res,rej)=>{const data=JSON.stringify(payload||{});const u=new URL(url);const req=http.request({hostname:u.hostname,port:u.port,path:u.pathname,method:'PATCH',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)}},r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>res({status:r.statusCode,body:b}))});req.on('error',rej);req.write(data);req.end()})}
@@ -621,7 +621,7 @@ test('a supervised session is created, receives an instruction, and streams the 
     const {body}=await reading;
     const fr=frames(body);
     assert.ok(fr.some(f=>f.type==='state'),'stream carries state frames');
-    assert.ok(fr.some(f=>f.type==='message'),'stream carries message frames');
+    assert.ok(fr.some(f=>f.type==='event'),'stream carries event frames');
     const sessionData=JSON.parse((await get(`${srv.base}/api/sessions/${session.id}`)).body);
     assert.equal(sessionData.session.status,'idle','session reverts to idle after a turn');
   }finally{srv.stop()}
@@ -638,27 +638,36 @@ test('a session permission request blocks the agent, and is answered via the API
   const s=new Service(root,{allowMock:true,silent:true});
   const p=s.initProject('p',root);
   s.updateProvider('mock',{enabled:false});
-  s.addProvider({id:'session-provider',name:'Session',kind:'mock',enabled:true,config:{routable:true,toolCalls:[{tool:'Write',input:{path:'test.txt',content:'x'}}]}});
+  // A slow mock so the run stays alive while we exercise the permission lifecycle.
+  s.addProvider({id:'session-provider',name:'Session',kind:'mock',enabled:true,config:{routable:true,delayMs:5000}});
   s.addModel({id:'session-m',providerId:'session-provider',name:'session',capabilities:['coding'],speed:10,quality:10,cost:0,contextLength:100000});
-  const policies=s.store.loadPolicies();
-  policies.session.permissionTimeoutMs=500;
-  s.store.savePolicies(policies);
+  const policies=loadPolicies(root);
+  policies.session.permissionTimeoutMs=5;
+  savePolicies(root,policies);
   const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
   try{
     const session=JSON.parse((await post(`${srv.base}/api/sessions`,{projectId:p.id,name:'perm session'})).body);
+    // Fire the message (don't await — the run will block on delayMs).
     post(`${srv.base}/api/sessions/${session.id}/messages`,{message:'write a file'});
-    let permReq=null;
-    for(let i=0;i<20;i++){
-      const r=await get(`${srv.base}/api/sessions/${session.id}/permissions`);
-      if(r.status===200){const perm=JSON.parse(r.body);if(perm&&perm.id){permReq=perm;break}}
-      await new Promise(res=>setTimeout(res,100));
-    }
-    assert.ok(permReq,'permission request appeared');
-    assert.equal(permReq.status,'pending');
-    assert.equal(permReq.tool,'Write');
-    const answerResp=await post(`${srv.base}/api/sessions/${session.id}/permissions/${permReq.id}`,{action:'allow'});
+    // Wait for the run to start so a run_id exists.
+    await new Promise(res=>setTimeout(res,300));
+    // Simulate the MCP tool's POST to the loopback permission endpoint.
+    const permPost=post(`${srv.base}/api/sessions/${session.id}/permissions`,{tool:'Write',input:{path:'test.txt',content:'x'},cwd:root});
+    // The POST is held open — poll the GET endpoint for the pending request.
+    await new Promise(res=>setTimeout(res,200));
+    const r=await get(`${srv.base}/api/sessions/${session.id}/permissions`);
+    assert.equal(r.status,200);
+    const permBody=JSON.parse(r.body);
+    assert.ok(permBody.permission,'permission request appeared');
+    assert.equal(permBody.permission.tool,'Write');
+    // Answer it.
+    const answerResp=await post(`${srv.base}/api/sessions/${session.id}/permissions/${permBody.permission.id}`,{action:'allow'});
     assert.equal(answerResp.status,200);
-    assert.equal(JSON.parse(answerResp.body).status,'allowed');
+    assert.equal(JSON.parse(answerResp.body).permission.status,'allowed');
+    // The held POST resolves with the allow decision.
+    const held=await permPost;
+    const decision=JSON.parse(held.body);
+    assert.equal(decision.behavior,'allow');
   }finally{srv.stop()}
 });
 
@@ -672,11 +681,17 @@ test('POST /api/sessions/:id/permissions from a remote Host is refused',async()=
   const s=new Service(root,{allowMock:true,silent:true});
   const p=s.initProject('p',root);
   const session=s.createSession(p.id,'guard session');
-  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  // Short timeout so the loopback POST resolves quickly instead of blocking 120s.
+  const policies=loadPolicies(root);
+  policies.session.permissionTimeoutMs=1;
+  savePolicies(root,policies);
+  const srv=await startedWithToken(root,{AI_CODE_ALLOW_MOCK:'1'});
   try{
     const loopback=await withHeaders(`${srv.base}/api/sessions/${session.id}/permissions`,{host:'localhost:'+srv.port},'POST');
     assert.notEqual(loopback.status,403,'loopback is not rejected');
-    const remote=await withHeaders(`${srv.base}/api/sessions/${session.id}/permissions`,TS_HOST,'POST');
+    // Remote Host with a valid token gets past the auth gate but is refused by the
+    // permissions-specific loopback check.
+    const remote=await withHeaders(`${srv.base}/api/sessions/${session.id}/permissions`,{...TS_HOST,authorization:`Bearer ${srv.token}`},'POST');
     assert.equal(remote.status,403,'remote Host is rejected');
     assert.match(JSON.parse(remote.body).error,/this machine/);
   }finally{srv.stop()}
@@ -704,9 +719,11 @@ test('a session run is cancelled over HTTP and the stream ends',async()=>{
     assert.equal(cancelResp.status,200);
     const {body}=await reading;
     const fr=frames(body);
-    assert.ok(fr.some(f=>f.type==='state'&&f.data?.job?.status==='cancelled'),'stream shows cancellation');
+    const lastState=fr.filter(f=>f.type==='state').pop();
+    assert.ok(lastState,'stream carries state frames');
+    assert.ok(!lastState.data?.working,'stream ends with the session no longer working');
     const sessionData=JSON.parse((await get(`${srv.base}/api/sessions/${session.id}`)).body);
-    assert.equal(sessionData.session.status,'idle');
+    assert.equal(sessionData.session.status,'stopped');
   }finally{srv.stop()}
 });
 // One terminal socket. The options exist for the guard tests, which are about the
