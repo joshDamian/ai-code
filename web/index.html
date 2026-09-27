@@ -684,10 +684,16 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    which is gone the moment somebody starts typing - the one moment it matters. */
 .chat-hint{margin:0 var(--space-4) var(--space-4);font-size:11.5px;color:var(--muted);text-align:center}
 .sessions-list{display:grid;gap:var(--space-2)}
-.session-item{padding:var(--space-3);background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);cursor:pointer;transition:all 200ms}
+/* The row is a link into the session with its controls beside it, so the name and
+   the meta line take the width and the buttons keep their own. Stop and Archive are
+   here rather than only inside the session because stopping something that is
+   working should not require opening the thing that is working. */
+.session-item{padding:var(--space-3);background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);cursor:pointer;transition:all 200ms;display:flex;align-items:center;gap:var(--space-3)}
 .session-item:hover{background:var(--panel);border-color:var(--accent-dim)}
-.session-title{font-weight:600;color:var(--text);display:inline-flex;align-items:center;gap:var(--space-2)}
+.session-info{min-width:0;flex:1}
+.session-title{font-weight:600;color:var(--text);display:inline-flex;align-items:center;gap:var(--space-2);min-width:0}
 .session-date{font-size:12px;color:var(--muted);margin-top:var(--space-1)}
+.session-actions{display:flex;gap:var(--space-2);flex:none}
 .card-header{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3)}
 .card-header h1{margin:0;display:inline-flex;align-items:center;gap:var(--space-2)}
 .back-btn{padding:var(--space-2) var(--space-3);font-size:14px}
@@ -720,6 +726,10 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .session-permission-foot .row{margin-left:auto}
 .session-banner{padding:var(--space-3) var(--space-4);font-size:13px}
 .session-controls{gap:var(--space-2)}
+/* The rename field stands in for the heading, so it is sized like one rather than
+   like a form control: the same weight and scale, and it yields rather than pushing
+   Save and Cancel onto a second row when the header runs out of width. */
+.card-header>.session-rename{flex:1 1 auto;min-width:0;max-width:420px;font-size:18px;font-weight:650}
 /* The meter sits above the activity list rather than beside it, because the two
    answer the same question in different units: what this session is costing. */
 .session-budget{padding:0 var(--space-4) var(--space-3);font-size:12.5px}

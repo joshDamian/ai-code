@@ -1,17 +1,20 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
-// Step 0 smoke gate: pinned permission schema expected from claude 2.1.283.
-// These constants are hand-written expectations matching what src/permission-mcp.mjs
-// documents (lines 9-15). No execution artifact (transcript, log, fixture) from a
-// real claude invocation has been recorded to verify them. Until that happens, they
-// are assumptions, not observations.
-// The request shape claude sends the MCP tool for permission prompts.
-const PERMISSION_REQUEST_SCHEMA = { tool_name: 'approve', input: {}, tool_use_id: 'call_' };
-// The allow decision shape the MCP tool returns.
-const PERMISSION_ALLOW_SCHEMA = { behavior: 'allow', updatedInput: {} };
-// The deny decision shape the MCP tool returns.
-const PERMISSION_DENY_SCHEMA = { behavior: 'deny', message: 'Denied.' };
+// Step 0's artifact, read rather than restated.
+//
+// The permission round trip crosses a binary this repository does not own: claude
+// decides when to ask, and it is claude that acts on the answer. So the two shapes
+// the gate is built against - the request it is handed and the decision it hands
+// back - are taken from a recorded 2.1.283 run rather than written down here a
+// second time. A hand-written copy of them keeps passing after the CLI has changed;
+// this fails instead, and the fix is to re-record.
+//
+//   node scripts/smoke-permission.mjs
+//
+// sets the fixture this reads, and is also where the larger claim is settled: that
+// the flags fire the tool at all, and that a denial is honoured.
+const roundTrip = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'permission-roundtrip.json'), 'utf8'));
 
 test('permissionDecision maps allowed status to allow behavior', () => {
   const decision = permissionDecision({ status: 'allowed' });
@@ -5502,6 +5505,59 @@ test('a permission decision denies unless a person allowed it', () => {
   }
 });
 
+// The two tests below are the ones that make Step 0 pay for itself. Everything else
+// in this section asserts what this repository does; these assert it against what a
+// real claude was observed to accept, which is the only outside opinion available.
+
+test('the recorded round trip carries the shapes the gate is built against', () => {
+  const runs = Object.fromEntries(roundTrip.runs.map((r) => [r.label, r]));
+  assert.ok(runs.allow && runs.deny, 'the fixture records an allowed action and a denied one');
+  for (const [label, run] of Object.entries(runs)) {
+    // The ask, exactly as claude wrote it. src/permission-mcp.mjs reads these three
+    // fields off the call and declares the same three in its tools/list schema, so a
+    // CLI that started sending something else would break the tool silently - the
+    // schema would still be describing the old frame.
+    assert.ok(run.asked.length, `${label}: the tool was called at all`);
+    for (const ask of run.asked) {
+      assert.equal(typeof ask.tool_name, 'string', `${label}: tool_name`);
+      assert.equal(typeof ask.tool_use_id, 'string', `${label}: tool_use_id`);
+      assert.ok(ask.input && typeof ask.input === 'object', `${label}: input`);
+    }
+    // The answer, as the tool wrote it: JSON inside the single content block of its
+    // reply. That envelope is the other half of the shape - a decision returned any
+    // other way is one claude refuses to read.
+    assert.equal(run.answered.length, run.asked.length, `${label}: every ask was answered`);
+    for (const answer of run.answered) assert.equal(typeof answer.behavior, 'string', `${label}: behavior`);
+    // And the recorded outcome, which is what makes the decision more than a string:
+    // the allowed action happened and the denied one did not.
+    assert.equal(run.outcome.fileWritten, label === 'allow', `${label}: the action ${label === 'allow' ? 'happened' : 'was refused'}`);
+  }
+  assert.equal(runs.allow.answered[0].behavior, 'allow');
+  // An allow hands the input back rather than merely permitting: what claude writes
+  // is what it proposed and what the person saw, which is the reason the server
+  // returns `updatedInput` at all.
+  assert.deepEqual(runs.allow.answered[0].updatedInput, runs.allow.asked[0].input);
+  assert.equal(runs.deny.answered[0].behavior, 'deny');
+  assert.ok(runs.deny.answered[0].message, 'a denial carries a sentence the agent can act on');
+});
+
+test('the decision the server produces is the one the recorded run accepted', () => {
+  const allow = roundTrip.runs.find((r) => r.label === 'allow');
+  const deny = roundTrip.runs.find((r) => r.label === 'deny');
+  // `permissionDecision` is the server's only source of a decision - the held HTTP
+  // response, the MCP tool's reply and the dashboard's answer all end at it - so the
+  // recorded frames are a claim about this function and not about a literal. The
+  // keys are pinned rather than the values: a renamed field is a decision claude
+  // cannot read, while the wording of a denial is this repository's own business and
+  // changing it should not invalidate a recording.
+  const allowed = permissionDecision({ status: 'allowed', input: JSON.stringify(allow.asked[0].input) });
+  assert.deepEqual(Object.keys(allowed).sort(), Object.keys(allow.answered[0]).sort());
+  assert.deepEqual(allowed, { behavior: 'allow', updatedInput: allow.answered[0].updatedInput });
+  const denied = permissionDecision({ status: 'denied', input: null });
+  assert.deepEqual(Object.keys(denied).sort(), Object.keys(deny.answered[0]).sort());
+  assert.equal(denied.behavior, deny.answered[0].behavior);
+});
+
 test('task-shaped counts what a turn wrote, not that it wrote', () => {
   const write = (name) => ({ data: { message: { content: [{ type: 'tool_use', name }] } } });
   // One edit is a session doing what a session is for. Two is a change with a
@@ -5535,6 +5591,12 @@ test('a session is created, renamed, listed and archived', () => {
   assert.throws(() => s.sessionById('nope'), /not found/);
   // A stopped session is not archived, so it is listed beside the live ones.
   assert.equal(s.listSessions(p.id).length, 1);
+  // Archiving is reversible, and by the one control that says so: the session view
+  // tells the reader to resume an archived session, so a resume that returned the
+  // archive unchanged would be a button that does nothing.
+  assert.equal(s.resumeSession(session.id).status, 'idle');
+  // And resuming one that is already idle is not a state change to something else.
+  assert.equal(s.resumeSession(session.id).status, 'idle');
 });
 
 test('a session turn runs in the project checkout and tallies what it cost', async () => {
@@ -5813,6 +5875,40 @@ test('draftSessionTask drafts a task-shaped session run into the proposals queue
   // The project has a draft in its proposal queue.
   const project=s.project(p.id);
   assert.ok(project.drafts.length>0,'a draft was added to the project');
+});
+
+// The drafting pass reads the project's own spec, not the sentinel that stands in for
+// a plan. The two are easy to swap - both are strings handed to the same prompt
+// builder - and nothing downstream of the call can tell them apart, because the mock
+// answers the same text whatever it is asked. So the prompt is read off the call
+// itself, which is the only place the difference exists.
+test('draftSessionTask grounds the draft in the project spec, not the session plan sentinel', async()=>{
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  // A spec a person approved, which is what the proposals prompt exists to read.
+  s.store.updateProjectSpec(p.id,{spec:'THE PROJECT SPEC: the checkout belongs to the user, and only a task may change it.'});
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'session-provider',name:'Session',kind:'mock',enabled:true,config:{routable:true}});
+  s.addModel({id:'session-m',providerId:'session-provider',name:'session',capabilities:['coding'],speed:10,quality:10,cost:0,contextLength:100000});
+  s.addProvider({id:'chat-provider',name:'Chat',kind:'mock',enabled:true,config:{routable:true,chatText:'Drafted.\n\n```json\n{"tasks":[]}\n```'}});
+  s.addModel({id:'chat-m',providerId:'chat-provider',name:'chat',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const session=s.createSession(p.id,'spec session');
+  s.askSession(session.id,'write hello.txt');
+  await s.sessionTurn(session.id);
+  // The prompt the drafting run was handed, captured at the call.
+  const prompts=[];
+  const realRunRole=s.runRole.bind(s);
+  s.runRole=(...args)=>{prompts.push(String(args[2]));return realRunRole(...args)};
+  await s.draftSessionTask(session.id);
+  assert.equal(prompts.length,1,'the drafting pass is one run');
+  assert.match(prompts[0],/THE PROJECT SPEC/);
+  // And the session's own work is what the draft is asked to describe.
+  assert.match(prompts[0],/ALREADY DONE IN THE CHECKOUT/);
+  // The sentinel is still the task's plan field - it is that field's honest text -
+  // but it is not the spec, and a spec block reading "no plan" is what the finding
+  // was: a drafting model grounded in the absence of a project rather than in one.
+  assert.ok(!prompts[0].includes('No plan: this is a supervised session'),'the plan sentinel is not handed over as the spec');
 });
 
 test('the reaper clears a session whose process died', () => {

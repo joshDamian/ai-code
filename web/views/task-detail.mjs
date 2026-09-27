@@ -1457,7 +1457,11 @@ const FLUSH_MS = 16;
 // A subscriber list rather than preact state is not a preference: an event that lands
 // while the activity tab is closed still has to be in the buffer when it opens, so the
 // buffer cannot belong to the tab, and it must not redraw the page to say so.
-function createEventBuffer() {
+//
+// Exported because the supervised-session view streams the same events into the same
+// list, and it is the same problem there: a session turn emits one per tool call, and
+// the page beside the list is a transcript of markdown.
+export function createEventBuffer() {
   const subs = new Set();
   let events = [];
   let meta = null;

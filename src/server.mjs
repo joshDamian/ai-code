@@ -414,6 +414,11 @@ function holdPermission(req, res, request) {
     } catch {
       /* already settled by the person, which is the answer that stands */
     }
+    // The row is written above, but writing it does not release the waiter: only
+    // `resolvePermission` and `timeoutPermission` do. Without this the Service keeps
+    // a closure over a response that has already been written, one per agent that
+    // went away mid-prompt, for as long as the process lives.
+    svc.resolvePermission(request.id);
     finish();
   });
 }
@@ -542,6 +547,14 @@ function watchRuns() {
   for (const r of svc.store.listSessionRuns()) if (r.status !== 'running') announcedRuns.add(r.id);
   const timer = setInterval(() => {
     try {
+      // The prompts whose asker is gone. A held request has its own timer for as
+      // long as this process is the one holding it; the sweep is for the rows left
+      // pending by a process that is not - a server restarted while an agent was
+      // blocked, an agent killed mid-prompt. Without it the dashboard draws a live
+      // countdown for a question nothing is waiting on, and the auto-deny the design
+      // promises never arrives. It shares this tick rather than owning one because it
+      // is the same question the loop below asks: what did the last process leave.
+      svc.sweepPermissions();
       for (const r of svc.store.listRuns()) {
         if (r.status === 'running' || announcedRuns.has(r.id)) continue;
         announcedRuns.add(r.id);

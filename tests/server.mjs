@@ -722,9 +722,11 @@ test('a session permission request times out end-to-end over HTTP',async()=>{
   git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
   const s=new Service(root,{allowMock:true,silent:true});
   const p=s.initProject('p',root);
-  // Short timeout so the held request resolves quickly instead of blocking.
+  // Short timeout so the held request resolves quickly instead of blocking. The
+  // policy is in seconds - every reader multiplies it by 1000 - so 0.05 is the 50ms
+  // the wait below is sized against, and a whole number here would be 50 seconds.
   const policies=loadPolicies(root);
-  policies.session.permissionTimeoutMs=50;
+  policies.session.permissionTimeoutMs=0.05;
   savePolicies(root,policies);
   s.updateProvider('mock',{enabled:false});
   s.addProvider({id:'slow-session',name:'Slow',kind:'mock',enabled:true,config:{routable:true,delayMs:30000}});
@@ -745,6 +747,44 @@ test('a session permission request times out end-to-end over HTTP',async()=>{
     const body=JSON.parse(result.body);
     assert.equal(body.behavior,'deny');
     assert.match(body.message,/Nobody answered/);
+  }finally{srv.stop()}
+});
+
+// The other half of the auto-deny. A prompt this process is holding has its own
+// timer; a prompt left behind by a process that is gone has none, because the timer
+// died with the process. That row is what the server's sweep exists for, and left
+// alone it draws a live countdown over an agent that is not there.
+test('a permission row orphaned by a dead process is swept by the server',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-perm-sweep-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const session=s.createSession(p.id,'orphan session');
+  // Short timeout, so the sweep reaches the row on the first tick rather than after
+  // two minutes of real time - the row is backdated below besides.
+  const policies=loadPolicies(root);
+  policies.session.permissionTimeoutMs=0.05;
+  savePolicies(root,policies);
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    // Written by this process and held by nobody: no waiter here, no held POST in the
+    // server, and a created_at already past the deadline. This is exactly the row a
+    // server that restarted mid-prompt leaves behind.
+    const orphan=s.addPermissionRequest({sessionId:session.id,runId:null,tool:'Write',input:{path:'x'},cwd:root});
+    s.store.db.prepare('UPDATE permission_requests SET created_at=? WHERE id=?').run(new Date(Date.now()-60000).toISOString(),orphan.id);
+    // The server reads the table rather than this process's memory, so the row is
+    // visible to it at once; what the wait is for is its watcher's next tick.
+    let row=null;
+    for(let i=0;i<80&&row?.status!=='timeout';i++){
+      await new Promise((r)=>setTimeout(r,50));
+      const seen=JSON.parse((await get(`${srv.base}/api/sessions/${session.id}/permissions`)).body);
+      row=seen.history.find((h)=>h.id===orphan.id);
+      if(row?.status==='timeout')assert.equal(seen.permission,null,'an expired prompt is not shown as live');
+    }
+    assert.equal(row?.status,'timeout');
   }finally{srv.stop()}
 });
 

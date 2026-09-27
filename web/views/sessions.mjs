@@ -11,7 +11,7 @@
 // something. An agent that has asked for permission has stopped, is holding a
 // provider slot, and will be denied by the clock in two minutes; a banner under a
 // long transcript is a banner nobody scrolls to.
-import { html, useState, useEffect, useRef, useCallback, formatCost } from '../lib.mjs';
+import { html, useState, useEffect, useRef, useCallback, useMemo, formatCost } from '../lib.mjs';
 import { api, sessionStreamUrl } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
@@ -19,15 +19,11 @@ import { StatusBadge } from '../components/status-badge.mjs';
 import { TextArea, Select } from '../components/form.mjs';
 import { Markdown } from '../components/markdown.mjs';
 import { EventStream } from '../components/event-stream.mjs';
+import { createEventBuffer } from './task-detail.mjs';
 
 // A turn the queue is still holding. Read from the job row rather than from a local
 // flag, so a reload and a second tab see the same thing this one does.
 const IN_FLIGHT = new Set(['queued', 'running']);
-
-// How many live events the activity list keeps. A session turn can run for an hour
-// and every tool call is a frame, so the tail is what is rendered and the cap is
-// where it stops growing.
-const MAX_EVENTS = 500;
 
 // Where the composer stops growing and starts scrolling instead, matching the chat
 // composer's own cap.
@@ -71,6 +67,21 @@ function turnFailureText(t) {
   return t.error || `The turn ${t.status || 'did not finish'}.`;
 }
 
+// The activity list, and the only reader of the event stream. It subscribes to the
+// buffer rather than being handed the page's state for the reason the buffer exists:
+// a working turn emits an event per tool call, and committing each one to the page
+// would redraw the transcript beside it - the markdown, the permission panel and
+// the composer - once per event, for a list that is usually collapsed.
+function Activity({ store }) {
+  const [events, setEvents] = useState(store.events);
+  useEffect(() => {
+    const sync = () => setEvents(store.events);
+    sync();
+    return store.on(sync);
+  }, [store]);
+  return html`<${EventStream} events=${events} />`;
+}
+
 // Seconds left on the request, floored at zero. Derived on every tick from the
 // request's own deadline rather than from a countdown started when the panel
 // rendered, so a page opened ninety seconds into a two-minute window shows thirty
@@ -87,12 +98,20 @@ export function Sessions({ id, navigate, onTitle }) {
   const [detail, setDetail] = useState(null);
   const [turns, setTurns] = useState([]);
   const [permission, setPermission] = useState(null);
-  const [events, setEvents] = useState([]);
   const [working, setWorking] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
   const [input, setInput] = useState('');
+  // The name editor, closed until it is asked for. A session names itself from its
+  // first instruction, and a person who meant something else by it fixes it here
+  // rather than by starting a new session with a throwaway first turn.
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  // Bumped to re-read the list in place. Opening a session takes the list out of the
+  // tree and remounts it on the way back, but a row's Stop or Archive happens while
+  // the list is still the view.
+  const [listTick, setListTick] = useState(0);
   // Ticks once a second while a request is pending, and not otherwise: a component
   // that re-renders every second for the whole life of a page is a page that never
   // settles, and the countdown is the only thing here that needs a clock.
@@ -106,6 +125,11 @@ export function Sessions({ id, navigate, onTitle }) {
   const sawWorking = useRef(false);
 
   const session = detail?.session || null;
+
+  // The live events, buffered rather than held in render state. One buffer per
+  // session, because switching sessions is switching turns and a frame from the
+  // previous one has no list to belong to.
+  const events = useMemo(() => createEventBuffer(), [id]);
 
   // Pin the transcript to the newest turn, on the transcript itself rather than
   // with scrollIntoView on a sentinel: scrollIntoView moves every scrollable
@@ -197,8 +221,7 @@ export function Sessions({ id, navigate, onTitle }) {
     // uses. This is what makes the wait legible: a person watching a session work is
     // watching what it is reading and what it is asking for.
     stream.addEventListener('event', (e) => {
-      const ev = JSON.parse(e.data);
-      setEvents((list) => (list.length >= MAX_EVENTS ? [...list.slice(1), ev] : [...list, ev]));
+      events.push(JSON.parse(e.data));
     });
     stream.addEventListener('state', (e) => {
       const st = JSON.parse(e.data);
@@ -227,7 +250,7 @@ export function Sessions({ id, navigate, onTitle }) {
       finish();
       load();
     };
-  }, [id, closeStream, load]);
+  }, [id, events, closeStream, load]);
 
   const openStreamRef = useRef(null);
   openStreamRef.current = openStream;
@@ -247,12 +270,16 @@ export function Sessions({ id, navigate, onTitle }) {
     return () => {
       cancelled = true;
     };
-  }, [id, projectId]);
+  }, [id, projectId, listTick]);
 
   useEffect(() => {
     if (!id) return undefined;
-    setEvents([]);
+    // The buffer is emptied by being replaced: `events` is a useMemo keyed on the
+    // session, so the one this effect is entered with is the one this session owns.
     setShowActivity(false);
+    // A name being edited belongs to the session it was started on. Left open across
+    // a navigation, the box would save one session's name onto another.
+    setRenaming(false);
     load();
     return closeStream;
   }, [id, load, closeStream]);
@@ -277,6 +304,27 @@ export function Sessions({ id, navigate, onTitle }) {
   }, [permission]);
 
   const openSession = useCallback((sessionId) => navigate(`#/sessions/${sessionId}`), [navigate]);
+
+  const refreshList = useCallback(() => setListTick((n) => n + 1), []);
+
+  // A row's Stop, Resume or Archive, which acts on a session this view is not the
+  // one showing. The button's own event is stopped before it gets here: the row
+  // underneath is a link into the session, and archiving one should not also open it.
+  const rowControl = useCallback(
+    async (e, fn, label) => {
+      e.stopPropagation();
+      setBusy(true);
+      try {
+        await fn();
+      } catch (err) {
+        showToast(`${label}: ${err.message}`, 'error');
+      } finally {
+        setBusy(false);
+        refreshList();
+      }
+    },
+    [refreshList]
+  );
 
   const createSession = useCallback(async () => {
     if (!projectId) return;
@@ -372,6 +420,30 @@ export function Sessions({ id, navigate, onTitle }) {
     }
   }, [id, navigate]);
 
+  const startRename = useCallback(() => {
+    setNameDraft(session?.name || '');
+    setRenaming(true);
+  }, [session]);
+
+  // Renamed to what the box holds, and the box is left open when the server refuses:
+  // the name a person typed is theirs to fix, and closing the editor would have them
+  // retype it. `control` is not used here for that reason - it reloads either way,
+  // which is what a refused rename is not.
+  const saveName = useCallback(async () => {
+    const label = nameDraft.trim();
+    if (!label) return;
+    setBusy(true);
+    try {
+      await api.updateSession(id, { name: label });
+      setRenaming(false);
+      load();
+    } catch (e) {
+      showToast(`Rename: ${e.message}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }, [id, nameDraft, load]);
+
   // List view.
   if (!id) {
     const project = projects.find((p) => p.id === projectId);
@@ -405,10 +477,40 @@ export function Sessions({ id, navigate, onTitle }) {
                       ${sessions.map(
                         (s) => html`
                           <div class="session-item" onclick=${() => openSession(s.id)}>
-                            <div class="session-title">
-                              ${s.name} <${StatusBadge} status=${s.status} />
+                            <div class="session-info">
+                              <div class="session-title">
+                                ${s.name} <${StatusBadge} status=${s.status} />
+                              </div>
+                              <div class="session-date">
+                                ${new Date(s.updated_at).toLocaleString()}${s.budget_tally ? ` · ${formatCost(s.budget_tally)}` : ''}${s.pending_run_id
+                                  ? ' · working'
+                                  : ''}
+                              </div>
                             </div>
-                            <div class="session-date">${new Date(s.updated_at).toLocaleString()}${s.budget_tally ? ` · ${formatCost(s.budget_tally)}` : ''}</div>
+                            <div class="session-actions">
+                              ${s.status === 'stopped' || s.status === 'archived'
+                                ? html`<button
+                                    class="btn secondary"
+                                    onclick=${(e) => rowControl(e, () => api.resumeSession(s.id), 'Resume')}
+                                    ?disabled=${busy}
+                                  >
+                                    Resume
+                                  </button>`
+                                : html`<button
+                                    class="btn secondary"
+                                    onclick=${(e) => rowControl(e, () => api.stopSession(s.id), 'Stop')}
+                                    ?disabled=${busy}
+                                  >
+                                    Stop
+                                  </button>`}
+                              <button
+                                class="btn secondary"
+                                onclick=${(e) => rowControl(e, () => api.archiveSession(s.id), 'Archive')}
+                                ?disabled=${busy || s.status === 'archived'}
+                              >
+                                Archive
+                              </button>
+                            </div>
                           </div>
                         `
                       )}
@@ -431,17 +533,41 @@ export function Sessions({ id, navigate, onTitle }) {
     <div class="chat-conversation">
       <div class="card chat-card">
         <div class="card-header">
-          <h1>
-            ${session?.name || 'Session'}
-            ${session ? html`<${StatusBadge} status=${session.status} />` : null}
-          </h1>
+          ${renaming
+            ? html`
+                <input
+                  class="input session-rename"
+                  value=${nameDraft}
+                  placeholder="Session name"
+                  aria-label="Session name"
+                  onInput=${(e) => setNameDraft(e.target.value)}
+                  onKeyDown=${(e) => {
+                    if (e.key === 'Enter') saveName();
+                    if (e.key === 'Escape') setRenaming(false);
+                  }}
+                />
+              `
+            : html`
+                <h1>
+                  ${session?.name || 'Session'}
+                  ${session ? html`<${StatusBadge} status=${session.status} />` : null}
+                </h1>
+              `}
           <div class="row session-controls">
-            ${nudge ? html`<button class="btn" onclick=${draftTask} ?disabled=${busy}>Draft as task</button>` : null}
-            ${stopped || archived
-              ? html`<button class="btn" onclick=${() => control(() => api.resumeSession(id), 'Resume')} ?disabled=${busy}>Resume</button>`
-              : html`<button class="btn secondary" onclick=${() => control(() => api.stopSession(id), 'Stop')} ?disabled=${busy}>Stop</button>`}
-            <button class="btn secondary" onclick=${() => control(() => api.archiveSession(id), 'Archive')} ?disabled=${busy}>Archive</button>
-            <button class="btn secondary" onclick=${() => navigate('#/sessions')}>Back</button>
+            ${renaming
+              ? html`
+                  <button class="btn" onclick=${saveName} ?disabled=${busy || !nameDraft.trim()}>Save</button>
+                  <button class="btn secondary" onclick=${() => setRenaming(false)} ?disabled=${busy}>Cancel</button>
+                `
+              : html`
+                  ${nudge ? html`<button class="btn" onclick=${draftTask} ?disabled=${busy}>Draft as task</button>` : null}
+                  <button class="btn secondary" onclick=${startRename} ?disabled=${busy || !session}>Rename</button>
+                  ${stopped || archived
+                    ? html`<button class="btn" onclick=${() => control(() => api.resumeSession(id), 'Resume')} ?disabled=${busy}>Resume</button>`
+                    : html`<button class="btn secondary" onclick=${() => control(() => api.stopSession(id), 'Stop')} ?disabled=${busy}>Stop</button>`}
+                  <button class="btn secondary" onclick=${() => control(() => api.archiveSession(id), 'Archive')} ?disabled=${busy}>Archive</button>
+                  <button class="btn secondary" onclick=${() => navigate('#/sessions')}>Back</button>
+                `}
           </div>
         </div>
 
@@ -535,7 +661,7 @@ export function Sessions({ id, navigate, onTitle }) {
               </div>
             `
           : null}
-        ${showActivity ? html`<${EventStream} events=${events} />` : null}
+        ${showActivity ? html`<${Activity} store=${events} />` : null}
       </div>
     </div>
   `;

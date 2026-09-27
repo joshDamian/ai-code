@@ -1258,7 +1258,15 @@ export class Store {
   // so it is translated rather than written - a resume id landing in the parent
   // column would silently reparent the run to a session id that is not a session.
   updateSessionRun(id, patch) {
-    const p = patch.status === 'succeeded' && !('error' in patch) ? { ...patch, error: null } : patch;
+    // Copied first, because both branches below write to the patch rather than to
+    // the row: one translates `session_id` out of it, and the caller's object is not
+    // this function's to edit. A caller that held a patch with a resume id in it
+    // would otherwise find the key gone after the first update.
+    const p = { ...patch };
+    // A success clears the error column unless the caller named one. Tested with
+    // `in` rather than for a truthy value, so a caller that passes an explicit
+    // `error: null` and one that passes nothing are the same write.
+    if (p.status === 'succeeded' && !('error' in patch)) p.error = null;
     const r = this.db.prepare('SELECT * FROM session_runs WHERE id=?').get(id);
     if (!r) return null;
     if ('session_id' in p) {

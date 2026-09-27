@@ -1,16 +1,354 @@
 {
-  "timestamp": "2026-09-27T00:28:16.043Z",
-  "claudeVersion": "2.1.283 (verified)",
-  "requests": [
+  "recordedAt": "2026-09-27T00:36:00.123Z",
+  "claudeVersion": "2.1.283 (Claude Code)",
+  "claudePath": "/Users/josh/.local/bin/claude",
+  "permissionTool": "mcp__ai-code-permissions__approve",
+  "prompt": "Write the text \"hello\" to a file named test.txt in the current directory.",
+  "runs": [
     {
-      "tool": "Write",
-      "input": {
-        "file_path": "/Users/josh/Code/Personal/experimental/.ai-code-worktrees-ai-code/147badee-25a8-4538-8c20-dc1ff1f33d1f/test.txt",
-        "content": "hello\n"
+      "label": "allow",
+      "decision": "allow",
+      "asked": [
+        {
+          "tool_name": "Write",
+          "input": {
+            "file_path": "/private/var/folders/nr/78ww2_z97rq278c26vyx5y5c0000gn/T/ai-code-smoke-allow-swk9xi/test.txt",
+            "content": "hello"
+          },
+          "tool_use_id": "call_00_ET_FgqKYDvFGjVAJus5jHDA0608"
+        }
+      ],
+      "answered": [
+        {
+          "behavior": "allow",
+          "updatedInput": {
+            "file_path": "/private/var/folders/nr/78ww2_z97rq278c26vyx5y5c0000gn/T/ai-code-smoke-allow-swk9xi/test.txt",
+            "content": "hello"
+          }
+        }
+      ],
+      "http": [
+        {
+          "tool": "Write",
+          "input": {
+            "file_path": "/private/var/folders/nr/78ww2_z97rq278c26vyx5y5c0000gn/T/ai-code-smoke-allow-swk9xi/test.txt",
+            "content": "hello"
+          },
+          "cwd": "/private/var/folders/nr/78ww2_z97rq278c26vyx5y5c0000gn/T/ai-code-smoke-allow-swk9xi",
+          "run_id": "smoke-allow"
+        }
+      ],
+      "wire": [
+        {
+          "dir": "in",
+          "msg": {
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "roots": {
+                  "listChanged": true
+                },
+                "elicitation": {}
+              },
+              "clientInfo": {
+                "name": "claude-code",
+                "title": "Claude Code",
+                "version": "2.1.283",
+                "description": "Anthropic's agentic coding tool",
+                "websiteUrl": "https://claude.com/claude-code"
+              }
+            },
+            "jsonrpc": "2.0",
+            "id": 0
+          }
+        },
+        {
+          "dir": "out",
+          "msg": {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "ai-code-permissions",
+                "version": "1.0.0"
+              }
+            }
+          }
+        },
+        {
+          "dir": "in",
+          "msg": {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          }
+        },
+        {
+          "dir": "in",
+          "msg": {
+            "method": "tools/list",
+            "jsonrpc": "2.0",
+            "id": 1
+          }
+        },
+        {
+          "dir": "out",
+          "msg": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "tools": [
+                {
+                  "name": "approve",
+                  "description": "Ask the person watching this AI Code session to approve or deny an action. Returns the decision.",
+                  "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                      "tool_name": {
+                        "type": "string",
+                        "description": "The tool the agent wants to use."
+                      },
+                      "input": {
+                        "type": "object",
+                        "description": "The arguments that tool would be called with."
+                      },
+                      "tool_use_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tool_name",
+                      "input"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "dir": "in",
+          "msg": {
+            "method": "tools/call",
+            "params": {
+              "name": "approve",
+              "arguments": {
+                "tool_name": "Write",
+                "input": {
+                  "file_path": "/private/var/folders/nr/78ww2_z97rq278c26vyx5y5c0000gn/T/ai-code-smoke-allow-swk9xi/test.txt",
+                  "content": "hello"
+                },
+                "tool_use_id": "call_00_ET_FgqKYDvFGjVAJus5jHDA0608"
+              },
+              "_meta": {
+                "claudecode/toolUseId": "call_00_ET_FgqKYDvFGjVAJus5jHDA0608",
+                "progressToken": 2
+              }
+            },
+            "jsonrpc": "2.0",
+            "id": 2
+          }
+        },
+        {
+          "dir": "out",
+          "msg": {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"behavior\":\"allow\",\"updatedInput\":{\"file_path\":\"/private/var/folders/nr/78ww2_z97rq278c26vyx5y5c0000gn/T/ai-code-smoke-allow-swk9xi/test.txt\",\"content\":\"hello\"}}"
+                }
+              ],
+              "isError": false
+            }
+          }
+        }
+      ],
+      "outcome": {
+        "exitCode": 0,
+        "signal": null,
+        "fileWritten": true,
+        "fileContent": "hello",
+        "reply": "Wrote `hello` to `test.txt`."
       },
-      "cwd": "/Users/josh/Code/Personal/experimental/.ai-code-worktrees-ai-code/147badee-25a8-4538-8c20-dc1ff1f33d1f"
+      "stderrTail": "⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors\n[claude-code:unrecognized_model] {\"model\":\"deepseek-flash\",\"query_source\":\"sdk\"}"
+    },
+    {
+      "label": "deny",
+      "decision": "deny",
+      "asked": [
+        {
+          "tool_name": "Write",
+          "input": {
+            "file_path": "/private/var/folders/nr/78ww2_z97rq278c26vyx5y5c0000gn/T/ai-code-smoke-deny-I5C3LW/test.txt",
+            "content": "hello\n"
+          },
+          "tool_use_id": "call_00_1eaHXNShTMcQMbGzoAv82328"
+        }
+      ],
+      "answered": [
+        {
+          "behavior": "deny",
+          "message": "The person watching this session denied this action. Do not retry it or reach the same result another way."
+        }
+      ],
+      "http": [
+        {
+          "tool": "Write",
+          "input": {
+            "file_path": "/private/var/folders/nr/78ww2_z97rq278c26vyx5y5c0000gn/T/ai-code-smoke-deny-I5C3LW/test.txt",
+            "content": "hello\n"
+          },
+          "cwd": "/private/var/folders/nr/78ww2_z97rq278c26vyx5y5c0000gn/T/ai-code-smoke-deny-I5C3LW",
+          "run_id": "smoke-deny"
+        }
+      ],
+      "wire": [
+        {
+          "dir": "in",
+          "msg": {
+            "method": "initialize",
+            "params": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "roots": {
+                  "listChanged": true
+                },
+                "elicitation": {}
+              },
+              "clientInfo": {
+                "name": "claude-code",
+                "title": "Claude Code",
+                "version": "2.1.283",
+                "description": "Anthropic's agentic coding tool",
+                "websiteUrl": "https://claude.com/claude-code"
+              }
+            },
+            "jsonrpc": "2.0",
+            "id": 0
+          }
+        },
+        {
+          "dir": "out",
+          "msg": {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "ai-code-permissions",
+                "version": "1.0.0"
+              }
+            }
+          }
+        },
+        {
+          "dir": "in",
+          "msg": {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          }
+        },
+        {
+          "dir": "in",
+          "msg": {
+            "method": "tools/list",
+            "jsonrpc": "2.0",
+            "id": 1
+          }
+        },
+        {
+          "dir": "out",
+          "msg": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "tools": [
+                {
+                  "name": "approve",
+                  "description": "Ask the person watching this AI Code session to approve or deny an action. Returns the decision.",
+                  "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                      "tool_name": {
+                        "type": "string",
+                        "description": "The tool the agent wants to use."
+                      },
+                      "input": {
+                        "type": "object",
+                        "description": "The arguments that tool would be called with."
+                      },
+                      "tool_use_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tool_name",
+                      "input"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "dir": "in",
+          "msg": {
+            "method": "tools/call",
+            "params": {
+              "name": "approve",
+              "arguments": {
+                "tool_name": "Write",
+                "input": {
+                  "file_path": "/private/var/folders/nr/78ww2_z97rq278c26vyx5y5c0000gn/T/ai-code-smoke-deny-I5C3LW/test.txt",
+                  "content": "hello\n"
+                },
+                "tool_use_id": "call_00_1eaHXNShTMcQMbGzoAv82328"
+              },
+              "_meta": {
+                "claudecode/toolUseId": "call_00_1eaHXNShTMcQMbGzoAv82328",
+                "progressToken": 2
+              }
+            },
+            "jsonrpc": "2.0",
+            "id": 2
+          }
+        },
+        {
+          "dir": "out",
+          "msg": {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"behavior\":\"deny\",\"message\":\"The person watching this session denied this action. Do not retry it or reach the same result another way.\"}"
+                }
+              ],
+              "isError": false
+            }
+          }
+        }
+      ],
+      "outcome": {
+        "exitCode": 0,
+        "signal": null,
+        "fileWritten": false,
+        "fileContent": null,
+        "reply": "The write was denied, so `test.txt` was not created. I won't retry it. If that denial was unintentional, re-run the request and approve the write when prompted."
+      },
+      "stderrTail": "⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors\n[claude-code:unrecognized_model] {\"model\":\"deepseek-flash\",\"query_source\":\"sdk\"}"
     }
-  ],
-  "decision": null,
-  "notes": "Captured from real claude 2.1.283 --permission-prompt-tool execution"
+  ]
 }

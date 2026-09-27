@@ -2054,9 +2054,16 @@ export class Service {
   // because a person who stopped a session and then typed an instruction meant to
   // start a new turn, while a person clicking Resume meant to unsay the stop - and
   // a UI with only the first would make them guess which one it was.
+  //
+  // Archived resumes too, for the same reason it exists here at all: the session
+  // view offers the button by name and tells the reader to press it ("Resume it to
+  // send another instruction"), so a resume that quietly did nothing for the one
+  // state that most needs it would be a control whose label is a lie. It is idle it
+  // returns to, not the state before the archive - the run that was in flight was
+  // already ended by the archive, and `idle` is the only status that accepts a turn.
   resumeSession(sessionId) {
     const s = this.sessionById(sessionId);
-    if (s.status !== 'stopped') return s;
+    if (s.status !== 'stopped' && s.status !== 'archived') return s;
     return this.store.updateSession(sessionId, { status: 'idle' });
   }
 
@@ -2433,6 +2440,8 @@ export class Service {
       runId,
     });
     // Run the proposals prompt immediately to draft the tasks.
+    const open = this.store.listTasks(project.id).filter((t) => !CLOSED_STATES.has(t.state));
+    const spec = cap(project.spec || '', SPEC_PROMPT_CHARS);
     const result = await this.runRole(
       {
         id: null,
@@ -2442,7 +2451,7 @@ export class Service {
         plan: SESSION_NO_PLAN,
       },
       'chat',
-      PROPOSALS_PROMPT(SESSION_NO_PLAN, '', focus),
+      PROPOSALS_PROMPT(spec, open, cap(focus, DECISION_DIFF_CHARS)),
       project.path,
       [],
       { runId, chatSessionId: chat.id }
