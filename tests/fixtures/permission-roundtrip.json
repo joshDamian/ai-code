@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-09-27T00:28:16.043Z",
+  "claudeVersion": "2.1.283 (verified)",
+  "requests": [
+    {
+      "tool": "Write",
+      "input": {
+        "file_path": "/Users/josh/Code/Personal/experimental/.ai-code-worktrees-ai-code/147badee-25a8-4538-8c20-dc1ff1f33d1f/test.txt",
+        "content": "hello\n"
+      },
+      "cwd": "/Users/josh/Code/Personal/experimental/.ai-code-worktrees-ai-code/147badee-25a8-4538-8c20-dc1ff1f33d1f"
+    }
+  ],
+  "decision": null,
+  "notes": "Captured from real claude 2.1.283 --permission-prompt-tool execution"
+}
