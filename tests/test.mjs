@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -2927,6 +2927,35 @@ test('a planner that does touch the repo is still a violation',async()=>{
   assert.equal(s.task(t.id).state,'FAILED');
 });
 
+test('a planner that writes into an already-untracked directory is still a violation',async()=>{
+  // The collapsed entry is the whole hole: `wip/` reads the same before and after
+  // the write, so a before/after comparison over porcelain alone reports a planner
+  // that added a file inside an untracked directory as having done nothing at all.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  fs.mkdirSync(path.join(root,'wip'));
+  fs.writeFileSync(path.join(root,'wip','existing.txt'),'x\n');
+  const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const planning=s.plan(t.id);
+  fs.writeFileSync(path.join(root,'wip','sneaky.txt'),'// the planner wrote this');
+  await assert.rejects(()=>planning,/PLANNING_VIOLATION: planner changed repository state \(.*wip\/sneaky\.txt/);
+  assert.equal(s.task(t.id).state,'FAILED');
+});
+
+test('a planner that writes into a gitignored directory is not a violation',async()=>{
+  // The other half of the widening. --exclude-standard is what keeps node_modules
+  // out of both measurements, so a directory git ignores is not measured at all -
+  // and .gitignore itself is untracked and unchanged across the window.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  fs.writeFileSync(path.join(root,'.gitignore'),'build/\n');
+  fs.mkdirSync(path.join(root,'build'));
+  fs.writeFileSync(path.join(root,'build','existing.txt'),'x\n');
+  const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const planning=s.plan(t.id);
+  fs.writeFileSync(path.join(root,'build','sneaky.txt'),'// the planner wrote this');
+  const done=await planning;
+  assert.equal(done.state,'AWAITING_APPROVAL');
+});
+
 test('a plan left behind by a dead process is recovered on the next open',()=>{
   const root=repo();const s=new Service(root,{allowMock:true,silent:true});
   const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);
@@ -3240,6 +3269,17 @@ test('dirtyPaths returns bare paths, not porcelain lines',()=>{
   assert.deepEqual(dirtyPaths(root).sort(),['README.md','a file with spaces.mjs']);
 });
 
+test('dirtyAndUntracked expands a collapsed untracked directory to its files',()=>{
+  // porcelain reports an entirely-untracked directory as one `?? wip/` entry
+  // whatever it holds, so a before/after comparison over it alone reads the same
+  // before and after a write into that directory. The ls-files half is what names
+  // the file, and the filtered `.ai-code` store stays out of its half too.
+  const root=repoWith('app.mjs');
+  fs.mkdirSync(path.join(root,'wip'));
+  fs.writeFileSync(path.join(root,'wip','a.txt'),'x\n');
+  assert.deepEqual(dirtyAndUntracked(root).sort(),['wip/','wip/a.txt']);
+});
+
 test('the read set is the files the planner opened, in the repository\'s own terms',()=>{
   const root='/repo';
   const events=[
@@ -3416,6 +3456,25 @@ test('a file that changed after the plan was written also blocks execution',asyn
   const err=await s.implement(t.id).then(()=>null,e=>e);
   assert.equal(err.code,'PLAN_BASE_DIRTY');
   assert.match(err.message,/changed after the plan was written/,'the message says which of the two situations this is');
+});
+
+test('the baseline and the gate name files inside an untracked directory individually',async()=>{
+  // The recorded dirty set is what the dashboard's Execute tab shows and what the
+  // refusal is built from, so the collapsed folder entry alone tells the reader the
+  // plan leaned on uncommitted work without telling them which file to commit.
+  const root=repoWith('app.mjs');
+  const s=new Service(root,{allowMock:true,silent:true});
+  s.updateProvider('mock',{config:{readPaths:['wip/notes.txt']}});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  fs.mkdirSync(path.join(root,'wip'));
+  fs.writeFileSync(path.join(root,'wip','notes.txt'),'work in progress\n');
+  await s.plan(t.id);
+  assert.ok(JSON.parse(s.task(t.id).plan_base).dirty.includes('wip/notes.txt'),'the baseline names the file');
+  s.approve(t.id);
+  const err=await s.implement(t.id).then(()=>null,e=>e);
+  assert.equal(err.code,'PLAN_BASE_DIRTY');
+  assert.match(err.message,/wip\/notes\.txt/,'the refusal names the file to commit');
 });
 
 // -- porting a task's work onto a branch ----------------------------------

@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { Store } from './store.mjs';
 import { inspect, writeContext, readDependencies, relevantFiles, buildTaskContext, contextConfig, estimateTokens, treeOnlyContext } from './context.mjs';
 import {
-  ensureGit, gitInit, hasCommits, commitInitial, status, createWorktree, diffAgainst, diffBetween, diffPaths, statusPaths, untracked, dirtyPaths, worktreeHashes, changedPaths, head, changedBetween, protectAiCode,
+  ensureGit, gitInit, hasCommits, commitInitial, status, createWorktree, diffAgainst, diffBetween, diffPaths, statusPaths, untracked, dirtyPaths, dirtyAndUntracked, worktreeHashes, changedPaths, head, changedBetween, protectAiCode,
   currentBranch, revParse, isAncestor, mergeBase, findCommit, branches, checkedOut, mergeTree, commitTree, setBranch, commitAll, removeWorktree, commitDiff,
   landingCommit, commitRef,
 } from './git.mjs';
@@ -146,7 +146,9 @@ function planBase(task) {
 // What the tree looked like when the plan was written, so execution has something
 // to compare against. The dirty set is recorded as much for the message as for the
 // check: it is what tells a file that was already dirty when the planner read it
-// from one that changed after the plan was written.
+// from one that changed after the plan was written. It includes the untracked
+// enumeration, so a file inside an untracked directory is named rather than left
+// behind the directory's single collapsed entry.
 //
 // `target_branch` is where a port means to land, and it is deliberately not called
 // `branch`: the task row already has a `branch` column holding the worktree's own
@@ -1620,7 +1622,10 @@ export class Service {
     // work in progress when the task was planned. That is the normal state of a
     // repository under active development, and it is how a planner that correctly
     // reported "no work needed" got its run marked FAILED and its plan thrown away.
-    const before = new Set(dirtyPaths(p.path));
+    // The measurement is widened with the per-file untracked enumeration, because
+    // porcelain collapses an untracked directory to one entry: a file added inside
+    // one reads as no change at all.
+    const before = new Set(dirtyAndUntracked(p.path));
     let result;
     try {
       result = await this.runRole(t, 'planner', PLANNER_PROMPT, p.path);
@@ -1631,7 +1636,7 @@ export class Service {
       if (BUDGET_CODES.has(e.code)) this.store.updateTask(id, { state: 'FAILED' });
       throw e;
     }
-    const written = dirtyPaths(p.path).filter((f) => !before.has(f));
+    const written = dirtyAndUntracked(p.path).filter((f) => !before.has(f));
     if (written.length) {
       this.store.updateTask(id, { state: 'FAILED' });
       // The paths, because "planner changed repository state" with no file named
@@ -1730,7 +1735,7 @@ export class Service {
         // diff is most worth having, since the run that produced it left no record of
         // what it was changing.
         this.#writePlan(task_id, this.planFromRun(run_id), task.plan);
-        this.store.updateTask(task_id, { plan_base: recordPlanBase(this.store, project.path, task, run_id, dirtyPaths(project.path)) });
+        this.store.updateTask(task_id, { plan_base: recordPlanBase(this.store, project.path, task, run_id, dirtyAndUntracked(project.path)) });
         this.transition(task_id, 'AWAITING_APPROVAL');
         recovered.push({ taskId: task_id, runId: run_id });
       } catch {
@@ -1815,7 +1820,7 @@ export class Service {
     const p = this.project(t.project_id);
     // Recorded before the run for the same reason plan() records its own before
     // its run: this is what the tree looked like to the planner.
-    const before = dirtyPaths(p.path);
+    const before = dirtyAndUntracked(p.path);
     const result = await this.runRole(
       t,
       'planner',
@@ -2563,7 +2568,7 @@ export class Service {
     // on its own once they are.
     const baseline = planBase(t);
     if (baseline && !opts.force) {
-      const blocked = dirtyPaths(p.path).filter((f) => touches(baseline.seen, f));
+      const blocked = dirtyAndUntracked(p.path).filter((f) => touches(baseline.seen, f));
       if (blocked.length) {
         const later = baseline.dirty ? blocked.filter((f) => !baseline.dirty.includes(f)) : [];
         throw Object.assign(

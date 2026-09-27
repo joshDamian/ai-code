@@ -82,6 +82,16 @@ export function dirtyPaths(root){const s=execFileSync('git',['status','--porcela
 // skipped; skipping first and reading after keeps the path that no longer exists.
 if(/^[RC]/.test(line))i++;
 if(p&&!p.includes('.ai-code'))out.push(p)}return out}
+// The dirty set widened with the per-file untracked enumeration. porcelain
+// collapses an entirely-untracked directory to one `?? dir/` entry, so a
+// before/after comparison built on it alone reads the same string before and
+// after a write into one. The ls-files enumeration lists one path per file,
+// which is what makes a new file inside an already-dirty directory visible.
+// The `.ai-code` filter matches dirtyPaths' own, and --exclude-standard is
+// what keeps ignored directories (node_modules) out of the widened half.
+export function dirtyAndUntracked(root) {
+  return [...new Set([...dirtyPaths(root), ...untracked(root).filter((p) => !p.includes('.ai-code'))])];
+}
 // The paths that differ between two commits. What tells a file whose uncommitted
 // content was committed from one whose uncommitted content is still missing.
 export function changedBetween(root,from,to){if(from===to)return[];const s=git(root,['diff','--name-only',from,to]);return s?s.split('\n').filter(Boolean):[]}
