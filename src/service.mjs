@@ -326,6 +326,7 @@ const reasoningFloor = {
   // rather than a safety one, and it is overridable in routing.json's `chat`
   // block like every other role's policy.
   chat: ['strong', 'frontier'],
+  session: ['basic', 'moderate', 'strong', 'frontier'],
 };
 
 // A model that cannot call tools cannot edit files or run commands, which is the
@@ -688,6 +689,7 @@ export function slugify(text, words = 4) {
 // subjects without the user having to name anything. A chat has no title field
 // in the UI, and "New chat" four times over is a list nobody can navigate.
 const DEFAULT_CHAT_TITLE = 'New chat';
+const DEFAULT_SESSION_NAME = 'New session';
 
 // How much of a conversation is replayed into the next question. A chat has no
 // natural end, so the whole history in every request is a cost that grows with
@@ -2039,6 +2041,7 @@ export class Service {
     // history and both appending to it is a duplicated action against the user's
     // checkout, which is worse here than a duplicated answer.
     if (s.pending_run_id) throw new Error('This session is already working on an instruction');
+    if (s.name === DEFAULT_SESSION_NAME) this.store.updateSession(sessionId, { name: generateTitle(instruction) });
     const runId = this.store.id();
     this.store.addEvent({ runId, type: 'instruction', data: { text: instruction } });
     // The cancel of a previous turn is spent by the time a new instruction is

@@ -1,11 +1,11 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
-// Step 0 smoke gate: pinned permission schema verified by execution against claude 2.1.283.
-// These constants are the expected shapes as documented by the plan. They should have been
-// verified by actually running claude 2.1.283 with --permission-prompts host --permission-prompt-tool
-// against a live MCP server and recording what was sent/received. Until that manual execution
-// is completed and recorded, these remain hand-written expectations, not observations.
+// Step 0 smoke gate: pinned permission schema expected from claude 2.1.283.
+// These constants are hand-written expectations matching what src/permission-mcp.mjs
+// documents (lines 9-15). No execution artifact (transcript, log, fixture) from a
+// real claude invocation has been recorded to verify them. Until that happens, they
+// are assumptions, not observations.
 // The request shape claude sends the MCP tool for permission prompts.
 const PERMISSION_REQUEST_SCHEMA = { tool_name: 'approve', input: {}, tool_use_id: 'call_' };
 // The allow decision shape the MCP tool returns.
@@ -13,13 +13,13 @@ const PERMISSION_ALLOW_SCHEMA = { behavior: 'allow', updatedInput: {} };
 // The deny decision shape the MCP tool returns.
 const PERMISSION_DENY_SCHEMA = { behavior: 'deny', message: 'Denied.' };
 
-test('permission allow schema is correctly interpreted by permissionDecision', () => {
+test('permissionDecision maps allowed status to allow behavior', () => {
   const decision = permissionDecision({ status: 'allowed' });
   assert.equal(decision.behavior, 'allow');
   assert.equal(typeof decision.message, 'undefined');
 });
 
-test('permission deny schema is correctly interpreted by permissionDecision', () => {
+test('permissionDecision maps denied status to deny behavior', () => {
   const decision = permissionDecision({ status: 'denied' });
   assert.equal(decision.behavior, 'deny');
   assert.ok(decision.message);
