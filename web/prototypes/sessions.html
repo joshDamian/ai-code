@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Supervised Sessions — UI Prototype</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; padding: 20px; }
+    .screen { background: white; border-radius: 8px; padding: 24px; margin-bottom: 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    h1 { font-size: 24px; margin-bottom: 8px; }
+    h2 { font-size: 18px; margin-top: 32px; margin-bottom: 16px; }
+    .subtitle { color: #666; margin-bottom: 24px; }
+
+    /* Sessions List */
+    .session-item { border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
+    .session-item.active { background: #f0f7ff; border-color: #2563eb; }
+    .session-info { flex: 1; }
+    .session-name { font-weight: 500; font-size: 16px; }
+    .session-meta { color: #888; font-size: 12px; margin-top: 4px; }
+    .session-actions { display: flex; gap: 8px; }
+    button { padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; background: white; cursor: pointer; font-size: 12px; }
+    button:hover { background: #f5f5f5; }
+    button.primary { background: #2563eb; color: white; border-color: #2563eb; }
+    button.primary:hover { background: #1d4ed8; }
+    button.danger { border-color: #dc2626; color: #dc2626; }
+    button.danger:hover { background: #fef2f2; }
+
+    /* Permission Panel */
+    .permission-banner { background: #fef3c7; border: 1px solid #fcd34d; border-radius: 6px; padding: 16px; margin-bottom: 16px; display: grid; grid-template-columns: 1fr auto; gap: 24px; align-items: start; }
+    .permission-content h3 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+    .permission-detail { background: #f5f5f5; border: 1px solid #e0e0e0; border-radius: 4px; padding: 12px; font-family: monospace; font-size: 12px; color: #333; margin: 8px 0; max-height: 300px; overflow-y: auto; }
+    .permission-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .countdown { text-align: right; font-size: 12px; color: #666; }
+    .countdown .time { font-size: 20px; font-weight: bold; color: #dc2626; }
+
+    /* Session Detail */
+    .session-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+    .session-title { font-size: 20px; font-weight: 600; }
+    .session-status { display: inline-block; padding: 4px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; background: #dbeafe; color: #1e40af; }
+    .session-status.running { background: #d1fae5; color: #065f46; }
+    .session-status.idle { background: #f3f4f6; color: #374151; }
+
+    /* Budget Meter */
+    .budget-info { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; margin: 16px 0; font-size: 12px; }
+    .budget-row { display: flex; justify-content: space-between; padding: 4px 0; }
+    .budget-label { color: #666; }
+    .budget-amount { font-weight: 500; }
+    .budget-amount.warning { color: #dc2626; }
+
+    /* Transcript */
+    .transcript { border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px; min-height: 200px; max-height: 400px; overflow-y: auto; background: #fafafa; margin: 16px 0; }
+    .turn { margin-bottom: 12px; padding: 8px; background: white; border-radius: 4px; border-left: 3px solid #2563eb; }
+    .turn-instruction { font-weight: 500; font-size: 13px; color: #333; }
+    .turn-response { font-size: 12px; color: #666; margin-top: 4px; }
+    .turn-event { font-size: 11px; color: #999; margin-top: 2px; font-family: monospace; }
+
+    /* Composer */
+    .composer { margin-top: 16px; }
+    textarea { width: 100%; min-height: 80px; max-height: 200px; padding: 12px; border: 1px solid #d1d5db; border-radius: 4px; font-family: inherit; font-size: 13px; resize: vertical; }
+    textarea:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+
+    /* Nudge Card */
+    .nudge-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 8px; padding: 24px; margin: 16px 0; }
+    .nudge-card h3 { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+    .nudge-card p { font-size: 13px; line-height: 1.6; margin-bottom: 12px; }
+    .nudge-card-actions { display: flex; gap: 8px; }
+    .nudge-card button { background: white; color: #667eea; border: none; font-weight: 500; }
+    .nudge-card button:hover { background: #f0f0f0; }
+
+    /* Code block */
+    .code-example { background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px; font-family: monospace; font-size: 11px; margin: 8px 0; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>Supervised Sessions — UI Prototype</h1>
+  <p class="subtitle">Three screens showing the core flows: list, detail with permission gate, and task-shaped nudge.</p>
+
+  <!-- Screen 1: Sessions List -->
+  <div class="screen">
+    <h2>1. Sessions List (#/sessions)</h2>
+    <p class="subtitle">Project-scoped conversation list. Status indicator, cost, last activity. New/delete/archive buttons.</p>
+
+    <button class="primary" style="margin-bottom: 16px;">+ New Session</button>
+
+    <div class="session-item active">
+      <div class="session-info">
+        <div class="session-name">Debug auth service</div>
+        <div class="session-meta">Active · $0.12 · 2 hours ago</div>
+      </div>
+      <div class="session-actions">
+        <button>Open</button>
+        <button class="danger">Stop</button>
+      </div>
+    </div>
+
+    <div class="session-item">
+      <div class="session-info">
+        <div class="session-name">Refactor payment flow</div>
+        <div class="session-meta">Stopped · $0.47 · Yesterday</div>
+      </div>
+      <div class="session-actions">
+        <button>Resume</button>
+        <button>Archive</button>
+      </div>
+    </div>
+
+    <div class="session-item">
+      <div class="session-info">
+        <div class="session-name">Fix database migration</div>
+        <div class="session-meta">Idle · $0.23 · 3 days ago</div>
+      </div>
+      <div class="session-actions">
+        <button>Open</button>
+        <button>Archive</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Screen 2: Session Detail with Permission Gate -->
+  <div class="screen">
+    <h2>2. Session Detail (#/sessions/:id) — Waiting for Permission</h2>
+    <p class="subtitle">Permission gate (yellow banner at top). Transcript below. Composer at bottom. Budget meter on right.</p>
+
+    <div class="session-header">
+      <div>
+        <div class="session-title">Debug auth service</div>
+        <span class="session-status running">Running</span>
+      </div>
+      <button class="danger">Stop Session</button>
+    </div>
+
+    <!-- Permission Banner -->
+    <div class="permission-banner">
+      <div class="permission-content">
+        <h3>Requesting permission to Write</h3>
+        <p style="font-size: 12px; margin: 8px 0;">The agent wants to save its work to a file. Review the content below and approve or deny.</p>
+        <div class="permission-detail">src/auth/login.mjs
+
+export async function validateToken(token) {
+  const decoded = jwt.verify(token, SECRET_KEY);
+  return { user_id: decoded.sub, exp: decoded.exp };
+}</div>
+        <div class="permission-actions">
+          <button class="primary">Allow</button>
+          <button class="danger">Deny</button>
+        </div>
+      </div>
+      <div class="countdown">
+        <div>Auto-deny in</div>
+        <div class="time">45<span style="font-size: 14px;">s</span></div>
+      </div>
+    </div>
+
+    <!-- Budget Info -->
+    <div class="budget-info">
+      <div class="budget-row">
+        <span class="budget-label">Spent this session</span>
+        <span class="budget-amount">$0.12</span>
+      </div>
+      <div class="budget-row">
+        <span class="budget-label">Per-turn limit</span>
+        <span class="budget-amount">$2.00</span>
+      </div>
+      <div class="budget-row">
+        <span class="budget-label">Today (all sessions)</span>
+        <span class="budget-amount warning">$1.87 of $5.00</span>
+      </div>
+    </div>
+
+    <!-- Transcript -->
+    <div class="transcript">
+      <div class="turn">
+        <div class="turn-instruction">🧑 Instruction</div>
+        <div class="turn-response">Add token validation to the login endpoint</div>
+      </div>
+      <div class="turn">
+        <div class="turn-instruction">🤖 Agent Thinking</div>
+        <div class="turn-response">I need to understand the current auth system and add validation.</div>
+        <div class="turn-event">read: src/auth/index.mjs</div>
+        <div class="turn-event">grep: validateToken</div>
+      </div>
+      <div class="turn">
+        <div class="turn-instruction">⏳ Awaiting Permission</div>
+        <div class="turn-response">Wants to Write src/auth/login.mjs</div>
+      </div>
+    </div>
+
+    <!-- Composer -->
+    <div class="composer">
+      <textarea placeholder="What should the session do next? Type an instruction..."></textarea>
+      <div style="text-align: right; margin-top: 8px;">
+        <button class="primary" style="margin-left: auto;">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Screen 3: Nudge Card -->
+  <div class="screen">
+    <h2>3. Session Detail — Nudge After Task-Shaped Work</h2>
+    <p class="subtitle">When a session's output grows beyond a small change, a nudge card offers to draft it as a task.</p>
+
+    <div class="session-header">
+      <div>
+        <div class="session-title">Refactor payment flow</div>
+        <span class="session-status idle">Idle</span>
+      </div>
+      <button class="danger">Stop Session</button>
+    </div>
+
+    <div class="budget-info">
+      <div class="budget-row">
+        <span class="budget-label">Spent this session</span>
+        <span class="budget-amount">$0.47</span>
+      </div>
+      <div class="budget-row">
+        <span class="budget-label">Per-turn limit</span>
+        <span class="budget-amount">$2.00</span>
+      </div>
+    </div>
+
+    <!-- Nudge Card -->
+    <div class="nudge-card">
+      <h3>This looks task-shaped</h3>
+      <p>
+        The session has made changes across multiple files that look like a complete feature:
+        refactored payment processing, updated database schema, added new API routes.
+        <br><br>
+        Tasks have a plan, a human review, and a merge gate. This work could benefit from those safeguards.
+      </p>
+      <div class="nudge-card-actions">
+        <button>Draft as Task</button>
+        <button>Dismiss</button>
+      </div>
+    </div>
+
+    <!-- Transcript -->
+    <div class="transcript">
+      <div class="turn">
+        <div class="turn-instruction">🧑 Instruction 1</div>
+        <div class="turn-response">Refactor the payment processing to use the new provider API</div>
+      </div>
+      <div class="turn">
+        <div class="turn-instruction">✓ Completed</div>
+        <div class="turn-response">Modified 5 files, added 240 lines, removed 180 lines</div>
+      </div>
+      <div class="turn">
+        <div class="turn-instruction">🧑 Instruction 2</div>
+        <div class="turn-response">Update the database schema to match the new payment fields</div>
+      </div>
+      <div class="turn">
+        <div class="turn-instruction">✓ Completed</div>
+        <div class="turn-response">Created migration, updated models</div>
+      </div>
+      <div class="turn">
+        <div class="turn-instruction">🧑 Instruction 3</div>
+        <div class="turn-response">Add routes for payment webhooks</div>
+      </div>
+      <div class="turn">
+        <div class="turn-instruction">✓ Completed</div>
+        <div class="turn-response">Added webhook handlers and validation</div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <textarea placeholder="What should the session do next? Type an instruction..." disabled></textarea>
+      <div style="text-align: right; margin-top: 8px;">
+        <button class="primary" style="margin-left: auto;" disabled>Send</button>
+        <button style="margin-left: 8px;">Resume Session</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reference: Permission Round-trip -->
+  <div class="screen">
+    <h2>Implementation Reference: Permission Wire Shape</h2>
+    <p class="subtitle">Captured from real claude 2.1.283 execution via Step 0 smoke test.</p>
+
+    <h3 style="margin-top: 16px;">Claude → MCP Tool</h3>
+    <div class="code-example">{
+  "tool_name": "Write",
+  "input": {
+    "file_path": "src/auth/login.mjs",
+    "content": "export async function validateToken(token) {\n  ..."
+  },
+  "tool_use_id": "call_00_abc123"
+}</div>
+
+    <h3 style="margin-top: 16px;">MCP Tool → Server (via loopback POST)</h3>
+    <div class="code-example">{
+  "tool": "Write",
+  "input": { "file_path": "...", "content": "..." },
+  "cwd": "/path/to/project",
+  "run_id": "..."
+}</div>
+
+    <h3 style="margin-top: 16px;">Server → Dashboard → Human Decision</h3>
+    <p style="font-size: 12px; color: #666;">Dashboard shows permission panel. Person clicks Allow or Deny.</p>
+
+    <h3 style="margin-top: 16px;">Dashboard → Server → MCP Tool → Claude</h3>
+    <div class="code-example">{
+  "behavior": "allow",
+  "updatedInput": { "file_path": "...", "content": "..." }
+}
+
+or
+
+{
+  "behavior": "deny",
+  "message": "User denied the Write action"
+}</div>
+  </div>
+
+</body>
+</html>

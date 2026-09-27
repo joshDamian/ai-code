@@ -27,6 +27,18 @@ A repair attempted with the budget already spent does not run. The task transiti
 
 Three exits, in the order the message gives them. **Replan** is recommended: the failing review survives the replan and is handed to the planner, because findings that have outlived five repairs are the one input a new plan can act on, and a new plan revision resets the counter. **Raise `repair.maxRepairs` and Retry** is deliberate: the count persists across it, so it needs raising above what was already spent, and the task stays `FAILED` until the retry is accepted. **Close** needs no code — it discards the worktree, which is the only exit that loses work. `COMPLETE` does not refund the count: feedback rounds are part of the same plan revision's budget, and a task with a fresh plan starts a fresh one.
 
+## Supervised sessions
+
+A **session** is a named agent that acts directly in the user's own checkout (not a worktree) on freeform instructions, with every write and exec gated by live human approval in the dashboard. Sessions do not merge, port, or create commits the user did not ask for — the only route to changes landing in the repository is task creation.
+
+A session's permission round-trip is the new mechanism: `claude` delegates each tool decision to a local MCP tool, which POSTs to the ai-code server on loopback and blocks until a human answers or the timeout (2 minutes by default) auto-denies. All accounting reuses the existing chat/task machinery — a session run is shaped exactly like a chat run, and concurrent sessions join provider-capacity accounting.
+
+## Session boundaries and what they are for
+
+**Sessions may write in the checkout, gated by live per-action approval.** Unlike tasks (which plan, execute, test and review in a worktree before porting), sessions act directly in the user's tree. Every write or command is held at a permission prompt until the person watching answers or the clock denies it. A session never merges or ports: it is the person's own agent, obeying instructions on the repository they own.
+
+**Sessions never merge or port — task creation is the only route to product change.** When a session's output grows beyond a small, self-contained change, it stops and shows a nudge offering to draft the work as a task, which routes through the same review, repair and approval pipeline as any other task.
+
 ## Release acceptance
 
 A release is not considered complete if any of these are merely decorative: provider/model selection, routing policy, task tabs, run activity, usage/cost visibility, or settings/diagnostics. Mock agents are never eligible for automatic production routing.
