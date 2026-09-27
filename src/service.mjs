@@ -626,6 +626,55 @@ export const DECISIONS_PROMPT = (diff, review) =>
 // a large task whose decisions are in its shape rather than its tail.
 const DECISION_DIFF_CHARS = 24000;
 
+// The house style for every string a model writes, condensed from
+// docs/COMMUNICATION.md §1-4 and §6. The const is the operative text: ai-code runs
+// on repositories that do not carry this checkout's docs, so nothing reads the file.
+// Appended once in promptFrame, so it reaches all eleven prompts. Carries rules only:
+// the harness's promises to a model stay in the prompts that own them.
+//
+// No glossary here. A term written into the target project's
+// `.ai-code/context/conventions.md` already reaches every prompt through
+// `readDoc(project.path, 'conventions.md')` (context.mjs), and a second path would
+// be a second answer to what a term means.
+export const STYLE_RULES =
+  'Text a person reads follows these rules. Machine syntax does not. Never reword code, identifiers, flags, commands, paths, URLs, error messages, quoted text, or payload keys and punctuation. No rule touches them.\n' +
+  '\n' +
+  'Sentences\n' +
+  '- A descriptive sentence has at most 25 words. An instruction has at most 20.\n' +
+  '- Active voice. The imperative for instructions, one per sentence.\n' +
+  '- Simple tenses only. No contractions.\n' +
+  '- Keep articles and verbs. Never drop grammar to go shorter.\n' +
+  '- Never delete a fact to fit a limit. Split the sentence.\n' +
+  '\n' +
+  'Paragraphs\n' +
+  '- At most six sentences, one topic each.\n' +
+  '- No floor: one sentence is a paragraph, and a bare answer is fine.\n' +
+  '- Bullets for parallel items. Numbers for ordered steps only.\n' +
+  '\n' +
+  'Words\n' +
+  '- One term per thing, every time. No synonym for variety.\n' +
+  '- At most three words in a noun cluster. Break longer ones with prepositions.\n' +
+  '- No filler, no preamble, no metaphor.\n' +
+  '- Use: make sure, use, before, to, start, stop, more, enough, can.\n' +
+  '- Not: ensure, utilize, leverage, prior to, in order to, commence, terminate, additional, sufficient, is able to.\n' +
+  '- Never: seamless, robust, powerful, cutting-edge, comprehensive, effortless, blazing, simply, just, obviously, of course.\n' +
+  '\n' +
+  'Format\n' +
+  '- The first sentence is the answer or the action.\n' +
+  '- Bold only the term a reader scans for.\n' +
+  '- A list only when the items are a list.';
+
+// The harness half of the prompt runRole sends. Exported so a test can pin that
+// the style block reaches every role's assembled prompt without spawning an agent.
+// `fixed` is measured from the same two strings `full` is built from, so the block
+// cannot be missing from one of them.
+export function promptFrame({ role, taskText, planned, prompt }) {
+  return {
+    head: `You are the ${role} agent in AI Code. The harness owns workflow state. Never claim a state transition occurred unless the harness performs it.\n\nTASK:\n${taskText}\n\nAPPROVED PLAN:\n${planned}\n\nPROJECT CONTEXT:\n`,
+    tail: `\n\nINSTRUCTIONS:\n${prompt}\n\nSTYLE:\n${STYLE_RULES}`,
+  };
+}
+
 // The payload out of a reply, or null when there is not one worth acting on. The
 // fenced block is what the prompt asks for and is looked for first; a bare object is
 // accepted too, because a model that answered with the JSON alone has still
@@ -3935,14 +3984,16 @@ export class Service {
         const planned = task.plan || '(planning stage)';
         // §5.6. `fixed` is every part of the request the assembler does not own: the
         // harness preamble, the task, the approved plan and the role prompt. It is
-        // measured from the very strings that reach `full`, and measured here rather
-        // than inside the assembler, which knows nothing about the service's prompt
-        // shape. Summing the two estimates can only overshoot the estimate of the
-        // sum, so the derived budget stays conservative.
-        const fixed = estimateTokens(`You are the ${role} agent in AI Code. The harness owns workflow state. Never claim a state transition occurred unless the harness performs it.\n\nTASK:\n${taskText}\n\nAPPROVED PLAN:\n${planned}\n\nPROJECT CONTEXT:\n`)
-          + estimateTokens(`\n\nINSTRUCTIONS:\n${prompt}`);
+        // measured from the very strings that reach `full` - the same two values,
+        // not copies of them - so the style block cannot be counted in one and
+        // missing from the other. Measured here rather than inside the assembler,
+        // which knows nothing about the service's prompt shape. Summing the two
+        // estimates can only overshoot the estimate of the sum, so the derived
+        // budget stays conservative.
+        const { head, tail } = promptFrame({ role, taskText, planned, prompt });
+        const fixed = estimateTokens(head) + estimateTokens(tail);
         const context = this.#ranked(task, { role, cwd, store: this.store, window: m.contextLength, fixed, config: this.contextConfig() });
-        const full = `You are the ${role} agent in AI Code. The harness owns workflow state. Never claim a state transition occurred unless the harness performs it.\n\nTASK:\n${taskText}\n\nAPPROVED PLAN:\n${planned}\n\nPROJECT CONTEXT:\n${JSON.stringify(context)}\n\nINSTRUCTIONS:\n${prompt}`;
+        const full = head + JSON.stringify(context) + tail;
 
         // The context-length check lives here rather than in select(), because
         // this is the first point at which the real size is known: a pre-filter

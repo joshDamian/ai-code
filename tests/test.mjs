@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,reviewerPrompt,verificationPrompt,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -4534,6 +4534,35 @@ test('the chat is told the two things the planner is told',()=>{
   assert.match(CHAT_PROMPT,/name the paths you relied on/i);
   // A question with no single right answer has to be allowed to come back as one.
   assert.match(CHAT_PROMPT,/ambiguous/i);
+});
+
+test('the style rules reach every role assembled prompt',()=>{
+  // The eleven prompts, as the call sites build them. The two inline ones are
+  // spelled here rather than imported (the call sites own them), the way
+  // VERIFICATION_OPENS is in agents.mjs; this test catches drift in either.
+  const cases=[
+    ['planner',PLANNER_PROMPT],
+    ['planner','Revise this plan based on feedback. Keep what works, change what the user asked for.\n\nFEEDBACK:\nx\n\nCURRENT PLAN:\ny'],
+    ['implementer','Implement the approved plan in this worktree. Do not change files outside the worktree. Do not alter AI Code task metadata.'],
+    ['reviewer',reviewerPrompt('diff --git a/x b/x\n+1')],
+    ['reviewer',verificationPrompt({findings:'x',changed:['a.mjs'],test:null,diff:''})],
+    ['chat',CHAT_PROMPT],
+    ['session',SESSION_PROMPT],
+    ['chat',INTAKE_PROMPT],
+    ['chat',PROPOSALS_PROMPT('spec',[])],
+    ['chat',INFER_SPEC_PROMPT],
+    ['chat',DECISIONS_PROMPT('diff','review')],
+    ['repair','Repair the review findings in the worktree. Re-run relevant tests after fixing. Review findings:\nx'],
+  ];
+  for(const [role,prompt] of cases){
+    const {head,tail}=promptFrame({role,taskText:'t',planned:'(planning stage)',prompt});
+    // `fixed` is estimateTokens(head)+estimateTokens(tail), so a block in the tail
+    // is in both measurements, and the context budget cannot undercount it.
+    assert.ok(tail.includes(STYLE_RULES),`${role}: the block is in the INSTRUCTIONS tail, so both fixed and full carry it`);
+    assert.ok(!head.includes(STYLE_RULES),`${role}: injected once`);
+    assert.ok(!prompt.includes(STYLE_RULES),`${role}: the role prompt itself is unchanged`);
+    assert.ok((head+JSON.stringify({files:[]})+tail).includes(STYLE_RULES),`${role}: the assembled prompt carries it`);
+  }
 });
 
 test('SESSION_PROMPT is pinned with its key guidance',()=>{

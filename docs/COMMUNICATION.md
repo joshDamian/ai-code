@@ -119,12 +119,12 @@ falls back to its own reading of the term.
 
 ## 8. Where this binds
 
-Not wired yet.
-
-The whole set reaches every prompt at one point. `runRole` assembles
-`…INSTRUCTIONS:\n${prompt}` at src/service.mjs:3942-3945, and all eleven prompts
-pass through it. A shared block appended there needs no edit to any prompt and
-no change to any test that pins one.
+The whole set reaches every prompt at one point. `runRole` assembles the
+request at one place, and all eleven prompts pass through it: the const
+`STYLE_RULES` (src/service.mjs) is appended after `INSTRUCTIONS:` in the
+template, inside both the assembled request and the `fixed` estimate the
+context budget and the 85% check measure. No prompt needed an edit, and no
+test that pins one changed.
 
 The precedent is `payloadInstruction` (src/service.mjs:565): the fenced-JSON
 contract for the four drafting prompts is stated once because "a contract
@@ -148,9 +148,15 @@ stated three times is a contract that drifts".
 
 ## 9. How it applies
 
-As a rewrite pass over a finished draft, not a constraint during generation.
-Style rules applied while reasoning compete with the reasoning.
+Prompt-only. The block is injected into every prompt at the one assembly
+point in `runRole`, so the rules bind the way the prompt binds: a rule set
+the model is asked to follow while it writes.
 
-Two of the rules are countable — sentence length and noun-cluster length — and
-a script can check them for free. The rest are judgement, and the only reliable
-test of those is whether a person reads the answer and understands it.
+A rewrite pass over the finished draft is rejected: it doubles every run's
+model calls, and the second pass is where the first pass's cost lands for a
+gain that is mostly formatting. A checker that blocks a run is rejected: it
+fails work on style.
+
+Two of the rules are countable — sentence length and noun-cluster length —
+and a checker that records violations rather than blocking is a possible
+follow-up. It is not built here.
