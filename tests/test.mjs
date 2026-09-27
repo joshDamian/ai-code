@@ -34,7 +34,9 @@ test('mock full workflow completes',async()=>{const root=repo();const s=new Serv
 // is pinned here: the text is stored verbatim, and the title is the whole text
 // collapsed onto one line rather than a multi-line string in a list row.
 test('a multi-line description is stored verbatim and titled from its first line',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const text='Fix the login flow\n\nIt drops the session cookie\nwhen the tab is restored.';const t=s.createTask(p.id,text);assert.equal(t.description,text);assert.ok(!t.title.includes('\n'));assert.ok(t.title.startsWith('Fix the login flow'))});
-test('a FAIL verdict sends the task to repair',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);s.updateProvider('mock',{enabled:false});s.addProvider({id:'review-mock',name:'Review Mock',kind:'mock',enabled:true,config:{reviewText:'The implementation fails to meet item 3 of the approved plan.',reviewVerdict:'FAIL'}});s.store.addModel({id:'review-mock-m',providerId:'review-mock',name:'review-mock',capabilities:['planning','coding','review','repair'],speed:10,cost:0,quality:10,contextLength:100000});const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);const done=await s.execute(t.id);assert.equal(done.state,'REPAIRING');assert.equal(done.review,'The implementation fails to meet item 3 of the approved plan.')});
+// The three steps are called directly rather than through execute(): this pins the
+// verdict transition, and execute() now drives the repair loop that follows one.
+test('a FAIL verdict sends the task to repair',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);s.updateProvider('mock',{enabled:false});s.addProvider({id:'review-mock',name:'Review Mock',kind:'mock',enabled:true,config:{reviewText:'The implementation fails to meet item 3 of the approved plan.',reviewVerdict:'FAIL'}});s.store.addModel({id:'review-mock-m',providerId:'review-mock',name:'review-mock',capabilities:['planning','coding','review','repair'],speed:10,cost:0,quality:10,contextLength:100000});const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);await s.implement(t.id);await s.runTests(t.id);const done=await s.review(t.id);assert.equal(done.state,'REPAIRING');assert.equal(done.review,'The implementation fails to meet item 3 of the approved plan.')});
 
 test('a PASS verdict is not overturned by the prose around it',async()=>{
   // The incident, as one string. Two reviewers passed task 663391d8 and it went to
@@ -80,7 +82,9 @@ test('a verdict outside the schema leaves the task reviewable rather than repair
 // only as the context assembler's `review` section, which is the first rung
 // trimmed under a budget. These cover the narrower job and the case it exists to
 // stop - a repair that changed nothing, which a reviewer can only answer by
-// failing for the same findings again.
+// failing for the same findings again. execute() drives the loop these sit
+// inside: a FAIL verdict is repaired, tested and verified with no human verb
+// between, and stopping the cycle is the ceiling's job rather than the caller's.
 
 test('the review that follows a repair verifies the findings rather than reviewing again',async()=>{
   const root=repo();const s=new Service(root,{allowMock:true,silent:true});
@@ -90,9 +94,9 @@ test('the review that follows a repair verifies the findings rather than reviewi
   const prompts=[];const real=s.runRole.bind(s);
   s.runRole=(task,role,prompt,...rest)=>{if(role==='reviewer')prompts.push(prompt);return real(task,role,prompt,...rest)};
   s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
-  const reviewed=await s.execute(t.id);
-  assert.equal(reviewed.state,'REPAIRING');
-  const done=await s.repair(t.id);
+  // One call: execute() runs the review that fails, the repair, and the
+  // verification that passes it.
+  const done=await s.execute(t.id);
   assert.equal(prompts.length,2,'the repair is verified once, not reviewed twice');
   assert.doesNotMatch(prompts[0],/Verify a repair/,'the first review is the full one');
   assert.match(prompts[1],/Verify a repair/);
@@ -113,12 +117,51 @@ test('a repair that changed nothing is not reviewed again',async()=>{
   s.updateProvider('mock',{config:{reviewText:'Item 3 is not implemented.',reviewVerdict:'FAIL'}});
   const p=s.initProject('p',root);
   const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
-  await s.execute(t.id);
-  const done=await s.repair(t.id);
+  // The loop runs it and stops on its own: a no-change repair leaves the task in
+  // REVIEWING, which is not a state the loop sends back around.
+  const done=await s.execute(t.id);
   assert.equal(done.state,'REVIEWING');
   assert.match(done.review,/changed nothing/);
   assert.match(done.review,/Item 3 is not implemented\./,'the findings are still what a reader is sent to fix');
   assert.equal(s.store.listRuns(t.id).filter(r=>r.role==='reviewer').length,1,'no second review was run');
+});
+
+test('execute drives the repair loop itself: a FAIL then a passing repair lands COMPLETE with no human verb between', async () => {
+  const root = repo(); const s = new Service(root, { allowMock: true, silent: true });
+  s.updateProvider('mock', { config: { writes: ['app.mjs'], reviewText: 'Item 3 is not implemented.', reviewVerdict: 'FAIL', verifyText: 'Item 3 is implemented now.', verifyVerdict: 'PASS' } });
+  const p = s.initProject('p', root);
+  const t = s.createTask(p.id, 'x');
+  s.prepare(t.id); await s.plan(t.id); s.approve(t.id);
+  const done = await s.execute(t.id); // one call: review FAIL, repair, test, verification PASS
+  assert.equal(done.state, 'COMPLETE');
+  assert.equal(s.task(t.id).review, 'Item 3 is implemented now.');
+  const roles = s.store.listRuns(t.id).map((r) => r.role).filter((r) => ['implementer', 'tester', 'reviewer', 'repair'].includes(r));
+  assert.deepEqual(roles, ['implementer', 'tester', 'reviewer', 'repair', 'tester', 'reviewer'], 'the whole chain ran inside one execute()');
+  assert.equal(s.store.listRuns(t.id).filter((r) => r.role === 'repair').length, 1);
+});
+
+test('execute at the ceiling lands the task FAILED with the refusal row in the ledger', async () => {
+  const root = repo(); const s = new Service(root, { allowMock: true, silent: true });
+  // review FAIL, verification FAIL: a cycle that is not converging.
+  s.updateProvider('mock', { config: { writes: [], reviewText: 'The retry path was never exercised.', reviewVerdict: 'FAIL', verifyText: 'Still not exercised.', verifyVerdict: 'FAIL' } });
+  s.saveRouting({ ...s.getRouting(), repair: { ...s.getRouting().repair, maxRepairs: 2 } });
+  const p = s.initProject('p', root);
+  const t = s.createTask(p.id, 'build the queue');
+  s.prepare(t.id); await s.plan(t.id); s.approve(t.id);
+  // Each attempt gets its own file: the mock's writes are static, and a repair
+  // with an empty delta rests the task in REVIEWING instead of spending a turn.
+  let n = 0; const real = s.runRole.bind(s);
+  s.runRole = (task, role, prompt, ...rest) => { if (role === 'repair') fs.writeFileSync(path.join(task.worktree, `fix-${++n}.mjs`), `// attempt ${n}\n`); return real(task, role, prompt, ...rest); };
+  const err = await s.execute(t.id).then(() => null, (e) => e);
+  assert.equal(err.code, 'REPAIR_LIMIT');
+  assert.match(err.message, /2 repair runs/);
+  assert.equal(s.task(t.id).state, 'FAILED');
+  const runs = s.store.listRuns(t.id);
+  assert.equal(runs.filter((r) => r.role === 'repair' && r.provider_id).length, 2, 'two turns spent before the refusal');
+  const last = runs[runs.length - 1];
+  assert.equal(last.role, 'repair');
+  assert.equal(last.provider_id, null, 'the refusal row: nothing was asked of a provider');
+  assert.match(last.error, /^REPAIR_LIMIT: /);
 });
 
 test('the verification prompt carries what the reviewer has to check',()=>{
@@ -4840,7 +4883,10 @@ async function failingTask(s,root){
   const p=s.initProject('p',root);
   const t=s.createTask(p.id,'build the queue');
   s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
-  const after=await s.execute(t.id);
+  // The three steps rather than execute(): the tests below drive repairs by hand, and
+  // execute() would now run the loop and spend the turns they are counting.
+  await s.implement(t.id);await s.runTests(t.id);
+  const after=await s.review(t.id);
   assert.equal(after.state,'REPAIRING');
   assert.ok(s.task(t.id).worktree,'with a worktree, which is what a repair edits');
   return t;

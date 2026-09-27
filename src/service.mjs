@@ -2472,13 +2472,21 @@ export class Service {
 
   // -- execution ------------------------------------------------------------
 
-  // The whole chain, blocking. Kept exactly as it was - the CLI foreground path,
-  // the dashboard's Start Execution button and the test suite all depend on it -
-  // but built from the same three steps the background queue calls one at a time.
+  // The whole chain, blocking: implement, test, review, then the repair loop for
+  // as long as a failing verification keeps the task in REPAIRING. The loop needs
+  // no bound of its own: repair() refuses past maxRepairs by landing the task in
+  // FAILED and throwing, and every other exit - COMPLETE via a passing
+  // verification, REVIEWING via a no-change repair, a cancel, an agent failure -
+  // is repair() returning a task in another state or throwing. The row is
+  // re-read each turn, so a repair that changed nothing rests the task instead
+  // of sending it around again. The background queue calls the same method for
+  // the `execute` kind; its per-step kinds remain single steps.
   async execute(id, opts) {
     await this.implement(id, opts);
     await this.runTests(id);
-    return this.review(id);
+    await this.review(id);
+    while (this.task(id).state === 'REPAIRING') await this.repair(id);
+    return this.task(id);
   }
 
   // Worktree, implementer, and the transition into TESTING. The first half of
