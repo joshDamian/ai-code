@@ -5,6 +5,7 @@ import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { TextArea, Select } from '../components/form.mjs';
 import { Markdown } from '../components/markdown.mjs';
+import { Time } from '../components/time.mjs';
 import { MemoryPanel } from './project.mjs';
 
 // A turn the queue is still holding. Read from the job row rather than from a local
@@ -337,7 +338,7 @@ export function Chat({ id, navigate, onTitle }) {
                         (s) => html`
                           <div class="session-item" onclick=${() => openSession(s.id)}>
                             <div class="session-title">${s.title}</div>
-                            <div class="session-date">${new Date(s.updated_at).toLocaleString()}</div>
+                            <div class="session-date"><${Time} at=${s.updated_at} /></div>
                           </div>
                         `
                       )}

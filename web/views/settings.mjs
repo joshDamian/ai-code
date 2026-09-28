@@ -39,8 +39,8 @@ export function TokenGate() {
   return html`
     <div class="token-gate">
       <form class="card token-card" onSubmit=${submit}>
-        <div class="logo-title">AI CODE</div>
-        <div class="logo-sub muted">Mission Control</div>
+        <div class="logo-title">AI Code</div>
+        <div class="logo-sub muted">Mission control</div>
         <p class="token-hint">
           This device is not on the server's own machine, so it needs the API token. The server printed one at
           startup, after the line beginning <code>API token:</code>.

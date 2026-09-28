@@ -14,6 +14,11 @@ import { EmptyState } from '../components/empty-state.mjs';
 import { RunTimeline, BarChart, compactNumber } from '../components/chart.mjs';
 import { DataTable } from '../components/data-table.mjs';
 import { TerminalPane } from '../components/terminal.mjs';
+import { Tabs, TabPanel } from '../components/tabs.mjs';
+import { Time } from '../components/time.mjs';
+import { confirmAction } from '../components/confirm.mjs';
+import { SkeletonRows } from '../components/skeleton.mjs';
+import { shortId } from '../lib.mjs';
 
 // States in which the harness may have an agent mid-flight. This previously listed
 // EXECUTING, which is not a real state (the implementation state is IMPLEMENTING),
@@ -26,6 +31,10 @@ const WORKING_STATES = new Set(['IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRI
 // whose only possible outcome is an error. Evaluated once at module load; the page's
 // host cannot change without a reload.
 const TABS = ['plan', 'execute', 'review', 'port', ...(onLocalhost() ? ['terminal'] : []), 'stats', 'activity'];
+
+// The tab ids in the words a person uses for them. The ids stay as they are: they
+// are what the code switches on, and what the arrow keys move between.
+const TAB_LABELS = { plan: 'Plan', execute: 'Execute', review: 'Review', port: 'Port', terminal: 'Terminal', stats: 'Stats', activity: 'Activity' };
 
 export function TaskDetail({ id, navigate, onTitle }) {
   const [data, setData] = useState(null);
@@ -49,6 +58,11 @@ export function TaskDetail({ id, navigate, onTitle }) {
   // workflow, so it has to re-open the stream too or the repair, its test run and
   // its verification review would all happen off screen.
   const [streamGen, setStreamGen] = useState(0);
+  // The project's name, for the header. The payload carries the project's id and
+  // not its name, and the id is the one thing about a project that nobody
+  // recognises - so it is fetched alongside, and the header falls back to the short
+  // id if the list is unavailable.
+  const [projectName, setProjectName] = useState(null);
   // The plan timestamp the user has seen. `undefined` until the first payload, because
   // a revision that landed before this page opened is not news.
   const seenPlanAtRef = useRef(undefined);
@@ -210,6 +224,25 @@ export function TaskDetail({ id, navigate, onTitle }) {
   // project only: the server refuses a cross-project parent, so offering one
   // would be offering a dead end. The task itself is dropped by the picker.
   const projectId = data?.task?.project_id;
+
+  useEffect(() => {
+    if (!projectId) return undefined;
+    let cancelled = false;
+    api
+      .projects()
+      .then((list) => {
+        if (cancelled) return;
+        const p = (list || []).find((x) => x.id === projectId);
+        if (p) setProjectName(p.name);
+      })
+      // Swallowed: the header falls back to the project's short id, which is a
+      // worse label but not a reason to put an error over the whole page.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
   useEffect(() => {
     if (!linkingParent || candidates !== null || !projectId) return undefined;
     let cancelled = false;
@@ -228,6 +261,45 @@ export function TaskDetail({ id, navigate, onTitle }) {
       cancelled = true;
     };
   }, [linkingParent, candidates, projectId]);
+
+  // The id is shown as eight characters and copied whole. The clipboard API needs a
+  // secure context and a user gesture, and this is one - a click - so the fallback
+  // path is only for a browser that refuses it, and then the id is put in the toast
+  // rather than lost.
+  async function copyId(full) {
+    try {
+      await navigator.clipboard.writeText(full);
+      showToast('Task id copied.', 'success');
+    } catch {
+      showToast(full);
+    }
+  }
+
+  // Cancel stops a run that is in flight; the work it has done so far stays, but the
+  // turn is thrown away and whatever it was mid-way through is left where it is.
+  async function confirmCancel(task) {
+    const ok = await confirmAction({
+      title: 'Cancel this run?',
+      body: 'The agent stops at the next step. Work already written to the worktree stays where it is.',
+      confirmLabel: 'Cancel run',
+      cancelLabel: 'Keep running',
+      tone: 'danger',
+    });
+    if (ok) run(() => api.taskCancel(task.id), 'Cancel requested.');
+  }
+
+  // Close is the one that discards: the task is finished with and its worktree goes
+  // with it. That is what the dialog has to say, because the button cannot.
+  async function confirmClose(task) {
+    const ok = await confirmAction({
+      title: 'Close this task?',
+      body: 'The task is marked closed and its worktree is discarded. Anything not merged is lost, and there is no undo.',
+      confirmLabel: 'Close task',
+      cancelLabel: 'Keep it',
+      tone: 'danger',
+    });
+    if (ok) run(() => api.taskClose(task.id), 'Task closed.');
+  }
 
   // `okMsg` may be a function of what `fn` returned, because an operation that can end
   // more than one way - a port that lands, or one that stops short and leaves a command
@@ -255,7 +327,22 @@ export function TaskDetail({ id, navigate, onTitle }) {
       </div>
     `;
   }
-  if (!data) return html`<${Spinner} message="Loading task..." />`;
+  if (!data) {
+    // A skeleton in the page's own shape rather than a spinner and a sentence. The
+    // header is the part that takes longest to be worth looking at, and the rows
+    // below it say how much is coming.
+    return html`
+      <div class="view-task-detail">
+        <div class="task-header">
+          <div class="skeleton-lines">
+            <span class="skeleton skeleton-line" style="height:24px;max-width:420px"></span>
+            <span class="skeleton skeleton-line short"></span>
+          </div>
+        </div>
+        <${SkeletonRows} count=${5} />
+      </div>
+    `;
+  }
 
   const { task, runs } = data;
 
@@ -263,20 +350,32 @@ export function TaskDetail({ id, navigate, onTitle }) {
     <div class="view-task-detail">
       <div class="task-header">
         <div>
-          <h1>${task.title}</h1>
-          <div class="task-meta muted">
+          <div class="task-title-row">
+            <h1>${task.title}</h1>
             <${StatusBadge} status=${task.state} />
-            <span>${task.id}</span>
-            <span>· ${task.project_id}</span>
-            <span>· created ${task.created_at ? new Date(task.created_at).toLocaleString() : '—'}</span>
+          </div>
+          <div class="task-meta muted">
+            ${/* The project's name, not its UUID. The name is what a person
+                 recognises; the id is 36 characters of nothing they can use. */ ''}
+            <span>${projectName || shortId(task.project_id)}</span>
+            <span aria-hidden="true">·</span>
+            ${/* The task's own id, shortened and copyable. It was printed in full
+                 in the header, where it was the longest string on the page and the
+                 one nobody reads - but it is the handle for the CLI, so it has to
+                 be gettable, which is what one click on it is for. */ ''}
+            <button class="id-chip" type="button" title=${`Copy ${task.id}`} onClick=${() => copyId(task.id)}>
+              ${shortId(task.id)}
+            </button>
+            <span aria-hidden="true">·</span>
+            <span>created <${Time} at=${task.created_at} /></span>
             ${
               // The title from the parent row the server sent on this payload, and the
               // id when that row is gone - a link to a task that no longer exists still
               // says which task this one was built on.
               task.parent_id
                 ? html`<span>
-                    · builds on${' '}
-                    <a class="link" href=${`#/tasks/${task.parent_id}`}>${data.parent?.title || task.parent_id}</a>
+                    <span aria-hidden="true">·</span> builds on${' '}
+                    <a class="link" href=${`#/tasks/${task.parent_id}`}>${data.parent?.title || shortId(task.parent_id)}</a>
                     ${data.parent ? html`<span class="muted">${' '}(${data.parent.state})</span>` : null}
                   </span>`
                 : null
@@ -331,23 +430,34 @@ export function TaskDetail({ id, navigate, onTitle }) {
                 `
           }
         </div>
-        <a href="#/tasks" class="link">← Back to tasks</a>
+        ${/* The two verbs that end a task live up here with the way out, not in a
+             bar at the foot of a page that can be a thousand lines long. Cancel and
+             Close both stop work, and both are irreversible - Cancel abandons a run
+             in flight, Close throws the task's worktree away - so neither happens on
+             a single click. */ ''}
+        <div class="task-header-actions">
+          ${live
+            ? html`<button class="btn danger" disabled=${busy} onClick=${() => confirmCancel(task)}>Cancel run</button>`
+            : null}
+          ${task.state !== 'COMPLETE' && task.state !== 'CANCELLED' && !live
+            ? html`<button class="btn danger" disabled=${busy} onClick=${() => confirmClose(task)}>Close task</button>`
+            : null}
+          <a href="#/tasks" class="link">← Back to tasks</a>
+        </div>
       </div>
 
-      <div class="tabs">
-        ${TABS.map((t) => {
+      <${Tabs}
+        tabs=${TABS.map((t) => {
           // Two things light a tab the user is not on: a plan revision that landed
           // under them, and the step the workflow is waiting for.
           const revised = t === 'plan' && !!revisedAt;
           const dot = tab !== t && (revised || t === step?.tab);
-          return html`
-            <button key=${t} class="tab ${tab === t ? 'active' : ''}" onClick=${() => setTab(t)}>
-              ${t.toUpperCase()}
-              ${dot ? html`<span class="tab-dot" role="img" aria-label=${revised ? 'Plan revised' : 'Next step'}></span>` : null}
-            </button>
-          `;
+          return { id: t, label: TAB_LABELS[t] || t, dot, dotLabel: revised ? 'Plan revised' : 'Next step' };
         })}
-      </div>
+        value=${tab}
+        onChange=${setTab}
+        label="Task sections"
+      />
 
       ${
         // The step is named on the page it happens on, so it is only shown from
@@ -363,7 +473,7 @@ export function TaskDetail({ id, navigate, onTitle }) {
           : null
       }
 
-      <div class="tab-content">
+      <${TabPanel} tabId=${tab}>
         ${tab === 'plan' ? html`<${PlanTab} task=${task} busy=${busy} run=${run} live=${live} revision=${data.revision} revisedAt=${revisedAt} readAction=${readAction} onAcknowledge=${acknowledgeRevision} lastRun=${runs[runs.length - 1] || null} />` : null}
         ${tab === 'execute' ? html`<${ExecuteTab} task=${task} runs=${runs} busy=${busy} run=${run} live=${live} />` : null}
         ${tab === 'review' ? html`<${ReviewTab} task=${task} busy=${busy} run=${run} live=${live} navigate=${navigate} onReopen=${reopenStream} />` : null}
@@ -371,26 +481,7 @@ export function TaskDetail({ id, navigate, onTitle }) {
         ${tab === 'terminal' ? html`<${TerminalTab} task=${task} live=${live} terminal=${data.terminal} />` : null}
         ${tab === 'stats' ? html`<${StatsTab} runs=${runs} live=${data.live} />` : null}
         ${tab === 'activity' ? html`<${ActivityTab} taskId=${task.id} store=${buffer} />` : null}
-      </div>
-
-      ${
-        live
-          ? html`
-              <div class="action-bar">
-                <button class="btn danger" disabled=${busy} onClick=${() => run(() => api.taskCancel(task.id), 'Cancel requested.')}>Cancel</button>
-              </div>
-            `
-          : null
-      }
-      ${
-        task.state !== 'COMPLETE' && task.state !== 'CANCELLED' && !live
-          ? html`
-              <div class="action-bar">
-                <button class="btn danger" disabled=${busy} onClick=${() => run(() => api.taskClose(task.id), 'Task closed.')}>Close</button>
-              </div>
-            `
-          : null
-      }
+      <//>
     </div>
   `;
 }
@@ -850,8 +941,7 @@ function ExecuteTab({ task, runs, busy, run, live }) {
                         <div class="list-row-side">
                           <${StatusBadge} status=${r.status} />
                           <span class="muted">
-                            ${Number(r.tokens || 0).toLocaleString()} tok · $${Number(r.cost || 0).toFixed(6)} ·
-                            ${r.duration_ms ? `${Math.round(r.duration_ms / 1000)}s` : '—'}
+                            ${formatTokens(r.tokens)} tok · ${formatCost(r.cost)} · ${formatDuration(r.duration_ms)}
                           </span>
                         </div>
                       </div>
@@ -977,25 +1067,25 @@ function StatsTab({ runs, live }) {
       key: 'tokens',
       label: 'Tokens',
       sortable: true,
-      render: (r) => Number(r.tokens || 0).toLocaleString(),
+      render: (r) => formatTokens(r.tokens),
     },
     {
       key: 'cost',
       label: 'Cost',
       sortable: true,
-      render: (r) => `$${Number(r.cost || 0).toFixed(6)}`,
+      render: (r) => formatCost(r.cost),
     },
     {
       key: 'duration_ms',
       label: 'Duration',
       sortable: true,
-      render: (r) => formatDuration(r.duration_ms || 0),
+      render: (r) => formatDuration(r.duration_ms),
     },
     {
       key: 'started_at',
       label: 'Started',
       sortable: true,
-      render: (r) => (r.started_at ? new Date(r.started_at).toLocaleString() : '—'),
+      render: (r) => html`<${Time} at=${r.started_at} />`,
     },
   ];
 

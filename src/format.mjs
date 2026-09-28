@@ -291,6 +291,55 @@ export function formatState(s) {
   return map[s] || s;
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// A 24-hour clock stamp, which is what a person reads on a schedule and what an
+// "Yesterday" line needs: "14:02" is a time, "2:02 PM" is a sentence.
+function clockOf(d) {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// When something happened, in the words a person would use for it.
+//
+// `now` is a parameter rather than a call to Date.now() so the output is a pure
+// function of its inputs and can be pinned in a test. The boundary at 24 hours is
+// the reason this needs a clock at all: "yesterday" is a calendar day, not a
+// rolling window, so 09:00 yesterday is "Yesterday 09:00" at 10:00 today and
+// still "Yesterday 09:00" at 23:00 today.
+//
+// The year appears only when it differs from the current one. A date from this
+// year is unambiguous without it, and printing "2026" on last week's run is a
+// digit nobody needs.
+export function formatWhen(iso, now = Date.now()) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '—';
+  const ms = now - t;
+  // A timestamp from the future is clock skew, not an event: two machines
+  // disagreeing about the second must not render as "in 3 seconds".
+  if (ms < 0) return 'just now';
+  const s = Math.floor(ms / 1000);
+  if (s < 10) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const then = new Date(t);
+  const today = new Date(now);
+  const midnight = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  if (t >= midnight - 86400000) return `Yesterday ${clockOf(then)}`;
+  const year = then.getFullYear() === today.getFullYear() ? '' : ` ${then.getFullYear()}`;
+  return `${then.getDate()} ${MONTHS[then.getMonth()]}${year}`;
+}
+
+// An id, short enough to read out or paste into a conversation. Eight hex
+// characters are 4 billion values, which is more than enough to tell two tasks
+// apart on one screen, and the full id is never far away - every caller that
+// shortens one also carries the whole string in a title or a copy action.
+export function shortId(id) {
+  return id == null ? '' : String(id).slice(0, 8);
+}
+
 export function stateColor(s) {
   if (s === 'COMPLETE' || s === 'succeeded' || s === 'ok') return 'good';
   if (s === 'FAILED' || s === 'failed') return 'bad';

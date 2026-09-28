@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -3398,6 +3398,80 @@ test('formatTokens compacts to K/M and trims whole numbers',()=>{
   assert.equal(formatTokens(999),'999');
   assert.equal(formatTokens(0),'0');
   assert.equal(formatTokens(null),'0');
+});
+
+test('formatWhen says how long ago, and stops counting once it stops being useful',()=>{
+  // `now` is passed rather than read, so these do not drift with the clock. Each
+  // boundary is pinned, because the unit is what the string is for: "59s ago" and
+  // "1m ago" are the same instant and different amounts of information.
+  //
+  // The instants are built from local components, not from UTC literals, because
+  // the local calendar is the one the string is read on: "Yesterday 14:02" is the
+  // reader's 14:02, so a UTC literal would assert a date the reader only sees if
+  // they happen to live in UTC.
+  const now=new Date(2026,8,28,12,0,0).getTime();
+  const at=(y,m,d,h)=>new Date(y,m,d,h,0,0).toISOString();
+  const ago=(ms)=>formatWhen(new Date(now-ms).toISOString(),now);
+  assert.equal(ago(0),'just now');
+  assert.equal(ago(9000),'just now','the first ten seconds are not worth a number');
+  assert.equal(ago(45000),'45s ago');
+  assert.equal(ago(59000),'59s ago');
+  assert.equal(ago(60000),'1m ago');
+  assert.equal(ago(59*60000),'59m ago');
+  assert.equal(ago(60*60000),'1h ago');
+  assert.equal(ago(23*3600000),'23h ago');
+  // Past a day the relative form stops being exact enough to act on, so it becomes
+  // a date the reader can place - a clock time for yesterday, a day and month
+  // before that. The line between the two is the calendar day, not a 24-hour
+  // window: an instant exactly 24 hours back is on yesterday's date by definition,
+  // so it is the last one the relative form hands over and the first "Yesterday".
+  assert.equal(formatWhen(at(2026,8,27,12),now),'Yesterday 12:00');
+  assert.equal(formatWhen(at(2026,8,26,9),now),'26 Sep');
+  assert.equal(formatWhen(at(2026,0,4,9),now),'4 Jan');
+  // The year appears only when it differs from the reader's, because on a page of
+  // recent work it is noise and on a page with one old row it is the whole point.
+  assert.equal(formatWhen(at(2025,2,2,9),now),'2 Mar 2025');
+  // A clock that runs backwards must not produce "-3s ago".
+  assert.equal(ago(-5000),'just now');
+  assert.equal(formatWhen('not a date',now),'—');
+  assert.equal(formatWhen(null,now),'—');
+});
+
+test('shortId is the first eight characters, and nothing at all for nothing',()=>{
+  // Eight is what the task header prints and what the parent picker shows; the two
+  // read as the same handle because they are the same function.
+  assert.equal(shortId('9842ba54-4ffa-475d-86c1-45b48e40acdc'),'9842ba54');
+  assert.equal(shortId('abc'),'abc');
+  assert.equal(shortId(null),'');
+  assert.equal(shortId(undefined),'');
+});
+
+test('every state the machine can be in has a name a person reads',()=>{
+  // Driven off `transitions` rather than a list written out here, so a state added
+  // to the workflow without a label fails this test instead of reaching the screen
+  // as a shouted enum.
+  const states=new Set(Object.keys(transitions));
+  for(const next of Object.values(transitions)) for(const s of next) states.add(s);
+  for(const s of states){
+    const label=formatState(s);
+    assert.notEqual(label,s,`${s} has no label`);
+    assert.ok(/^[A-Z][a-z]/.test(label),`${s} is not sentence case: ${label}`);
+    assert.ok(!label.includes('_'),`${s} still carries its underscores: ${label}`);
+  }
+  // A state with no label falls through as itself, which is what keeps an
+  // unrecognised value on screen rather than blank.
+  assert.equal(formatState('SOMETHING_NEW'),'SOMETHING_NEW');
+});
+
+test('formatCost keeps the difference between cheap and free',()=>{
+  // Six decimals was the storage format and it moved to the screen unchanged: every
+  // row read "$0.003300" and a row that cost nothing read "$0.000000", which is two
+  // strings of the same length saying different things.
+  assert.equal(formatCost(0),'$0.00');
+  assert.equal(formatCost(null),'$0.00');
+  assert.equal(formatCost(0.0033),'$0.0033');
+  assert.equal(formatCost(0.5),'$0.50');
+  assert.equal(formatCost(12.345),'$12.35');
 });
 
 test("the test command's rows read as output rather than as an event type",()=>{

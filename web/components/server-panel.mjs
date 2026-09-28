@@ -105,8 +105,8 @@ export function ServerPanel({ supervisorUp }) {
     <div class="server-panel">
       <div class="card server-card">
         <div>
-          <div class="logo-title">AI CODE</div>
-          <div class="logo-sub muted">Mission Control</div>
+          <div class="logo-title">AI Code</div>
+          <div class="logo-sub muted">Mission control</div>
         </div>
         <div class="server-status">
           <span class="status-dot ${phase === 'starting' ? 'warn' : 'bad'}"></span>

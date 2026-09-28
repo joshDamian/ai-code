@@ -19,6 +19,7 @@ import { StatusBadge } from '../components/status-badge.mjs';
 import { TextArea, Select } from '../components/form.mjs';
 import { Markdown } from '../components/markdown.mjs';
 import { EventStream } from '../components/event-stream.mjs';
+import { Time } from '../components/time.mjs';
 import { createEventBuffer } from './task-detail.mjs';
 
 // A turn the queue is still holding. Read from the job row rather than from a local
@@ -482,7 +483,7 @@ export function Sessions({ id, navigate, onTitle }) {
                                 ${s.name} <${StatusBadge} status=${s.status} />
                               </div>
                               <div class="session-date">
-                                ${new Date(s.updated_at).toLocaleString()}${s.budget_tally ? ` · ${formatCost(s.budget_tally)}` : ''}${s.pending_run_id
+                                <${Time} at=${s.updated_at} />${s.budget_tally ? ` · ${formatCost(s.budget_tally)}` : ''}${s.pending_run_id
                                   ? ' · working'
                                   : ''}
                               </div>

@@ -81,8 +81,13 @@ export function Projects({ navigate }) {
   return html`
     <div class="view-projects">
       <div class="view-toolbar">
-        <div class="list-row-side">
-          <button class="btn" onClick=${() => setMode((m) => (m === MODES.add ? null : MODES.add))}>${mode === MODES.add ? 'Cancel' : '+ Project'}</button>
+        <div class="row">
+          <button
+            class="btn ${mode === MODES.add ? 'secondary' : 'primary'}"
+            onClick=${() => setMode((m) => (m === MODES.add ? null : MODES.add))}
+          >
+            ${mode === MODES.add ? 'Cancel' : 'New project'}
+          </button>
           <button class="btn secondary" onClick=${() => setMode((m) => (m === MODES.idea ? null : MODES.idea))}>
             ${mode === MODES.idea ? 'Cancel' : 'From an idea'}
           </button>
@@ -136,22 +141,32 @@ export function Projects({ navigate }) {
               <div class="list">
                 ${projects.map(
                   (p) => html`
-                    <div class="list-row clickable" key=${p.id} onClick=${() => navigate(`#/project/${p.id}`)}>
+                    <a class="list-row" key=${p.id} href=${`#/project/${p.id}`}>
                       <div class="list-row-main">
                         <b>${p.name}</b>
-                        <span class="muted">${p.path} ${p.language ? `· ${p.language}` : ''} ${p.framework ? `· ${p.framework}` : ''}</span>
+                        <span class="muted">
+                          <code>${p.path}</code>
+                          ${p.language ? ` · ${p.language}` : ''}
+                          ${p.framework ? ` · ${p.framework}` : ''}
+                        </span>
                       </div>
                       <div class="list-row-side">
-                        ${p.drafts?.length ? html`<span class="badge badge-warn">${p.drafts.length} drafted</span>` : null}
-                        ${p.spec ? html`<span class="badge badge-good">spec</span>` : p.idea ? html`<span class="badge badge-warn">idea only</span>` : html`<span class="badge badge-neutral">no spec</span>`}
+                        ${p.drafts?.length ? html`<span class="badge badge-info">${p.drafts.length} drafted</span>` : null}
+                        ${p.spec ? html`<span class="badge badge-good">spec</span>` : p.idea ? html`<span class="badge badge-info">idea only</span>` : html`<span class="badge badge-neutral">no spec</span>`}
                         <span class="badge badge-neutral">${Object.keys(p.commands || {}).length} commands</span>
                       </div>
-                    </div>
+                    </a>
                   `
                 )}
               </div>
             `
-          : html`<${EmptyState} message="No projects registered." actionLabel="+ Project" onAction=${() => setMode(MODES.add)} />`
+          : html`<${EmptyState}
+              title="No projects yet"
+              message="A project is a repository the pipeline may work in."
+              hint="Add one by path, or describe an idea and let the draft pass propose a spec."
+              actionLabel="New project"
+              onAction=${() => setMode(MODES.add)}
+            />`
       }
     </div>
   `;

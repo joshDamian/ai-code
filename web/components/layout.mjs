@@ -45,6 +45,27 @@ const NAV_GROUPS = [
 
 const COLLAPSED_KEY = 'ai-code.sidebar-collapsed';
 
+// The mark: two chevrons closing on each other, which is what the pipeline does -
+// a plan goes in, a review comes back, and the gap between them is where the
+// person decides. Drawn at 20px for the sidebar and scaled by CSS anywhere else.
+function LogoMark() {
+  return html`<svg
+    class="logo-mark"
+    viewBox="0 0 20 20"
+    width="20"
+    height="20"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.7"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M8.4 3.6L3.4 10l5 6.4" />
+    <path d="M11.6 3.6L16.6 10l-5 6.4" />
+  </svg>`;
+}
+
 // `title` is the page's own subject (e.g. a task's title), rendered as a
 // breadcrumb after the section name; it is optional, so `route` alone still
 // labels the header.
@@ -54,7 +75,7 @@ const COLLAPSED_KEY = 'ai-code.sidebar-collapsed';
 // so the state is legible from any screen - and it is deliberately a plain dot
 // rather than the provider HealthDot: a circuit that opened is one provider being
 // unwell, and this is the dashboard's own machine being gone.
-export function Layout({ route, title, serverDown = false, children }) {
+export function Layout({ route, title, serverDown = false, onOpenPalette, onNewTask, children }) {
   // Collapsed-ness is a preference, not view state: it survives navigation and
   // reloads so the shell does not snap back open under the user every visit.
   // localStorage throws in some privacy modes, so the read is guarded - a
@@ -117,8 +138,11 @@ export function Layout({ route, title, serverDown = false, children }) {
       >
         <div class="logo">
           <div class="logo-text">
-            <div class="logo-title">AI CODE</div>
-            <div class="logo-sub muted">Mission Control</div>
+            <div class="logo-title">
+              <${LogoMark} />
+              AI Code
+            </div>
+            <div class="logo-sub muted">Mission control</div>
           </div>
           <button
             class="sidebar-toggle"
@@ -163,11 +187,22 @@ export function Layout({ route, title, serverDown = false, children }) {
           <div class="header-title">
             ${current ? current.label : ''}
             ${title ? html`<span class="header-sep">/</span><span class="header-crumb">${title}</span>` : null}
-            <span
-              class="status-dot ${serverDown ? 'bad' : 'good'}"
-              title=${serverDown ? 'The dashboard server is not running' : 'The dashboard server is running'}
-              aria-label=${serverDown ? 'The dashboard server is not running' : 'The dashboard server is running'}
-            ></span>
+          </div>
+          <div class="header-actions">
+            ${/* The server's own state, said in words. A bare dot in the header was
+                 legible only to whoever already knew what it meant, and the one fact
+                 it carries - is the machine behind this page still there - is worth a
+                 phrase. */ ''}
+            <span class="badge ${serverDown ? 'badge-bad' : 'badge-good'}">${serverDown ? 'Server offline' : 'Server online'}</span>
+            ${/* Search is a button because it is also a shortcut. The key cap is the
+                 whole affordance: it names the palette and teaches ⌘K in one line. */ ''}
+            ${onOpenPalette
+              ? html`<button class="btn secondary search-trigger" type="button" onClick=${onOpenPalette}>
+                  <span class="search-trigger-label">Search</span>
+                  <span class="kbd-keys"><span class="kbd">⌘</span><span class="kbd">K</span></span>
+                </button>`
+              : null}
+            ${onNewTask ? html`<button class="btn primary" type="button" onClick=${onNewTask}>New task</button>` : null}
           </div>
         </header>
         <main class="content">${children}</main>

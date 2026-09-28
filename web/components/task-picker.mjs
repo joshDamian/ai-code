@@ -10,11 +10,7 @@
 // The list reuses the command palette's classes, and its `fuzzy`, so the two
 // pickers read as one control in two places rather than as two lookalikes that
 // drift apart.
-import { html, useState, useMemo, useRef, fuzzy } from '../lib.mjs';
-
-// The id as a glanceable handle rather than as the subject of the row. Eight
-// characters is what a task's own header prints.
-const shortId = (id) => String(id).slice(0, 8);
+import { html, useState, useMemo, useRef, fuzzy, shortId } from '../lib.mjs';
 
 export function TaskPicker({ label, tasks, value, onInput, placeholder, loading, excludeId }) {
   // `open` is a focus state, not a value: the input holds the query while the

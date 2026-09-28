@@ -59,7 +59,12 @@ export function compactNumber(v) {
   return trimZero(n);
 }
 
-export function formatCost(v) {
+// A chart's money formatter, and deliberately not the app's `formatCost`. An axis
+// tick is read at a glance against its neighbours, so it drops to `$0` where the
+// shared formatter prints `$0.00` - two characters the gutter cannot spare and
+// that say nothing a tick's position has not already said. Table cells and labels
+// want the exact figure, so they import the shared one from `../lib.mjs`.
+export function axisCost(v) {
   const n = Number(v) || 0;
   if (!n) return '$0';
   if (Math.abs(n) < 0.01) return `$${n.toFixed(4)}`;
@@ -374,7 +379,7 @@ export function StackedBarChart({
   series = [],
   title,
   ariaLabel,
-  formatValue = formatCost,
+  formatValue = axisCost,
   plotHeight = 190,
   bandHeight = 22,
   zeroNote = 'No cost recorded in this period.',
@@ -706,7 +711,7 @@ export function RunTimeline({ runs = [], live = null, height = 22 }) {
               </div>
               <div class="chart-tip-label">${labelOf(active)}</div>
               <div class="chart-tip-label">
-                ${formatCost(active.cost)} · ${compactNumber(active.tokens)} tokens
+                ${axisCost(active.cost)} · ${compactNumber(active.tokens)} tokens
                 ${active.fallback_from ? ` · ↩ fallback from ${active.fallback_from}` : ''}
               </div>
             </div>

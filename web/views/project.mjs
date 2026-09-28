@@ -19,6 +19,7 @@ import { Spinner } from '../components/spinner.mjs';
 import { TextInput, TextArea } from '../components/form.mjs';
 import { Markdown } from '../components/markdown.mjs';
 import { DiffViewer } from '../components/diff-viewer.mjs';
+import { Time } from '../components/time.mjs';
 
 // What a decision's state is called on screen. A draft is the one that has not
 // landed, which is the only one with buttons on it.
@@ -125,7 +126,7 @@ export function Project({ id, navigate, onTitle }) {
                           <b>${firstLine(d.content)}</b>
                           ${body(d.content) ? html`<span class="muted">${body(d.content)}</span>` : null}
                           <span class="muted">
-                            ${taskTitle(d.task_id) ? html`<a href="#/tasks/${d.task_id}">${taskTitle(d.task_id)}</a> · ` : ''}${new Date(d.created_at).toLocaleString()}
+                            ${taskTitle(d.task_id) ? html`<a href="#/tasks/${d.task_id}">${taskTitle(d.task_id)}</a> · ` : ''}<${Time} at=${d.created_at} />
                           </span>
                         </div>
                         <div class="list-row-side">

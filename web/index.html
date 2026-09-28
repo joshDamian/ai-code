@@ -35,19 +35,88 @@
 <style>
 :root{
   --bg:#0a0c10;
-  --panel:#11151b;
-  --panel2:#171c23;
-  --panel3:#1d232c;
-  --line:#29313c;
   --text:#edf2f7;
   --muted:#8e9aaa;
   --accent:#9fb9ff;
   --accent-dim:#4a6fa5;
-  --good:#6fe0a1;
-  --warn:#ffd37a;
-  --bad:#ff8585;
+  /* The ink a filled accent button is read in. Near-black rather than pure black,
+     so the fill and the label share the theme's blue cast. */
+  --on-accent:#0b0d10;
   --radius:10px;
   --radius-sm:6px;
+
+  /* ---- faces ----
+     Two, and the whole app is one of them. Everything a person reads is the UI
+     face; a machine value - a hash, a path, a diff, a command - is the mono face,
+     which is also why the distinction is worth a token: a field that shows prose
+     must not be given the mono one by accident. */
+  --font-ui:-apple-system,BlinkMacSystemFont,"Inter",ui-sans-serif,system-ui,sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+
+  /* ---- type scale ----
+     Six steps, and every font-size in this sheet is one of them. The scale is
+     dense between 11 and 14px because that is where the app's chrome lives - a
+     label, a table head, a keycap, a count - and open above it, where only titles
+     sit. A size that is not a step is a size nobody chose. */
+  --text-xs:11px;
+  --text-sm:12.5px;
+  --text-md:14px;
+  --text-lg:16px;
+  --text-xl:20px;
+  --text-2xl:28px;
+
+  /* ---- surfaces ----
+     Depth is a step on this ramp, not a hex per panel. A surface is named for how
+     far it sits from the page: sunken is below it (code, a diff), 1 is the page's
+     own panel, and 3 is something floating over it (a toast, a dialog). The rail
+     is chrome rather than elevation and holds its own value. */
+  --surface-sunken:#090b0e;
+  --surface-0:#0b0e12;
+  --surface-1:#11151b;
+  --surface-2:#171c23;
+  --surface-3:#1d232c;
+  --surface-rail:#0d1014;
+  --line:#29313c;
+  --line-strong:#39424f;
+  /* Hover on a row that has no surface of its own: a wash of the ink, so it reads
+     over any surface the row happens to sit on. */
+  --wash:rgba(255,255,255,.02);
+  /* The dim behind an overlay. One value for the palette, the legend and the phone
+     drawer, so every modal dims the page by the same amount. */
+  --scrim:rgba(4,6,9,.62);
+
+  /* ---- elevation ----
+     Three heights. 1 is a card resting on the page, 2 is something over content
+     that stays in the flow (a tooltip, a toast), 3 is a full overlay. */
+  --shadow-1:0 1px 2px rgba(0,0,0,.30);
+  --shadow-2:0 6px 20px rgba(0,0,0,.40);
+  --shadow-3:0 20px 60px rgba(0,0,0,.50);
+
+  /* ---- tones ----
+     Four semantics, each as a text colour, a tinted fill and a border. The fill is
+     translucent so it reads on any surface, and every `-line` is a darkened form
+     of its own ink rather than a separate hue. `info` is the one state that waits
+     on a person, and it is deliberately not the accent: the accent is what the app
+     offers to do, and this is what the app is waiting for. */
+  --good:#6fe0a1;
+  --good-bg:rgba(111,224,161,.10);
+  --good-line:#2c5c46;
+  --warn:#ffd37a;
+  --warn-bg:rgba(255,211,122,.10);
+  --warn-line:#5c4f2c;
+  --bad:#ff8585;
+  --bad-bg:rgba(255,133,133,.10);
+  --bad-line:#5c2c2c;
+  --info:#9fb9ff;
+  --info-bg:rgba(159,185,255,.10);
+  --info-line:#4a6fa5;
+
+  /* ---- motion ----
+     One easing and one duration for every micro-interaction in the app. Anything
+     longer than this is an animation - a shimmer, a slide, a spinner - and carries
+     its own timing where it is declared. */
+  --ease:cubic-bezier(.2,.7,.3,1);
+  --dur-fast:.12s;
 
   /* ---- spacing scale ----
      Every gap, pad and offset in the stylesheet is a step on this scale, which is
@@ -67,7 +136,7 @@
   /* ---- chart tokens ----
      Categorical hues in fixed slot order (never cycled, never generated), plus
      the chrome the inline SVG charts draw against. Both the eight hues and the
-     chrome were validated against this theme's --panel surface: every slot sits
+     chrome were validated against this theme's --surface-1: every slot sits
      inside the dark lightness band, clears the chroma floor, holds >= 3:1
      contrast on the surface, and the worst adjacent pair clears the CVD and
      normal-vision separation floors. Chart 1 is the default single-series hue. */
@@ -93,14 +162,14 @@ body{
   margin:0;
   background:var(--bg);
   color:var(--text);
-  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Inter",ui-sans-serif,system-ui,sans-serif;
+  font:var(--text-md)/1.5 var(--font-ui);
   -webkit-font-smoothing:antialiased;
 }
 button,input,select,textarea{font:inherit;color:inherit}
 h1,h2,h3{margin:0 0 var(--space-2);font-weight:650}
-h1{font-size:22px}
-h2{font-size:15px;color:var(--text)}
-h3{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+h1{font-size:var(--text-xl)}
+h2{font-size:var(--text-lg);color:var(--text)}
+h3{font-size:var(--text-md);color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
 /* The browser's default margins are for a document, not for an app: a paragraph
    or a figure inside a grid or flex container never has a neighbour to collapse
    with, so the ~16px it carries is added to the container's own gap. Every
@@ -113,7 +182,7 @@ figure{margin:0}
    under a heading would be added to it. Descendant rather than child, because
    project.mjs nests its h1 one div deep in the toolbar. */
 .view-toolbar :is(h1,h2,h3),.provider-card-head :is(h1,h2,h3),.kbd-legend-head :is(h1,h2,h3){margin:0}
-code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+code{font-family:var(--font-mono);font-size:var(--text-sm)}
 .muted{color:var(--muted)}
 .link{color:var(--accent);text-decoration:none;font-weight:600}
 .link:hover{text-decoration:underline}
@@ -125,21 +194,24 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
    to its row by default, and a stretched item has no travel room to stick in.
    `height:100vh` bounds the pinned rail to the window and `overflow-y:auto` lets
    the nav scroll inside it when the window is shorter than the nav. */
-.sidebar{border-right:1px solid var(--line);padding:var(--space-6) var(--space-4);background:#0d1014;display:flex;flex-direction:column;position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto}
+.sidebar{border-right:1px solid var(--line);padding:var(--space-6) var(--space-4);background:var(--surface-rail);display:flex;flex-direction:column;position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto}
 .logo{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--space-2);padding:0 var(--space-3) var(--space-6)}
-.sidebar-toggle{background:none;border:0;color:var(--muted);padding:var(--space-1) var(--space-2);border-radius:var(--radius-sm);font-size:13px;line-height:1;flex:0 0 auto}
-.sidebar-toggle:hover{background:var(--panel2);color:var(--text);opacity:1}
-.logo-title{font-weight:800;font-size:17px;letter-spacing:.03em}
-.logo-sub{font-size:12px;margin-top:2px}
+.sidebar-toggle{background:none;border:0;color:var(--muted);padding:var(--space-1) var(--space-2);border-radius:var(--radius-sm);font-size:var(--text-md);line-height:1;flex:0 0 auto}
+.sidebar-toggle:hover{background:var(--surface-2);color:var(--text)}
+/* The wordmark in sentence case. Shouted capitals on a product name is a costume,
+   and this one is worn by a tool a person keeps open all day. */
+.logo-title{display:flex;align-items:center;gap:var(--space-2);font-weight:700;font-size:var(--text-lg);letter-spacing:0}
+.logo-mark{color:var(--accent);flex:0 0 auto}
+.logo-sub{font-size:var(--text-sm);margin-top:2px}
 .nav{display:flex;flex-direction:column;gap:2px}
-.nav-item{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);color:var(--muted);text-decoration:none;font-weight:550;font-size:13.5px}
+.nav-item{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);color:var(--muted);text-decoration:none;font-weight:550;font-size:var(--text-md)}
 .nav-icon{flex:0 0 auto;display:block}
 .nav-item-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nav-item:hover{background:var(--panel2);color:var(--text)}
-.nav-item.active{background:var(--panel2);color:var(--text);box-shadow:inset 2px 0 0 var(--accent)}
+.nav-item:hover{background:var(--surface-2);color:var(--text)}
+.nav-item.active{background:var(--surface-2);color:var(--text);box-shadow:inset 2px 0 0 var(--accent)}
 .nav-group{margin-top:var(--space-4)}
 .nav-group:first-of-type{margin-top:0}
-.nav-group-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:0 var(--space-3) var(--space-2)}
+.nav-group-label{font-size:var(--text-xs);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:0 var(--space-3) var(--space-2)}
 .logo-text{min-width:0}
 /* Collapsed: the labels go, the icons stay. Both states render the same markup -
    the label is hidden rather than swapped out - so the rail cannot drift from
@@ -154,23 +226,36 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 .app-shell.collapsed .nav-group{margin-top:var(--space-3);padding-top:var(--space-3);border-top:1px solid var(--line)}
 .app-shell.collapsed .nav-group:first-of-type{margin-top:0;padding-top:0;border-top:0}
 .main-col{display:flex;flex-direction:column;min-width:0}
-.app-header{padding:var(--space-6) var(--space-7) 0;max-width:1550px;width:100%}
-.header-title{font-size:22px;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The header is a row at every width, not only under 1000px. It carries the
+   page's subject on the left and the two things a person wants from anywhere on
+   the right - search and a new task - so the same layout serves both. */
+.app-header{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-6) var(--space-7) 0;max-width:1550px;width:100%}
+.header-title{flex:1;font-size:var(--text-xl);font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The actions never shrink and never wrap: they are the two affordances the shell
+   promises on every screen, and a squeezed button is a missing one. */
+.header-actions{display:flex;align-items:center;gap:var(--space-2);flex:0 0 auto}
+.search-trigger{font-weight:500;color:var(--muted)}
+.search-trigger:hover{color:var(--text)}
+.search-trigger .kbd{height:18px;min-width:18px;font-size:var(--text-xs);padding:0 4px}
 /* Breadcrumb: the section, then the page's own subject when it has one. Muted and
    smaller, so the pair reads as depth rather than as two titles. */
 .header-sep{color:var(--muted);margin:0 var(--space-2);font-weight:400}
-.header-crumb{color:var(--muted);font-weight:550;font-size:17px}
+.header-crumb{color:var(--muted);font-weight:550;font-size:var(--text-lg)}
 .content{padding:var(--space-5) var(--space-7) var(--space-7);max-width:1550px;width:100%}
 
 /* ---- primitives ---- */
-.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4)}
+/* A card sits on the page rather than in it, so it takes the first elevation step
+   and a border. The shadow is what separates two panels of the same colour when
+   one is nested in the other; on the page's own background it reads as depth
+   rather than as a line. */
+.card{background:var(--surface-1);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4);box-shadow:var(--shadow-1)}
 /* The vertical rhythm inside a card. A card is a plain block, so its children have
    no gap between them and nothing to collapse against: a `p` has had its UA margin
    stripped, a `.row`'s gap is horizontal, and a `.stack` opens flush against
    whatever is above it. Each of these four blocks therefore carries a step on the
    side where a sibling sits, and the first and last keep the card's own padding as
    their edge. The blocks that own their spacing instead - a `.view-toolbar`'s 16px,
-   an `.action-bar`'s 20px - are not in the list, so nothing is counted twice.
+   a `.dialog-actions`' 20px - are not in the list, so nothing is counted twice.
    The exception is a card whose own layout already owns the rhythm: a flex or grid
    card with a gap would add this margin to that gap and double the step. Each such
    card is named here, so a new variant that sets display and gap has to be added. */
@@ -184,17 +269,47 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 /* 20px between the sections of a page, whether or not the section is a card:
    one rhythm, so a page reads the same as the next one. */
 .section{margin-top:var(--space-5)}
+/* A section title and whatever counts or controls belong with it, on one line. */
+.section-head{display:flex;align-items:center;gap:var(--space-2);margin-bottom:var(--space-2)}
+.section-head h2{margin:0}
 .row{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap}
 .stack{display:grid;gap:var(--space-3)}
 
 .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-3);margin-top:var(--space-3)}
 .kv-grid{display:grid;grid-template-columns:140px 1fr;gap:var(--space-2) var(--space-3);padding-top:var(--space-1)}
 
-button{background:var(--accent);color:#0b0d10;border:0;border-radius:var(--radius-sm);padding:var(--space-2) var(--space-4);font-weight:650;cursor:pointer;transition:opacity .15s}
-button:hover{opacity:.9}
-button:disabled{opacity:.5;cursor:default}
-.btn.secondary{background:var(--panel3);color:var(--text);border:1px solid var(--line)}
-.btn.danger{background:#351b1b;color:#ffb5b5}
+/* ---- buttons ----
+   A bare `button` is a reset, not a style. Until this existed every button in the
+   app was filled with the accent, including the ones the sheet had not thought
+   about, so a dismiss affordance arrived wearing the same paint as the page's
+   primary action. A button that does something is a `.btn`; the rule here only
+   removes the browser's chrome and hands the element the app's font. */
+button{background:none;border:0;color:inherit;font:inherit;padding:0;cursor:pointer}
+/* The default is the primary action: a `.btn` with no variant is the thing on the
+   page a person is meant to press. `btn primary` says the same thing out loud, so
+   both spellings are correct and neither has to be chased through the views. */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--space-2);background:var(--accent);color:var(--on-accent);border:1px solid transparent;border-radius:var(--radius-sm);padding:var(--space-2) var(--space-4);font-weight:650;cursor:pointer;text-decoration:none;transition:filter var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease)}
+.btn.primary{background:var(--accent);color:var(--on-accent)}
+.btn:disabled{opacity:.5;cursor:default}
+/* Hover lifts the fill rather than dropping the button's opacity. At .9 the label
+   faded with the box behind it, which reads as a control that has been disabled
+   rather than one under the pointer. */
+.btn:hover:not(:disabled){filter:brightness(1.16)}
+/* Pressed: the button moves down a pixel and darkens, so a click has a reply even
+   when the work it starts takes a second to land. */
+.btn:active:not(:disabled){transform:translateY(1px);filter:brightness(.94)}
+.btn.secondary{background:var(--surface-2);color:var(--text);border-color:var(--line)}
+.btn.secondary:hover:not(:disabled){border-color:var(--line-strong)}
+/* A ghost is a button that must not compete with the one beside it: a toolbar
+   action, a dismiss. No fill at rest, so a row of them reads as chrome. */
+.btn.ghost{background:transparent;color:var(--muted)}
+.btn.ghost:hover:not(:disabled){background:var(--surface-2);color:var(--text);filter:none}
+/* Destructive, and it says so with a border rather than reading as a dark smudge
+   on the page. The tone is the warning; the border is what gives it an edge. */
+.btn.danger{background:var(--bad-bg);color:var(--bad);border-color:var(--bad-line)}
+.btn.danger:hover:not(:disabled){border-color:var(--bad)}
+/* Toolbar size, for a button that sits in a row of controls rather than alone. */
+.btn.sm{padding:var(--space-1) var(--space-3);font-size:var(--text-sm);font-weight:600}
 /* The phone's hamburger. Hidden at every width where the sidebar is part of the
    layout; the 1000px block below is where the sidebar leaves it and this arrives. */
 .nav-toggle{display:none}
@@ -208,9 +323,9 @@ button:disabled{opacity:.5;cursor:default}
    they opened. It is a container rather than a control, and a ring around the whole
    panel would read as a control that had been selected. */
 .sidebar:focus{outline:none}
-.chart-toggle{padding:var(--space-1) var(--space-3);font-size:12px}
+.chart-toggle{padding:var(--space-1) var(--space-3);font-size:var(--text-sm)}
 
-.input{width:100%;background:#0b0e12;color:var(--text);border:1px solid var(--line);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);outline:none}
+.input{width:100%;background:var(--surface-0);color:var(--text);border:1px solid var(--line);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);outline:none}
 .input:focus{border-color:var(--accent-dim)}
 /* One focus ring for the whole app, drawn only for keyboard navigation. Until this
    existed the only focus-visible rules in the file were on chart elements, so every
@@ -219,24 +334,77 @@ button:focus-visible,.nav-item:focus-visible,.tab:focus-visible,a:focus-visible,
 .tab:focus-visible{outline-offset:-2px}
 .input:focus-visible{outline:2px solid var(--accent-dim);outline-offset:1px}
 .field{display:grid;gap:var(--space-2)}
-.field-label{font-size:12px;color:var(--muted);font-weight:600}
+.field-label{font-size:var(--text-sm);color:var(--muted);font-weight:600}
+/* An identifier shown inline - a UUID, a model id, a repository path - is set in
+   the mono face, because it is read character by character rather than as a word,
+   and one step smaller, so it does not outweigh the label it sits under. */
+.mono-sm{font-family:var(--font-mono);font-size:var(--text-sm)}
 .inline-form{display:grid;gap:var(--space-3);margin-bottom:var(--space-4)}
-textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical}
+/* A textarea holds prose - a task's description, an idea, a note to a reviewer -
+   so it takes the UI face. A field that really does hold code asks for `.mono`;
+   forcing the mono face on every textarea made a paragraph of English look like
+   a source file. */
+textarea.input{font-family:var(--font-ui);resize:vertical}
+textarea.input.mono{font-family:var(--font-mono);font-size:var(--text-sm)}
 
-.badge{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px var(--space-2);font-size:11.5px;font-weight:650;color:var(--muted);white-space:nowrap}
-.badge-good{color:var(--good);border-color:#2c5c46}
-.badge-bad{color:var(--bad);border-color:#5c2c2c}
-.badge-warn{color:var(--warn);border-color:#5c4f2c}
-.badge-neutral{color:var(--muted)}
+/* A badge is a state made visible: a tinted fill, a border in the same hue, and a
+   dot that leads the word. The dot is `currentColor`, so a tone is declared once
+   and the fill, the border, the text and the dot cannot drift apart. It is what
+   makes a column of badges scannable - the colour reads before the label does. */
+.badge{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:3px var(--space-2);font-size:var(--text-xs);font-weight:650;line-height:1.4;color:var(--muted);white-space:nowrap}
+.badge::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
+.badge-good{color:var(--good);background:var(--good-bg);border-color:var(--good-line)}
+.badge-warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-line)}
+.badge-bad{color:var(--bad);background:var(--bad-bg);border-color:var(--bad-line)}
+/* The one tone that waits on a person. Its own name rather than the accent: the
+   accent is what the app offers to do, and this is what it is waiting for. */
+.badge-info{color:var(--info);background:var(--info-bg);border-color:var(--info-line)}
+/* Neutral carries no state - a count, an absent field - so it takes no tone and no
+   dot. A grey light beside "3 commands" would read as a status that is off. */
+.badge-neutral{color:var(--muted);background:transparent}
+.badge-neutral::before{display:none}
+/* Work in flight. The dot breathes, because the state is not a verdict - it is a
+   placeholder for one that is coming - and a still amber dot beside a still
+   green one reads as the same kind of fact. */
+.badge-working::before{animation:pulse 1.6s var(--ease) infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@media(prefers-reduced-motion:reduce){.badge-working::before{animation:none}}
 
 .list{display:flex;flex-direction:column;gap:var(--space-2);margin-top:var(--space-3)}
-.list-row{display:flex;justify-content:space-between;align-items:center;gap:var(--space-4);background:var(--panel);border:1px solid var(--line);padding:var(--space-4);border-radius:var(--radius-sm)}
+.list-row{display:flex;justify-content:space-between;align-items:center;gap:var(--space-4);background:var(--surface-1);border:1px solid var(--line);padding:var(--space-4);border-radius:var(--radius-sm)}
 .list-row.clickable{cursor:pointer}
 .list-row.clickable:hover{border-color:var(--accent-dim)}
+/* A navigable row is an `<a>`, not a div with a click handler. A real link brings
+   its own tab stop, Enter, middle-click and context menu, none of which a div
+   gets for free - and the ones a div is usually given back are the ones most
+   often forgotten. */
+a.list-row{color:inherit;text-decoration:none}
+a.list-row:hover{border-color:var(--accent-dim);background:var(--surface-2)}
+a.list-row:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* The rows that are waiting on a person rather than on a machine. A tinted edge
+   and the same fill as a badge in the info tone: the section is already named
+   "Needs your attention", and this makes the rows that answer to it findable
+   from across the page. */
+.list-row.attention{border-color:var(--info-line);background:linear-gradient(90deg,var(--info-bg),transparent 40%)}
+.list-row-main a{color:inherit;text-decoration:none}
+.list-row-main a:hover{text-decoration:underline}
 .list-row-main{display:flex;flex-direction:column;gap:3px}
+/* A path is an identifier, not prose: it is set in the mono face on a sunken
+   chip, so it reads as a value that was copied rather than as a phrase that was
+   written. */
+.list-row code{background:var(--surface-sunken);border:1px solid var(--line);border-radius:4px;padding:1px var(--space-2)}
 .list-row-side{display:flex;align-items:center;gap:var(--space-2)}
 
+/* An empty screen is a place a person arrives at, not a dead end. One line says
+   what is not here; one line says what to do about it. */
 .empty-state{text-align:center;padding:var(--space-7) var(--space-5);color:var(--muted);display:grid;gap:var(--space-3);justify-items:center}
+.empty-icon{width:32px;height:32px;color:var(--line-strong);margin-bottom:var(--space-1)}
+.empty-title{color:var(--text);font-size:var(--text-lg);font-weight:650;margin:0}
+.empty-hint{font-size:var(--text-sm);margin:0;max-width:44ch}
+
+/* A timestamp is chrome, not content: it sits beside the thing it describes and
+   must not pull the eye. Tabular figures keep a column of them from rippling. */
+.time{font-variant-numeric:tabular-nums;white-space:nowrap}
 
 .spinner-wrap{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-5) var(--space-1)}
 .spinner{width:16px;height:16px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--accent);animation:spin .7s linear infinite;flex:0 0 auto}
@@ -245,10 +413,10 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* ---- skeletons ---- */
 /* First paint, before the data arrives. Each placeholder is the shape and the
    spacing of the row it stands in for, so nothing jumps when the real rows land. */
-.skeleton{display:block;border-radius:var(--radius-sm);background:linear-gradient(90deg,var(--panel2) 0%,var(--panel3) 50%,var(--panel2) 100%);background-size:200% 100%;animation:shimmer 1.4s ease-in-out infinite}
+.skeleton{display:block;border-radius:var(--radius-sm);background:linear-gradient(90deg,var(--surface-2) 0%,var(--surface-3) 50%,var(--surface-2) 100%);background-size:200% 100%;animation:shimmer 1.4s ease-in-out infinite}
 @keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
 .skeleton-list{display:flex;flex-direction:column;gap:var(--space-2)}
-.skeleton-row{display:flex;justify-content:space-between;align-items:center;gap:var(--space-4);background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-4)}
+.skeleton-row{display:flex;justify-content:space-between;align-items:center;gap:var(--space-4);background:var(--surface-1);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-4)}
 .skeleton-lines{display:flex;flex-direction:column;gap:var(--space-2);flex:1;min-width:0}
 .skeleton-line{height:12px;max-width:320px}
 .skeleton-line.short{width:38%}
@@ -261,13 +429,19 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 @media(prefers-reduced-motion:reduce){.skeleton{animation:none}}
 
 .toast-stack{position:fixed;top:var(--space-5);right:var(--space-5);display:flex;flex-direction:column;gap:var(--space-2);z-index:1000}
-.toast{background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-3) var(--space-4);box-shadow:0 6px 20px rgba(0,0,0,.35);font-size:13px;min-width:220px;max-width:360px;animation:toast-in .15s ease}
-.toast-success{border-color:#2c5c46;color:var(--good)}
-.toast-error{border-color:#5c2c2c;color:var(--bad)}
+.toast{display:flex;align-items:flex-start;gap:var(--space-3);background:var(--surface-3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-3) var(--space-3) var(--space-3) var(--space-4);box-shadow:var(--shadow-2);font-size:var(--text-md);min-width:220px;max-width:360px;animation:toast-in .15s ease}
+.toast-success{border-color:var(--good-line);color:var(--good)}
+.toast-error{border-color:var(--bad-line);color:var(--bad)}
 .toast-info{color:var(--text)}
+.toast-text{flex:1;min-width:0;overflow-wrap:anywhere}
+/* An error that covers the thing it is about is in the way, and a toast that
+   outlives its usefulness is litter. It gets a way out that is not waiting. */
+.toast-close{flex:0 0 auto;width:20px;height:20px;display:grid;place-items:center;border-radius:var(--radius-sm);color:inherit;opacity:.6;font-size:var(--text-sm);line-height:1}
+.toast-close:hover{opacity:1;background:var(--wash)}
 @keyframes toast-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+@media(prefers-reduced-motion:reduce){.toast{animation:none}}
 
-.code-block{white-space:pre-wrap;word-break:break-word;background:#090b0e;border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4);max-height:480px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.code-block{white-space:pre-wrap;word-break:break-word;background:var(--surface-sunken);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4);max-height:480px;overflow:auto;font-family:var(--font-mono);font-size:var(--text-sm)}
 .error-text{color:var(--bad)}
 
 /* ---- markdown ---- */
@@ -275,11 +449,11 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    the base rules for h1/h2/h3 (:67-70) are sized for chrome, not for a document:
    h3 is uppercased, letter-spaced and muted, which would render a plan's "### Step"
    as shouting grey caps. Inheritance is not enough there, so h3 is restated. */
-.md{word-break:break-word;background:#090b0e;border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4);max-height:480px;overflow:auto;font-size:13.5px;line-height:1.65}
+.md{word-break:break-word;background:var(--surface-sunken);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4);max-height:480px;overflow:auto;font-size:var(--text-md);line-height:1.65}
 .md h1,.md h2,.md h3{margin:var(--space-5) 0 var(--space-2);font-weight:650;color:var(--text)}
-.md h1{font-size:19px}
-.md h2{font-size:16px}
-.md h3{font-size:14px;color:var(--text);text-transform:none;letter-spacing:normal}
+.md h1{font-size:var(--text-xl)}
+.md h2{font-size:var(--text-lg)}
+.md h3{font-size:var(--text-md);color:var(--text);text-transform:none;letter-spacing:normal}
 /* The container's own padding supplies the outer gap, so leading and trailing
    margins would double it up at the top and bottom of the block. */
 .md> :first-child{margin-top:0}
@@ -291,13 +465,13 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* Inline code sits on a lighter surface than the .md background, and a fenced
    block sits on the card surface so it stays legible as a distinct block rather
    than a hole in the prose. */
-.md code{background:var(--panel3);border:1px solid var(--line);border-radius:4px;padding:1px var(--space-1);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
-.md pre{margin:0 0 var(--space-3);padding:var(--space-3);background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-sm);overflow:auto;white-space:pre}
-.md pre code{background:none;border:0;padding:0;font-size:12.5px}
+.md code{background:var(--surface-3);border:1px solid var(--line);border-radius:4px;padding:1px var(--space-1);font-family:var(--font-mono);font-size:var(--text-sm)}
+.md pre{margin:0 0 var(--space-3);padding:var(--space-3);background:var(--surface-1);border:1px solid var(--line);border-radius:var(--radius-sm);overflow:auto;white-space:pre}
+.md pre code{background:none;border:0;padding:0;font-size:var(--text-sm)}
 .md blockquote{margin:0 0 var(--space-3);padding:0 0 0 var(--space-3);border-left:2px solid var(--accent-dim);color:var(--muted)}
 .md table{width:100%;border-collapse:collapse;margin:0 0 var(--space-3)}
 .md th,.md td{padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-.md th{color:var(--muted);font-weight:600;font-size:12.5px}
+.md th{color:var(--muted);font-weight:600;font-size:var(--text-sm)}
 .md hr{border:0;border-top:1px solid var(--line);margin:var(--space-4) 0}
 /* Underlined at rest, unlike the app's own .link: a link inside a document is a
    link, and every one of these now opens a new tab, which a reader should see
@@ -313,9 +487,9 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* min-width:0 stops the charts' measured SVG width from feeding back into the
    grid track and widening the column past the viewport. */
 .metric-card{display:flex;flex-direction:column;gap:var(--space-2);min-width:0}
-.metric-label{font-size:12px;text-transform:uppercase;letter-spacing:.04em}
-.metric-value{font-size:27px;font-weight:750}
-.metric-note{font-size:11.5px}
+.metric-label{font-size:var(--text-sm);text-transform:uppercase;letter-spacing:.04em}
+.metric-value{font-size:var(--text-2xl);font-weight:750}
+.metric-note{font-size:var(--text-xs)}
 /* The usage page's nine metric cards: auto-fit fills a desktop row with seven
    and orphans two beneath. Five fixed columns land them 5/4; the step-downs
    keep full final rows at every width. */
@@ -346,38 +520,38 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .chart-svg{display:block;outline:none}
 .chart-svg:focus-visible{outline:2px solid var(--accent-dim);outline-offset:2px;border-radius:var(--radius-sm)}
 .chart-hit{cursor:crosshair}
-.chart-tick{fill:var(--muted);font-size:10.5px;font-variant-numeric:tabular-nums}
-.chart-cat{fill:var(--text);font-size:12px}
-.chart-value{fill:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.chart-tick{fill:var(--muted);font-size:var(--text-xs);font-variant-numeric:tabular-nums}
+.chart-cat{fill:var(--text);font-size:var(--text-sm)}
+.chart-value{fill:var(--muted);font-size:var(--text-sm);font-variant-numeric:tabular-nums}
 .chart-bar{transition:filter .12s}
 .chart-bar-row:hover .chart-bar{filter:brightness(1.18)}
 .chart-bar-row:focus-visible{outline:2px solid var(--accent-dim);outline-offset:2px}
 .chart-nodata{margin:var(--space-4) 0}
 .sparkline{margin-top:2px;min-height:34px}
 .sparkline svg{display:block}
-.chart-tip{position:absolute;top:0;transform:translateX(-50%);background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-2) var(--space-3);pointer-events:none;box-shadow:0 6px 20px rgba(0,0,0,.4);white-space:nowrap;z-index:2}
+.chart-tip{position:absolute;top:0;transform:translateX(-50%);background:var(--surface-3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-2) var(--space-3);pointer-events:none;box-shadow:var(--shadow-2);white-space:nowrap;z-index:2}
 .chart-tip-row{display:flex;align-items:center;gap:var(--space-2)}
 .chart-tip-key{width:12px;height:2px;border-radius:1px;flex:0 0 auto}
-.chart-tip-value{font-weight:700;font-size:13px;font-variant-numeric:tabular-nums}
-.chart-tip-label{font-size:11.5px;color:var(--muted);margin-top:1px}
+.chart-tip-value{font-weight:700;font-size:var(--text-md);font-variant-numeric:tabular-nums}
+.chart-tip-label{font-size:var(--text-xs);color:var(--muted);margin-top:1px}
 /* Multi-series tooltip: one row per series, each value beside the swatch that
    identifies it. Capped so the box can never widen the page - chart cards have
    no scroll container of their own. */
 .chart-tip-multi{max-width:min(240px,100%);white-space:normal}
-.chart-tip-head{font-size:11.5px;color:var(--muted);margin-bottom:var(--space-1)}
+.chart-tip-head{font-size:var(--text-xs);color:var(--muted);margin-bottom:var(--space-1)}
 .chart-tip-multi .chart-tip-key{width:10px;height:10px;border-radius:2px}
-.chart-tip-multi .chart-tip-value{font-size:11.5px;font-weight:600;margin-left:auto}
-.chart-tip-name{flex:1 1 auto;min-width:0;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chart-tip-multi .chart-tip-value{font-size:var(--text-xs);font-weight:600;margin-left:auto}
+.chart-tip-name{flex:1 1 auto;min-width:0;font-size:var(--text-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Legend: the identity channel for a multi-series chart. The swatch carries the
    hue, the text stays in an ink token, and the series total rides along so the
    chart is readable without hovering. */
 .legend{list-style:none;display:flex;flex-wrap:wrap;gap:var(--space-1) var(--space-4);margin:var(--space-3) 0 0;padding:0}
-.legend-item{display:flex;align-items:center;gap:var(--space-2);font-size:12px;min-width:0}
+.legend-item{display:flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm);min-width:0}
 .legend-key{width:10px;height:10px;border-radius:2px;flex:0 0 auto}
 .legend-label{color:var(--text)}
 .legend-value{color:var(--muted);font-variant-numeric:tabular-nums}
-.chart-note{margin:var(--space-3) 0 0;font-size:12px}
+.chart-note{margin:var(--space-3) 0 0;font-size:var(--text-sm)}
 .run-timeline-row{outline:none}
 .run-timeline-row:hover .chart-bar,.run-timeline-row:focus-visible .chart-bar{filter:brightness(1.18)}
 .run-timeline-row:focus-visible{outline:2px solid var(--accent-dim);outline-offset:2px}
@@ -394,49 +568,74 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .table-scroll{overflow-x:auto;overscroll-behavior-x:contain}
 
 /* ---- segmented control (period selector) ---- */
-.seg{display:inline-flex;gap:2px;background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:2px}
-.seg-btn{background:transparent;color:var(--muted);padding:var(--space-2) var(--space-3);border-radius:4px;font-weight:600;font-size:12.5px}
-.seg-btn:hover{color:var(--text);opacity:1}
-.seg-btn.active{background:var(--panel3);color:var(--text)}
+.seg{display:inline-flex;gap:2px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:2px}
+.seg-btn{background:transparent;color:var(--muted);padding:var(--space-2) var(--space-3);border-radius:4px;font-weight:600;font-size:var(--text-sm)}
+.seg-btn:hover{color:var(--text)}
+.seg-btn.active{background:var(--surface-3);color:var(--text)}
 
 /* ---- keyboard shortcuts ---- */
-.kbd{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 var(--space-2);background:var(--panel3);border:1px solid var(--line);border-bottom-width:2px;border-radius:var(--radius-sm);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;font-weight:600;color:var(--text)}
+.kbd{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 var(--space-2);background:var(--surface-3);border:1px solid var(--line);border-bottom-width:2px;border-radius:var(--radius-sm);font-family:var(--font-mono);font-size:var(--text-xs);font-weight:600;color:var(--text)}
 .kbd-keys{display:inline-flex;gap:var(--space-1);flex:0 0 auto}
-.kbd-hint{display:inline-flex;align-items:center;gap:var(--space-2);font-size:12px}
-.kbd-overlay{position:fixed;inset:0;background:rgba(4,6,9,.62);display:flex;align-items:flex-start;justify-content:center;padding:80px var(--space-4) var(--space-6);overflow-y:auto;z-index:900}
-.kbd-legend{width:100%;max-width:440px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.kbd-hint{display:inline-flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm)}
+.kbd-overlay{position:fixed;inset:0;background:var(--scrim);display:flex;align-items:flex-start;justify-content:center;padding:80px var(--space-4) var(--space-6);overflow-y:auto;z-index:900}
+.kbd-legend{width:100%;max-width:440px;box-shadow:var(--shadow-3)}
 .kbd-legend-head{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-3)}
 .kbd-list{list-style:none;margin:0;padding:0;display:grid;gap:0}
 .kbd-row{display:flex;align-items:center;gap:var(--space-4);padding:var(--space-2) var(--space-1);border-bottom:1px solid var(--line)}
 .kbd-row:last-child{border-bottom:0}
-.kbd-row-label{font-size:13px}
+.kbd-row-label{font-size:var(--text-md)}
+
+/* ---- confirm dialog ---- */
+/* The same overlay as the palette, centred rather than top-aligned: a question
+   that stops the page should land where the eye already is, and it is short
+   enough that there is no list to scroll. */
+.confirm-overlay{align-items:center;padding:var(--space-5)}
+.dialog{width:100%;max-width:420px;padding:var(--space-5);box-shadow:var(--shadow-3)}
+.dialog-title{margin:0 0 var(--space-2);font-size:var(--text-lg);font-weight:650;line-height:1.35}
+.dialog-body{margin:0;color:var(--muted);font-size:var(--text-md);line-height:1.55}
+.dialog-actions{display:flex;justify-content:flex-end;gap:var(--space-2);margin-top:var(--space-5)}
+/* The form variant. Fields want more room than a two-line question does. */
+.dialog-wide{max-width:560px}
+
+/* ---- detail drawer ---- */
+/* Detail belongs beside the list that produced it. A row that opens a panel over
+   the table keeps the row and its context on screen, so reading one run does not
+   cost the place in the list you were reading from. */
+.drawer-scrim{position:fixed;inset:0;background:var(--scrim);z-index:800;animation:fade-in .12s ease}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(560px,100%);display:flex;flex-direction:column;background:var(--surface-1);border-left:1px solid var(--line);box-shadow:var(--shadow-3);z-index:801;animation:drawer-in .16s var(--ease)}
+.drawer-head{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--space-3);padding:var(--space-4) var(--space-5);border-bottom:1px solid var(--line)}
+.drawer-title{margin:0;font-size:var(--text-lg);font-weight:650;min-width:0;overflow-wrap:anywhere}
+.drawer-body{padding:var(--space-5);overflow-y:auto;display:flex;flex-direction:column;gap:var(--space-4)}
+@keyframes drawer-in{from{transform:translateX(16px);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes fade-in{from{opacity:0}to{opacity:1}}
+@media(prefers-reduced-motion:reduce){.drawer,.drawer-scrim{animation:none}}
 
 /* ---- command palette (Cmd/Ctrl+K) ---- */
 /* Same overlay chrome as the shortcut legend, with the list padded out of the card
    edge so the highlighted row has somewhere to sit. */
-.cmd{width:100%;max-width:560px;padding:0;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5)}
-.cmd-input{width:100%;background:transparent;border:0;border-bottom:1px solid var(--line);padding:var(--space-4);font-size:15px;outline:none}
+.cmd{width:100%;max-width:560px;padding:0;overflow:hidden;box-shadow:var(--shadow-3)}
+.cmd-input{width:100%;background:transparent;border:0;border-bottom:1px solid var(--line);padding:var(--space-4);font-size:var(--text-lg);outline:none}
 .cmd-list{list-style:none;margin:0;padding:var(--space-2);display:flex;flex-direction:column;gap:2px;max-height:min(60vh,420px);overflow-y:auto}
-.cmd-group{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:var(--space-2) var(--space-3) var(--space-1)}
+.cmd-group{font-size:var(--text-xs);text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:var(--space-2) var(--space-3) var(--space-1)}
 .cmd-item{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);cursor:pointer}
-.cmd-item.active{background:var(--panel3)}
-.cmd-item-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px}
+.cmd-item.active{background:var(--surface-3)}
+.cmd-item-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--text-md)}
 /* The characters a fuzzy query matched. `mark`'s own yellow is not this theme. */
 .cmd-hit{background:none;color:var(--accent);font-weight:700}
-.cmd-item-hint{font-size:11.5px;color:var(--muted);flex:0 0 auto}
+.cmd-item-hint{font-size:var(--text-xs);color:var(--muted);flex:0 0 auto}
 .cmd-empty{padding:var(--space-5) var(--space-3);text-align:center}
-.cmd-foot{display:flex;gap:var(--space-4);border-top:1px solid var(--line);padding:var(--space-2) var(--space-4);font-size:11.5px;color:var(--muted)}
+.cmd-foot{display:flex;gap:var(--space-4);border-top:1px solid var(--line);padding:var(--space-2) var(--space-4);font-size:var(--text-xs);color:var(--muted)}
 
 /* ---- task picker ----
    The palette's list classes, in a form field rather than in a dialog: an id is
    not something a person has in hand, so the parent is chosen by title. */
-.task-picker .cmd-list{max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel2)}
+.task-picker .cmd-list{max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-2)}
 /* The input and its clear affordance. This is the positioning context rather
    than the field, so the ✕ centres on the input and not on the label above it. */
 .task-picker-wrap{position:relative}
 .task-picker-wrap .input{padding-right:var(--space-6)}
-.task-picker-clear{position:absolute;right:var(--space-2);top:50%;transform:translateY(-50%);background:none;border:0;color:var(--muted);padding:var(--space-1);border-radius:var(--radius-sm);font-size:13px;line-height:1}
-.task-picker-clear:hover{background:var(--panel3);color:var(--text);opacity:1}
+.task-picker-clear{position:absolute;right:var(--space-2);top:50%;transform:translateY(-50%);background:none;border:0;color:var(--muted);padding:var(--space-1);border-radius:var(--radius-sm);font-size:var(--text-md);line-height:1}
+.task-picker-clear:hover{background:var(--surface-3);color:var(--text)}
 
 /* ---- toolbar / tabs ---- */
 .tasks-head{display:grid;gap:var(--space-3);margin-bottom:var(--space-4)}
@@ -457,7 +656,7 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .tasks-actions .input,.tasks-actions .btn{height:calc(1.5em + var(--space-2) * 2 + 2px)}
 .tasks-tabs{display:flex;align-items:center;gap:var(--space-3);border-bottom:1px solid var(--line)}
 .tasks-tabs .tabs{border-bottom:0;flex:1;min-width:0}
-.switch{display:inline-flex;align-items:center;gap:var(--space-2);font-size:12.5px;color:var(--muted);white-space:nowrap;cursor:pointer}
+.switch{display:inline-flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm);color:var(--muted);white-space:nowrap;cursor:pointer}
 .switch:hover{color:var(--text)}
 .field.inline{display:inline-flex;align-items:center;gap:var(--space-2)}
 .field.inline .input{width:auto}
@@ -466,10 +665,10 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* The ✕ that closes the inline form. A glyph rather than a word, so it drops the
    accent a primary action carries and takes a square box of its own - which is also
    what keeps it off the 12px underlined .link-btn it would otherwise inherit. */
-.icon-btn{background:transparent;color:var(--muted);border:0;padding:0;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-size:15px;line-height:1;border-radius:var(--radius-sm)}
-.icon-btn:hover{background:var(--panel3);color:var(--text);opacity:1}
+.icon-btn{background:transparent;color:var(--muted);border:0;padding:0;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-size:var(--text-lg);line-height:1;border-radius:var(--radius-sm)}
+.icon-btn:hover{background:var(--surface-3);color:var(--text)}
 .inline-form-foot{justify-content:flex-end}
-.inline-form-foot .muted{margin-right:auto;font-size:12px}
+.inline-form-foot .muted{margin-right:auto;font-size:var(--text-sm)}
 .inline-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-3)}
 .view-toolbar{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-4);flex-wrap:wrap}
 /* A toolbar holding a single action has nothing to sit opposite, and space-between
@@ -494,10 +693,14 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* Never shrunk. A flex item shrinks by default, and a tab squeezed below its content
    wraps its label away from its count - which is the wrapping the rule above exists to
    avoid. Holding its width is what makes the strip scroll. */
-.tab{background:transparent;color:var(--muted);border-radius:0;padding:var(--space-2) var(--space-4);font-weight:600;flex-shrink:0}
-.tab:hover{background:transparent;color:var(--text);opacity:1}
+/* Sentence case, never shouted. The label is a word a person reads - "Plan",
+   "Execute" - and upper-casing it in the sheet or in the view turns the tab strip
+   into a row of abbreviations. `text-transform:none` is stated rather than
+   inherited so a tab inside an uppercased ancestor stays readable. */
+.tab{background:transparent;color:var(--muted);border-radius:0;padding:var(--space-2) var(--space-4);font-weight:600;font-size:var(--text-md);flex-shrink:0;text-transform:none;letter-spacing:normal}
+.tab:hover{background:transparent;color:var(--text)}
 .tab.active{color:var(--text);border-bottom:2px solid var(--accent)}
-.tab-count{color:var(--muted);font-weight:500;font-size:12px}
+.tab-count{color:var(--muted);font-weight:500;font-size:var(--text-sm)}
 .tab.active .tab-count{color:var(--accent)}
 /* A revision that landed while the user was on another tab. Not .tab-count, which is
    for numbers: this is a flag, and there is only ever one of it. */
@@ -509,8 +712,8 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    this is the thing to press. */
 /* Between the tab rule and the tab's own content, so it takes the same 16px on both
    sides - the step .tab-content already uses below it. */
-.next-step-banner{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap;font-size:13px;padding:var(--space-3) var(--space-4);border:1px solid var(--accent-dim);border-radius:var(--radius-sm);background:var(--panel2);margin:var(--space-4) 0}
-.next-step-banner .btn{padding:var(--space-2) var(--space-3);font-size:12.5px}
+.next-step-banner{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap;font-size:var(--text-md);padding:var(--space-3) var(--space-4);border:1px solid var(--accent-dim);border-radius:var(--radius-sm);background:var(--surface-2);margin:var(--space-4) 0}
+.next-step-banner .btn{padding:var(--space-2) var(--space-3);font-size:var(--text-sm)}
 
 /* ---- task detail ---- */
 /* A step above the scale's 6px rounding: the tabs sit directly under this, and at
@@ -521,36 +724,46 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    title is for. */
 .task-header{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-4);margin-bottom:var(--space-3)}
 .task-header>.link{white-space:nowrap;flex-shrink:0}
-.task-meta{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap;font-size:12.5px;margin-top:var(--space-2)}
-.task-description{margin:var(--space-3) 0 0;color:var(--muted);font-size:13.5px;line-height:1.55;max-width:700px;white-space:pre-line}
+/* The task's state sits beside its name rather than in the meta line below it. The
+   state is the first thing a person checks when they open a task, and it was
+   third in a row of grey text. */
+.task-title-row{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap}
+.task-title-row h1{margin:0;min-width:0}
+.task-header-actions{display:flex;align-items:center;gap:var(--space-2);flex:0 0 auto}
+.task-meta{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap;font-size:var(--text-sm);margin-top:var(--space-2)}
+/* The task's id, shortened and copyable. It reads as a chip rather than as text a
+   person is meant to read, because it is not - it is the handle for everything
+   outside this page, and clicking it is how it gets there. */
+.id-chip{display:inline-flex;align-items:center;font-family:var(--font-mono);font-size:var(--text-xs);color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:1px var(--space-2);cursor:pointer}
+.id-chip:hover{color:var(--text);border-color:var(--line-strong)}
+.task-description{margin:var(--space-3) 0 0;color:var(--muted);font-size:var(--text-md);line-height:1.55;max-width:700px;white-space:pre-line}
 /* The header's left column is a title, a meta line, then whichever of the description
    or the parent buttons the task has - not a .stack, so nothing spaces the last of
    them. On a task with no description the Link parent row sat on the meta line itself;
    the .stack step, which is what this row would have been given anywhere else. Scoped
    past the header's own .card so the editor inside it keeps its single 12px gap. */
 .task-header>div>.row{margin-top:var(--space-3)}
-.action-bar{margin-top:var(--space-6);padding-top:var(--space-4);border-top:1px solid var(--line);display:flex;justify-content:flex-end}
-.activity-box{position:relative;max-height:560px;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4)}
-.activity-notice{position:sticky;top:calc(-1 * var(--space-4));z-index:2;margin:calc(-1 * var(--space-4)) calc(-1 * var(--space-4)) var(--space-3);padding:var(--space-2) var(--space-4);background:var(--panel);border-bottom:1px solid var(--line);font-size:12px;color:var(--muted);display:flex;align-items:center;gap:var(--space-2)}
-.link-btn{background:none;border:0;padding:0;color:var(--accent);font:inherit;font-size:12px;font-weight:600;text-decoration:underline;cursor:pointer}
+.activity-box{position:relative;max-height:560px;overflow:auto;background:var(--surface-1);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4)}
+.activity-notice{position:sticky;top:calc(-1 * var(--space-4));z-index:2;margin:calc(-1 * var(--space-4)) calc(-1 * var(--space-4)) var(--space-3);padding:var(--space-2) var(--space-4);background:var(--surface-1);border-bottom:1px solid var(--line);font-size:var(--text-sm);color:var(--muted);display:flex;align-items:center;gap:var(--space-2)}
+.link-btn{background:none;border:0;padding:0;color:var(--accent);font:inherit;font-size:var(--text-sm);font-weight:600;text-decoration:underline;cursor:pointer}
 .link-btn:hover{opacity:1;text-decoration:none}
 .jump-btn{position:sticky;bottom:var(--space-3);margin:var(--space-3) auto 0;display:block}
 /* The revision notice, and the same shape reused for the mid-edit one. Neutral rather
    than a warning tone: a revision landing is the thing that was asked for. */
-.plan-notice{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;font-size:13px;padding:var(--space-2) var(--space-3);border:1px solid var(--accent-dim);border-radius:var(--radius-sm);background:var(--panel2)}
+.plan-notice{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;font-size:var(--text-md);padding:var(--space-2) var(--space-3);border:1px solid var(--accent-dim);border-radius:var(--radius-sm);background:var(--surface-2)}
 .plan-live{margin-bottom:0}
-.plan-action{margin-top:var(--space-2);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plan-action{margin-top:var(--space-2);font-size:var(--text-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* ---- event stream ---- */
 .event-stream{display:flex;flex-direction:column;gap:var(--space-2)}
-.event-row{display:flex;align-items:baseline;gap:var(--space-3);border-left:2px solid var(--line);padding:var(--space-2) 0 var(--space-2) var(--space-3);font-size:13px}
+.event-row{display:flex;align-items:baseline;gap:var(--space-3);border-left:2px solid var(--line);padding:var(--space-2) 0 var(--space-2) var(--space-3);font-size:var(--text-md)}
 /* The kind column is a fixed width so the badges stack into a scannable column
    rather than each row starting at its own offset, and the clock is pushed to the
    right edge instead of riding the end of a variable-length message. */
 .event-row .badge{min-width:76px;justify-content:center}
-.event-row:hover{background:rgba(255,255,255,.02)}
+.event-row:hover{background:var(--wash)}
 .event-msg{flex:1;word-break:break-word}
-.event-time{font-size:11.5px;white-space:nowrap;font-variant-numeric:tabular-nums;margin-left:auto;padding-left:var(--space-3)}
+.event-time{font-size:var(--text-xs);white-space:nowrap;font-variant-numeric:tabular-nums;margin-left:auto;padding-left:var(--space-3)}
 /* The left rule carries the kind, so a column of rows can be scanned without reading
    every badge. Quiet kinds - a tool's output, a reasoning trace, a notice - recede
    to the muted colour; they are context for the row above them, not news. */
@@ -571,35 +784,35 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* Next steps in the port tab: a numbered list where each step may carry the command
    that performs it. The command is a block rather than inline, so it can be selected
    and copied whole instead of by drag. */
-.steps{margin:0;padding-left:var(--space-5);display:grid;gap:var(--space-3);font-size:13px}
+.steps{margin:0;padding-left:var(--space-5);display:grid;gap:var(--space-3);font-size:var(--text-md)}
 .steps li{padding-left:2px}
 .steps .code-block{margin:var(--space-2) 0 0}
 /* The port verdict. The left rule carries the state's tone the way the activity feed's
    rules carry an event's kind, so the answer is legible before the words are read. */
-.port-state{background:var(--panel);border:1px solid var(--line);border-left-width:3px;border-radius:var(--radius);padding:var(--space-4)}
+.port-state{background:var(--surface-1);border:1px solid var(--line);border-left-width:3px;border-radius:var(--radius);padding:var(--space-4)}
 .port-state.good{border-left-color:var(--good)}
 .port-state.warn{border-left-color:var(--warn)}
 .port-state.bad{border-left-color:var(--bad)}
 .port-state.neutral{border-left-color:var(--accent-dim)}
 .port-head{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;margin-bottom:var(--space-2)}
-.port-head h2{margin:0;font-size:15px;color:var(--text)}
+.port-head h2{margin:0;font-size:var(--text-lg);color:var(--text)}
 .port-state p{margin:0}
-.port-result{margin-top:var(--space-3);color:var(--good);font-size:13px}
+.port-result{margin-top:var(--space-3);color:var(--good);font-size:var(--text-md)}
 /* The commits to be able to name. Referenceable rather than described: a hash is what
    you paste into git, and the subject is what makes it recognisable in a log. */
 .refs{margin-top:var(--space-3);display:grid;gap:var(--space-2)}
-.ref{display:flex;align-items:baseline;gap:var(--space-2);flex-wrap:wrap;font-size:12.5px}
-.ref-sha{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:var(--panel3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:1px var(--space-2);color:var(--accent)}
+.ref{display:flex;align-items:baseline;gap:var(--space-2);flex-wrap:wrap;font-size:var(--text-sm)}
+.ref-sha{font-family:var(--font-mono);font-size:var(--text-sm);background:var(--surface-3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:1px var(--space-2);color:var(--accent)}
 .ref-subject{color:var(--text)}
 .diff-modes{display:flex;gap:var(--space-2);justify-content:flex-end;margin-bottom:var(--space-2)}
-.diff-modes .btn{padding:var(--space-1) var(--space-3);font-size:11.5px;font-weight:600}
+.diff-modes .btn{padding:var(--space-1) var(--space-3);font-size:var(--text-xs);font-weight:600}
 .diff-modes .btn.on{color:var(--accent);border-color:var(--accent-dim)}
-.diff-viewer{background:#090b0e;border:1px solid var(--line);border-radius:var(--radius);overflow:auto;max-height:520px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.diff-viewer{background:var(--surface-sunken);border:1px solid var(--line);border-radius:var(--radius);overflow:auto;max-height:520px;font-family:var(--font-mono);font-size:var(--text-sm)}
 .diff-line{display:flex;gap:var(--space-3);padding:1px var(--space-3)}
 .diff-lineno{color:var(--muted);width:36px;text-align:right;flex:0 0 auto;user-select:none}
-.diff-add{background:rgba(111,224,161,.10);color:var(--good)}
-.diff-del{background:rgba(255,133,133,.10);color:var(--bad)}
-.diff-hunk{color:var(--accent);background:rgba(159,185,255,.08)}
+.diff-add{background:var(--good-bg);color:var(--good)}
+.diff-del{background:var(--bad-bg);color:var(--bad)}
+.diff-hunk{color:var(--accent);background:var(--info-bg)}
 .diff-file,.diff-meta{color:var(--muted)}
 /* Split view. Each row is its own two-column grid rather than one grid for the whole
    diff, so a span - a file header, a mode change, a hunk header - takes the width
@@ -610,7 +823,7 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .diff-cell{display:flex;gap:var(--space-3);padding:1px var(--space-3);min-width:0}
 .diff-cell+.diff-cell{border-left:1px solid var(--line)}
 .diff-span{padding:1px var(--space-3)}
-.diff-blank{background:rgba(255,255,255,.02)}
+.diff-blank{background:var(--wash)}
 
 /* ---- terminal ----
    The host is what xterm's fit addon measures: it reads that element's computed height
@@ -620,7 +833,7 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    then draws past - the last row is clipped. The inset between the border and the
    terminal is the box's padding for that reason, and the box is never measured. */
 .terminal-frame{display:flex;flex-direction:column;gap:var(--space-2)}
-.terminal-bar{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;font-size:12.5px;color:var(--muted);min-height:20px}
+.terminal-bar{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;font-size:var(--text-sm);color:var(--muted);min-height:20px}
 .terminal-bar code{color:var(--text)}
 .terminal-box{background:var(--bg);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;padding:var(--space-2)}
 .terminal-host{height:clamp(320px,56vh,640px)}
@@ -636,7 +849,7 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 /* The worktree terminal while an agent run is writing the same directory. A warning
    and not a lock: watching a run is a reason to be in here, and a read-only `git log`
    mid-run is harmless. */
-.terminal-warn{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;font-size:13px;padding:var(--space-2) var(--space-3);border:1px solid #5c4a2c;border-radius:var(--radius-sm);background:rgba(255,211,122,.08);color:var(--warn)}
+.terminal-warn{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;font-size:var(--text-md);padding:var(--space-2) var(--space-3);border:1px solid var(--warn-line);border-radius:var(--radius-sm);background:var(--warn-bg);color:var(--warn)}
 
 /* ---- providers ---- */
 .provider-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-4)}
@@ -649,10 +862,10 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .health.warn{background:var(--warn)}
 .health.bad{background:var(--bad)}
 .model-list{display:grid;gap:var(--space-2)}
-.model-row{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-3);background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-3)}
-.test-result{border-radius:var(--radius-sm);padding:var(--space-2) var(--space-3);font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;word-break:break-word}
-.test-result.good{background:rgba(111,224,161,.08);color:var(--good);border:1px solid #2c5c46}
-.test-result.bad{background:rgba(255,133,133,.08);color:var(--bad);border:1px solid #5c2c2c}
+.model-row{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-3);background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-3)}
+.test-result{border-radius:var(--radius-sm);padding:var(--space-2) var(--space-3);font-size:var(--text-sm);font-family:var(--font-mono);word-break:break-word}
+.test-result.good{background:var(--good-bg);color:var(--good);border:1px solid var(--good-line)}
+.test-result.bad{background:var(--bad-bg);color:var(--bad);border:1px solid var(--bad-line)}
 
 /* ---- chat ----
    Laid out the way the chat UIs everyone already reads are: one centered column
@@ -677,14 +890,14 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .chat-turn+.chat-turn{margin-top:var(--space-6)}
 /* A small name above the reply, the way the reference UIs do it - with no box
    around the answer, it is the only thing that says who is talking. */
-.chat-role{font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:var(--space-2)}
+.chat-role{font-size:var(--text-xs);font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:var(--space-2)}
 /* The user's own words: a bubble, hard right, capped at 75% so the indent reads
    as a reply rather than as a second column of text. */
 .chat-turn[data-role="user"]{align-items:flex-end}
 .chat-turn[data-role="user"] .chat-bubble{max-width:75%;background:var(--accent-dim);color:var(--text);border-radius:var(--radius) var(--radius) var(--space-1) var(--radius);padding:var(--space-3) var(--space-4)}
 /* pre-wrap because a question written with Shift+Enter is written in lines, and
    collapsing them throws away the shape the person typed. */
-.user-message{font-size:14px;line-height:1.5;white-space:pre-wrap}
+.user-message{font-size:var(--text-md);line-height:1.5;white-space:pre-wrap}
 /* The assistant's reply: no box at all, the markdown flowing straight down the
    column. Boxing both turns is what made the two look like the same thing - and
    the box is not the bubble's, it is `.md`'s own: that one is drawn for a plan
@@ -695,51 +908,56 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    margins must not add to it - they protruded past the first and last line. */
 .chat-turn .md>:first-child{margin-top:0}
 .chat-turn .md>:last-child{margin-bottom:0}
-.chat-bubble .md pre{background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-3);overflow-x:auto;font-size:12px}
+.chat-bubble .md pre{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-3);overflow-x:auto;font-size:var(--text-sm)}
 /* The composer is the shell. Its border, radius and surface are the input's
    chrome, and the textarea inside it is borderless: one shape, not a box sat
    beside a button. */
-.chat-composer{display:flex;align-items:flex-end;gap:var(--space-2);margin:0 var(--space-4) var(--space-2);padding:var(--space-2) var(--space-2) var(--space-2) var(--space-4);background:var(--panel2);border:1px solid var(--line);border-radius:20px}
+.chat-composer{display:flex;align-items:flex-end;gap:var(--space-2);margin:0 var(--space-4) var(--space-2);padding:var(--space-2) var(--space-2) var(--space-2) var(--space-4);background:var(--surface-2);border:1px solid var(--line);border-radius:20px}
 .chat-composer:focus-within{border-color:var(--accent-dim)}
 /* TextArea renders a <label class="field"> around the textarea, so the label is
    the flex item that has to grow. The `textarea{flex:1}` that used to be here
    targeted a descendant and never fired, which is what left the field sitting at
    content width with the button stretched to full height beside it. */
 .chat-composer .field{flex:1;min-width:0;gap:0}
-.chat-composer textarea{flex:1;min-height:24px;max-height:200px;padding:var(--space-1) 0;border:none;background:transparent;font-family:inherit;font-size:14px;line-height:1.5;resize:none;overflow-y:auto}
+.chat-composer textarea{flex:1;min-height:24px;max-height:200px;padding:var(--space-1) 0;border:none;background:transparent;font-family:inherit;font-size:var(--text-md);line-height:1.5;resize:none;overflow-y:auto}
 /* The app-wide focus ring marks a control that is separately focusable, and this
    one is not: the shell's own border is the indicator, and it wraps the send
    button too. Without this the textarea drew a second rectangle inside the pill. */
 .chat-composer .input:focus-visible{outline:none}
 /* A small circle in the corner, not a rectangle stretched to the pill's height -
    the single biggest visual tell of the layouts this is modelled on. */
-.chat-composer button{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border-radius:50%;font-size:16px;line-height:1}
+/* The one button in the app that is not a `.btn`: the composer's send affordance
+   is a circle inside the input's shell, so it carries its own geometry and takes
+   the accent fill explicitly - the bare `button` rule paints nothing. */
+.chat-composer button{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border-radius:50%;background:var(--accent);color:var(--on-accent);font-size:var(--text-lg);line-height:1;transition:filter var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease)}
+.chat-composer button:hover:not(:disabled){filter:brightness(1.16)}
+.chat-composer button:active:not(:disabled){transform:translateY(1px)}
 .chat-composer button:disabled{opacity:.4;cursor:default}
 /* The keybinding hint lives under the composer rather than in the placeholder,
    which is gone the moment somebody starts typing - the one moment it matters. */
-.chat-hint{margin:0 var(--space-4) var(--space-4);font-size:11.5px;color:var(--muted);text-align:center}
+.chat-hint{margin:0 var(--space-4) var(--space-4);font-size:var(--text-xs);color:var(--muted);text-align:center}
 .sessions-list{display:grid;gap:var(--space-2)}
 /* The row is a link into the session with its controls beside it, so the name and
    the meta line take the width and the buttons keep their own. Stop and Archive are
    here rather than only inside the session because stopping something that is
    working should not require opening the thing that is working. */
-.session-item{padding:var(--space-3);background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);cursor:pointer;transition:all 200ms;display:flex;align-items:center;gap:var(--space-3)}
-.session-item:hover{background:var(--panel);border-color:var(--accent-dim)}
+.session-item{padding:var(--space-3);background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius-sm);cursor:pointer;transition:all 200ms;display:flex;align-items:center;gap:var(--space-3)}
+.session-item:hover{background:var(--surface-1);border-color:var(--accent-dim)}
 .session-info{min-width:0;flex:1}
 .session-title{font-weight:600;color:var(--text);display:inline-flex;align-items:center;gap:var(--space-2);min-width:0}
-.session-date{font-size:12px;color:var(--muted);margin-top:var(--space-1)}
+.session-date{font-size:var(--text-sm);color:var(--muted);margin-top:var(--space-1)}
 .session-actions{display:flex;gap:var(--space-2);flex:none}
 .card-header{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3)}
 .card-header h1{margin:0;display:inline-flex;align-items:center;gap:var(--space-2)}
-.back-btn{padding:var(--space-2) var(--space-3);font-size:14px}
+.back-btn{padding:var(--space-2) var(--space-3);font-size:var(--text-md)}
 /* The live turn is a row: a spinner and a phrase, sat where the answer will
    land. There is no bubble to anchor to, so the two are aligned to each other.
    The spinner's own wrapper pads itself for the full-page loading blocks, which
    is the one place that padding is not wanted. */
 .chat-turn.answering{flex-direction:row;align-items:center;gap:var(--space-2)}
 .chat-turn.answering .spinner-wrap{padding:0}
-.chat-live{color:var(--muted);font-size:12px;font-style:italic}
-.chat-error{color:var(--bad);font-size:13px;padding:var(--space-2) var(--space-3);background:rgba(255,133,133,.08);border:1px solid #5c2c2c;border-radius:var(--radius-sm);margin:var(--space-2) 0}
+.chat-live{color:var(--muted);font-size:var(--text-sm);font-style:italic}
+.chat-error{color:var(--bad);font-size:var(--text-md);padding:var(--space-2) var(--space-3);background:var(--bad-bg);border:1px solid var(--bad-line);border-radius:var(--radius-sm);margin:var(--space-2) 0}
 
 /* ---- supervised sessions ---- */
 /* The permission panel is the one element on the page that is blocking something,
@@ -747,46 +965,53 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    card in the column: an agent that has asked a question has stopped, and the
    answer is the only thing that moves it. The warm border is what makes it read as
    a prompt rather than as another panel. */
-.session-permission{margin:0 var(--space-4) var(--space-3);padding:var(--space-4);background:var(--panel2);border:1px solid var(--warn);border-radius:var(--radius);box-shadow:0 4px 18px rgba(0,0,0,.35)}
+.session-permission{margin:0 var(--space-4) var(--space-3);padding:var(--space-4);background:var(--surface-2);border:1px solid var(--warn);border-radius:var(--radius);box-shadow:var(--shadow-2)}
 .session-permission-head{display:flex;align-items:center;gap:var(--space-3);margin-bottom:var(--space-2)}
-.session-permission-tool{font-weight:650;font-size:14px}
+.session-permission-tool{font-weight:650;font-size:var(--text-md)}
 /* Tabular figures and a right-aligned slot: a number that changes width every
    second shifts the tool name beside it, which is a panel that twitches. */
-.session-permission-clock{margin-left:auto;font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.session-permission-clock{margin-left:auto;font-size:var(--text-sm);color:var(--muted);font-variant-numeric:tabular-nums}
 .session-permission-clock.urgent{color:var(--bad);font-weight:650}
-.session-permission-path{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;color:var(--text);word-break:break-all;white-space:pre-wrap}
-.session-permission-body{margin:var(--space-2) 0 0;padding:var(--space-3);max-height:240px;overflow:auto;background:var(--bg,var(--panel));border:1px solid var(--line);border-radius:var(--radius-sm);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-all}
+.session-permission-path{font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text);word-break:break-all;white-space:pre-wrap}
+.session-permission-body{margin:var(--space-2) 0 0;padding:var(--space-3);max-height:240px;overflow:auto;background:var(--bg,var(--surface-1));border:1px solid var(--line);border-radius:var(--radius-sm);font-family:var(--font-mono);font-size:var(--text-sm);line-height:1.5;white-space:pre-wrap;word-break:break-all}
 .session-permission-foot{display:flex;align-items:center;gap:var(--space-3);margin-top:var(--space-3)}
-.session-permission-foot .muted{font-size:12px;word-break:break-all}
+.session-permission-foot .muted{font-size:var(--text-sm);word-break:break-all}
 .session-permission-foot .row{margin-left:auto}
-.session-banner{padding:var(--space-3) var(--space-4);font-size:13px}
+.session-banner{padding:var(--space-3) var(--space-4);font-size:var(--text-md)}
 .session-controls{gap:var(--space-2)}
 /* The rename field stands in for the heading, so it is sized like one rather than
    like a form control: the same weight and scale, and it yields rather than pushing
    Save and Cancel onto a second row when the header runs out of width. */
-.card-header>.session-rename{flex:1 1 auto;min-width:0;max-width:420px;font-size:18px;font-weight:650}
+.card-header>.session-rename{flex:1 1 auto;min-width:0;max-width:420px;font-size:var(--text-xl);font-weight:650}
 /* The meter sits above the activity list rather than beside it, because the two
    answer the same question in different units: what this session is costing. */
-.session-budget{padding:0 var(--space-4) var(--space-3);font-size:12.5px}
-.session-budget-figure{font-size:20px;font-weight:650;color:var(--text);margin-top:2px}
-.session-budget-figure .muted{font-size:12px;font-weight:400}
-.session-caveat{margin:var(--space-3) 0 0;font-size:12.5px}
+.session-budget{padding:0 var(--space-4) var(--space-3);font-size:var(--text-sm)}
+.session-budget-figure{font-size:var(--text-xl);font-weight:650;color:var(--text);margin-top:2px}
+.session-budget-figure .muted{font-size:var(--text-sm);font-weight:400}
+.session-caveat{margin:var(--space-3) 0 0;font-size:var(--text-sm)}
 
 /* ---- data table ---- */
 .data-table{width:100%;border-collapse:collapse}
 .data-table th,.data-table td{padding:var(--space-3);border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-.data-table th{color:var(--muted);font-weight:600;font-size:12.5px;user-select:none}
+.data-table th{color:var(--muted);font-weight:600;font-size:var(--text-sm);user-select:none}
 .data-table th.sortable{cursor:pointer}
 .data-table th.sortable:hover{color:var(--text)}
-.sort-arrow{margin-left:var(--space-1);font-size:10px}
+.sort-arrow{margin-left:var(--space-1);font-size:var(--text-xs)}
+/* A link inside a table cell is the row's subject, not a footnote: it takes the
+   app's accent but not the browser's default blue, and it is underlined only when
+   pointed at, so a column of titles does not read as a column of underlines. */
+.data-table td a{color:var(--accent);text-decoration:none}
+.data-table td a:hover{text-decoration:underline}
+.data-table td a.muted{color:var(--muted)}
+.data-table td a.muted:hover{color:var(--text)}
 .data-table tr.clickable{cursor:pointer}
-.data-table tr.clickable:hover td{background:var(--panel2)}
+.data-table tr.clickable:hover td{background:var(--surface-2)}
 /* The row the arrow keys are on. Same wash as hover, so pointer and keyboard land
    on the same affordance. */
-.data-table tr.focused td{background:var(--panel2);box-shadow:inset 2px 0 0 var(--accent)}
+.data-table tr.focused td{background:var(--surface-2);box-shadow:inset 2px 0 0 var(--accent)}
 /* The header stays put while a long table scrolls under it. The background is not
    decoration: a sticky cell shows the rows behind it without one. */
-.data-table thead th{position:sticky;top:0;background:var(--panel);z-index:1}
+.data-table thead th{position:sticky;top:0;background:var(--surface-1);z-index:1}
 .data-table:focus-visible{outline:2px solid var(--accent-dim);outline-offset:-2px}
 
 @media(max-width:1000px){
@@ -807,13 +1032,11 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
     transform:translateX(-105%);
     visibility:hidden; /* off-canvas links stay out of tab order and the a11y tree */
     transition:transform .18s ease,visibility 0s linear .18s;
-    box-shadow:0 0 24px rgba(0,0,0,.5);
+    box-shadow:var(--shadow-3);
   }
   .app-shell.nav-open .sidebar{transform:translateX(0);visibility:visible;transition:transform .18s ease}
-  .nav-backdrop{display:block;position:fixed;inset:0;background:rgba(4,6,9,.62);z-index:940} /* the kbd-overlay dim */
+  .nav-backdrop{display:block;position:fixed;inset:0;background:var(--scrim);z-index:940} /* the kbd-overlay dim */
   .nav-toggle{display:inline-flex;align-items:center;justify-content:center}
-  .app-header{display:flex;align-items:center;gap:var(--space-3)}
-  .header-title{flex:1} /* keeps the ellipsis working in the flex row */
   .sidebar-toggle{display:none} /* collapsing is a desktop rail concept; the drawer is always expanded */
   /* The drawer must not inherit the icon-only rail from a desktop collapse (the
      preference persists in localStorage): re-expand it. */
@@ -844,8 +1067,8 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   .app-header,.content{padding-left:var(--space-4);padding-right:var(--space-4)}
   .app-header{padding-top:var(--space-4)}
   .content{padding-bottom:var(--space-7)}
-  .header-title{font-size:19px}
-  .metric-value{font-size:23px}
+  .header-title{font-size:var(--text-xl)}
+  .metric-value{font-size:var(--text-xl)}
   /* Long titles and paths must break rather than widen the page. */
   .list-row-main{min-width:0}
   .list-row-main b,.list-row-main span{overflow-wrap:anywhere}
@@ -875,10 +1098,11 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
      specificity, because both would otherwise win on source order. */
   .card.chat-card{padding:0;overflow:hidden}
 }
-/* Narrow phones: a two-up metric row leaves too little room for the value. */
+/* Narrow phones: a two-up metric row leaves too little room for the value. The
+   figure is already at --text-xl from the 650px block above, so only the grid
+   changes here. */
 @media(max-width:400px){
   .metric-grid{grid-template-columns:1fr}
-  .metric-value{font-size:21px}
 }
 /* ---- touch ----
    A finger is not a mouse. The desktop sizes above are set for a pointer that lands
@@ -890,8 +1114,10 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   .icon-btn{width:44px}
   .tab{padding:var(--space-3) var(--space-4)}
   /* Every field in the app carries `.input`, selects and textareas included. */
-  /* A tap leaves a hover style stuck until the next tap lands elsewhere. */
-  .btn:hover,.tab:hover,.seg-btn:hover{opacity:1}
+  /* A tap leaves a hover style stuck until the next tap lands elsewhere. Both
+     halves of the hover have to be dropped: the wash and the brightness lift. */
+  .btn:hover,.tab:hover,.seg-btn:hover{opacity:1;filter:none}
+  .btn.ghost:hover{background:transparent;color:var(--muted)}
 }
 /* ---- installed ----
    `viewport-fit=cover` puts the page under the status bar and the home indicator, so
@@ -908,10 +1134,11 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    nothing to navigate to. */
 .token-gate{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:var(--space-5)}
 .token-card{display:flex;flex-direction:column;gap:var(--space-3);width:100%;max-width:360px;padding:var(--space-6)}
-.token-card .logo-title{font-size:20px;letter-spacing:.14em}
-.token-hint{margin:0;font-size:13px;line-height:1.55;color:var(--muted)}
-.token-hint code{color:var(--text);background:var(--panel3);padding:1px var(--space-1);border-radius:4px;overflow-wrap:anywhere}
-.token-error{font-size:13px;color:var(--bad)}
+.token-card .logo-title{font-size:var(--text-xl)}
+.token-card .logo-mark{width:24px;height:24px}
+.token-hint{margin:0;font-size:var(--text-md);line-height:1.55;color:var(--muted)}
+.token-hint code{color:var(--text);background:var(--surface-3);padding:1px var(--space-1);border-radius:4px;overflow-wrap:anywhere}
+.token-error{font-size:var(--text-md);color:var(--bad)}
 /* ---- server control ----
    The stopped panel shares the pairing screen's centring, because it is the same
    kind of screen: one card, one thing to do, nothing else to navigate to. The dot
@@ -919,9 +1146,10 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    carries one too, and it is the dashboard's own machine that it reports on. */
 .server-panel{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:var(--space-5)}
 .server-card{display:flex;flex-direction:column;gap:var(--space-3);width:100%;max-width:440px;padding:var(--space-6)}
-.server-card .logo-title{font-size:20px;letter-spacing:.14em}
-.server-card p{margin:0;font-size:13px;line-height:1.55}
-.server-card code{color:var(--text);background:var(--panel3);padding:1px var(--space-1);border-radius:4px;overflow-wrap:anywhere}
+.server-card .logo-title{font-size:var(--text-xl)}
+.server-card .logo-mark{width:24px;height:24px}
+.server-card p{margin:0;font-size:var(--text-md);line-height:1.55}
+.server-card code{color:var(--text);background:var(--surface-3);padding:1px var(--space-1);border-radius:4px;overflow-wrap:anywhere}
 .server-status{display:flex;align-items:center;gap:var(--space-2);font-weight:650}
 .status-dot{display:inline-block;flex:0 0 auto;width:8px;height:8px;border-radius:50%}
 .status-dot.good{background:var(--good)}

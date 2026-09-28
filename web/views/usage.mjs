@@ -1,11 +1,12 @@
-import { html, useState, useEffect, useMemo, formatTokens } from '../lib.mjs';
+import { html, useState, useEffect, useMemo, formatTokens, formatCost } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
+import { Time } from '../components/time.mjs';
 import { DataTable } from '../components/data-table.mjs';
-import { BarChart, StackedBarChart, seriesSlots, compactNumber, formatCost } from '../components/chart.mjs';
+import { BarChart, StackedBarChart, seriesSlots, compactNumber, axisCost } from '../components/chart.mjs';
 
 const PERIODS = [
   { value: '24h', label: '24h' },
@@ -103,11 +104,11 @@ export function Usage() {
     { key: 'provider', label: 'Provider', sortable: true, sortValue: (r) => r.provider || r.provider_id },
     { key: 'runs', label: 'Runs', sortable: true, render: (r) => Number(r.runs || 0).toLocaleString() },
     { key: 'tokens', label: 'Tokens', sortable: true, render: (r) => formatTokens(r.tokens) },
-    { key: 'cost', label: 'Cost', sortable: true, render: (r) => `$${Number(r.cost || 0).toFixed(6)}` },
+    { key: 'cost', label: 'Cost', sortable: true, render: (r) => formatCost(r.cost) },
     { key: 'failed', label: 'Failed', sortable: true, render: (r) => (r.failed ? html`<span class="error-text">${r.failed}</span>` : '—') },
     // Beside the count rather than in a tile of its own: "which provider's failures
     // cost me" is a question about one row, and a total over all of them cannot answer it.
-    { key: 'failed_cost', label: 'Failed $', sortable: true, render: (r) => (r.failed_cost ? html`<span class="error-text">$${Number(r.failed_cost).toFixed(4)}</span>` : '—') },
+    { key: 'failed_cost', label: 'Failed $', sortable: true, render: (r) => (r.failed_cost ? html`<span class="error-text">${formatCost(r.failed_cost)}</span>` : '—') },
   ];
 
   const runColumns = [
@@ -116,7 +117,7 @@ export function Usage() {
     { key: 'model_id', label: 'Model', sortable: true, render: (r) => r.model_id || '—' },
     { key: 'status', label: 'Status', sortable: true, render: (r) => (r.status ? html`<${StatusBadge} status=${r.status} />` : '—') },
     { key: 'tokens', label: 'Tokens', sortable: true, render: (r) => formatTokens(r.tokens) },
-    { key: 'cost', label: 'Cost', sortable: true, render: (r) => `$${Number(r.cost || 0).toFixed(6)}` },
+    { key: 'cost', label: 'Cost', sortable: true, render: (r) => formatCost(r.cost) },
     { key: 'duration_ms', label: 'Duration', sortable: true, render: (r) => (r.duration_ms ? `${Math.round(r.duration_ms / 1000)}s` : '—') },
     {
       key: 'task_id',
@@ -170,14 +171,14 @@ export function Usage() {
           )}
         </div>
         <span class="muted">
-          ${data.since ? `Since ${new Date(data.since).toLocaleString()}` : 'All time'}
+          ${data.since ? html`Since <${Time} at=${data.since} />` : 'All time'}
         </span>
       </div>
 
       <div class="metric-grid usage-metrics">
         <div class="card metric-card">
           <div class="metric-label muted">Total Cost</div>
-          <div class="metric-value">$${Number(totals.cost || 0).toFixed(4)}</div>
+          <div class="metric-value">${formatCost(totals.cost)}</div>
         </div>
         <div class="card metric-card">
           <div class="metric-label muted">Total Tokens</div>
@@ -199,12 +200,12 @@ export function Usage() {
         </div>
         <div class="card metric-card">
           <div class="metric-label muted">Failed Spend</div>
-          <div class="metric-value">$${failedCost.toFixed(4)}</div>
+          <div class="metric-value">${formatCost(failedCost)}</div>
           <div class="metric-note muted">${failed ? share(failedCost) : '—'}</div>
         </div>
         <div class="card metric-card">
           <div class="metric-label muted">Fallback Spend</div>
-          <div class="metric-value">$${fallbackCost.toFixed(4)}</div>
+          <div class="metric-value">${formatCost(fallbackCost)}</div>
           <div class="metric-note muted">${Number(totals.fallbacks || 0) ? share(fallbackCost) : '—'}</div>
         </div>
         <div class="card metric-card">
@@ -214,7 +215,7 @@ export function Usage() {
         </div>
         <div class="card metric-card">
           <div class="metric-label muted">Repair Spend</div>
-          <div class="metric-value">$${repairCost.toFixed(4)}</div>
+          <div class="metric-value">${formatCost(repairCost)}</div>
           <div class="metric-note muted">${repairRuns ? share(repairCost) : '—'}</div>
         </div>
       </div>
@@ -242,8 +243,8 @@ export function Usage() {
                       (r) => html`
                         <tr key=${r.key}>
                           <td>${r.key}</td>
-                          ${r.segments.map((s) => html`<td key=${s.key}>$${s.value.toFixed(6)}</td>`)}
-                          <td>$${r.total.toFixed(6)}</td>
+                          ${r.segments.map((s) => html`<td key=${s.key}>${formatCost(s.value)}</td>`)}
+                          <td>${formatCost(r.total)}</td>
                         </tr>
                       `
                     )}
@@ -257,7 +258,7 @@ export function Usage() {
                 series=${costStack.series}
                 title="Cost per day by provider"
                 ariaLabel=${`Cost per day split by provider over ${period}. ${costStack.rows.length} day(s), ${costStack.series.length} series. Total ${formatCost(totals.cost)}.`}
-                formatValue=${formatCost}
+                formatValue=${axisCost}
                 zeroNote="Every run in this period priced at $0 - no pricing is configured for these models. Hover or focus a day for its per-provider breakdown."
               />
             `}

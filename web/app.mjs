@@ -3,6 +3,7 @@ import { html, render, Fragment, useState, useEffect, useRef, useCallback } from
 import { Layout } from './components/layout.mjs';
 import { ShortcutLegend } from './components/kbd.mjs';
 import { CommandPalette } from './components/command-palette.mjs';
+import { ConfirmHost } from './components/confirm.mjs';
 import { requestPermission, notifyRunEnd } from './components/notify.mjs';
 import { Overview } from './views/overview.mjs';
 import { Projects } from './views/projects.mjs';
@@ -55,15 +56,6 @@ function findSearchField() {
   return document.querySelector('input[type="search"], [data-search], .search-input');
 }
 
-// The tasks view owns its own new-task form. Announce the intent first so a
-// listener can handle and preventDefault it; otherwise click its trigger.
-function requestNewTask() {
-  const event = new CustomEvent('ai-code:new-task', { bubbles: true, cancelable: true });
-  if (!window.dispatchEvent(event)) return;
-  const trigger = Array.from(document.querySelectorAll('button')).find((b) => /new task/i.test(b.textContent || ''));
-  if (trigger) trigger.click();
-}
-
 function App() {
   const [route, setRoute] = useState(parseHash());
   const [legendOpen, setLegendOpen] = useState(false);
@@ -100,14 +92,25 @@ function App() {
     paletteRef.current = paletteOpen;
   }, [paletteOpen]);
 
+  // The keydown listener is bound once, so it reaches `newTask` through a ref rather
+  // than through its closure - which would be the first render's version, and the
+  // first render's version is the one that captured an empty intent counter.
+  const newTaskRef = useRef(() => {});
+  useEffect(() => {
+    newTaskRef.current = newTask;
+  }, [newTask]);
+
   // New task is the palette's one action that is not a navigation: the form belongs
-  // to the tasks view, so the route is set first and the view's own trigger clicked
-  // once that view has rendered - a hash change and a click cannot both happen in
-  // the same turn.
+  // to the tasks view, so the route is set and an intent is raised. The view opens
+  // its form when the intent changes, which means the request survives the route
+  // change without anybody guessing when the view has finished rendering - the
+  // counter is the signal, and the view is the only thing that reads it.
+  const [newTaskIntent, setNewTaskIntent] = useState(0);
   const newTask = useCallback(() => {
     navigate('#/tasks');
-    setTimeout(requestNewTask, 0);
+    setNewTaskIntent((n) => n + 1);
   }, []);
+  const consumeNewTask = useCallback(() => setNewTaskIntent(0), []);
 
   useEffect(() => {
     function onHashChange() {
@@ -198,9 +201,9 @@ function App() {
         return;
       }
 
-      if (key === 'n' && parseHash().view === 'tasks') {
+      if (key === 'n') {
         e.preventDefault();
-        requestNewTask();
+        newTaskRef.current();
       }
     }
 
@@ -279,7 +282,7 @@ function App() {
       view = html`<${Project} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
       break;
     case 'tasks':
-      view = html`<${Tasks} navigate=${navigate} />`;
+      view = html`<${Tasks} navigate=${navigate} openForm=${newTaskIntent} onFormOpened=${consumeNewTask} />`;
       break;
     case 'task-detail':
       view = html`<${TaskDetail} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
@@ -325,7 +328,13 @@ function App() {
 
   return html`
     <${Fragment}>
-      <${Layout} route=${navRoute} title=${title} serverDown=${serverDown}>
+      <${Layout}
+        route=${navRoute}
+        title=${title}
+        serverDown=${serverDown}
+        onOpenPalette=${() => setPaletteOpen(true)}
+        onNewTask=${newTask}
+      >
         ${view}
       <//>
       <${ShortcutLegend} open=${legendOpen} onClose=${() => setLegendOpen(false)} />
@@ -335,6 +344,9 @@ function App() {
         navigate=${navigate}
         onNewTask=${newTask}
       />
+      ${/* Mounted once here, the way the toast stack is. A dialog any view can
+           raise, and none of them has to render it. */ ''}
+      <${ConfirmHost} />
     <//>
   `;
 }
