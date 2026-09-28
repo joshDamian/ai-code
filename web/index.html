@@ -439,6 +439,38 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .task-picker-clear:hover{background:var(--panel3);color:var(--text);opacity:1}
 
 /* ---- toolbar / tabs ---- */
+.tasks-head{display:grid;gap:var(--space-3);margin-bottom:var(--space-4)}
+/* The grid's column is a 1fr, and a grid item's automatic minimum size would floor
+   it at its content's min-content width - which the wrapping row below and the
+   scrolling tab strip then push past the viewport. Zero lets the column track the
+   page, and both children wrap or scroll inside it instead. */
+.tasks-head>*{min-width:0}
+.tasks-actions{display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap}
+.tasks-actions .search-input{flex:1 1 240px;width:auto;max-width:440px}
+.tasks-actions .tasks-new{margin-left:auto}
+/* One height for the three controls in this row. A <select> sizes its own content
+   box from the font's metrics rather than from the line-height it inherits, and a
+   bare button has no border, so at one font size the three land 2px apart and the
+   row reads as three misaligned controls. The term is the body's 1.5 line-height
+   plus 8px of padding twice plus a 1px border twice; the coarse-pointer minimum
+   below still wins, because min-height beats height. */
+.tasks-actions .input,.tasks-actions .btn{height:calc(1.5em + var(--space-2) * 2 + 2px)}
+.tasks-tabs{display:flex;align-items:center;gap:var(--space-3);border-bottom:1px solid var(--line)}
+.tasks-tabs .tabs{border-bottom:0;flex:1;min-width:0}
+.switch{display:inline-flex;align-items:center;gap:var(--space-2);font-size:12.5px;color:var(--muted);white-space:nowrap;cursor:pointer}
+.switch:hover{color:var(--text)}
+.field.inline{display:inline-flex;align-items:center;gap:var(--space-2)}
+.field.inline .input{width:auto}
+.inline-form-head,.inline-form-foot{display:flex;align-items:center;gap:var(--space-2)}
+.inline-form-head h3{margin:0;margin-right:auto}
+/* The ✕ that closes the inline form. A glyph rather than a word, so it drops the
+   accent a primary action carries and takes a square box of its own - which is also
+   what keeps it off the 12px underlined .link-btn it would otherwise inherit. */
+.icon-btn{background:transparent;color:var(--muted);border:0;padding:0;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-size:15px;line-height:1;border-radius:var(--radius-sm)}
+.icon-btn:hover{background:var(--panel3);color:var(--text);opacity:1}
+.inline-form-foot{justify-content:flex-end}
+.inline-form-foot .muted{margin-right:auto;font-size:12px}
+.inline-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-3)}
 .view-toolbar{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-4);flex-wrap:wrap}
 /* A toolbar holding a single action has nothing to sit opposite, and space-between
    would strand it against the left edge. Two toolbars hold a single child today:
@@ -459,7 +491,10 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    scrolls; the padding keeps the last tab's underline off the edge. */
 .tabs{display:flex;gap:var(--space-1);border-bottom:1px solid var(--line);overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none}
 .tabs::-webkit-scrollbar{display:none}
-.tab{background:transparent;color:var(--muted);border-radius:0;padding:var(--space-2) var(--space-4);font-weight:600}
+/* Never shrunk. A flex item shrinks by default, and a tab squeezed below its content
+   wraps its label away from its count - which is the wrapping the rule above exists to
+   avoid. Holding its width is what makes the strip scroll. */
+.tab{background:transparent;color:var(--muted);border-radius:0;padding:var(--space-2) var(--space-4);font-weight:600;flex-shrink:0}
 .tab:hover{background:transparent;color:var(--text);opacity:1}
 .tab.active{color:var(--text);border-bottom:2px solid var(--accent)}
 .tab-count{color:var(--muted);font-weight:500;font-size:12px}
@@ -816,6 +851,13 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   .list-row-main b,.list-row-main span{overflow-wrap:anywhere}
   .list-row-side{flex-wrap:wrap}
   .view-toolbar{gap:var(--space-2)}
+  .tasks-actions .search-input{flex-basis:100%;max-width:none}
+  .inline-form-grid{grid-template-columns:1fr}
+  /* The toggle moves to a line of its own rather than taking a third of the strip
+     and squeezing the tabs into a scroller two tabs wide. */
+  .tasks-tabs{flex-wrap:wrap}
+  .tasks-tabs .tabs{flex-basis:100%}
+  .tasks-tabs .switch{margin-left:auto}
   .kbd-overlay{padding:var(--space-6) var(--space-3)}
   /* Toasts are fixed, so an oversized one is clipped rather than scrolled -
      pin them to the viewport edges instead. */
@@ -844,7 +886,8 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    fingertip actually covers, and the tabs - which are the main navigation on a task
    page and were the tightest targets in the app - get a little more room than that. */
 @media(pointer:coarse){
-  .btn,.seg-btn,.tab,.nav-item,.input{min-height:44px}
+  .btn,.seg-btn,.tab,.nav-item,.input,.switch,.icon-btn{min-height:44px}
+  .icon-btn{width:44px}
   .tab{padding:var(--space-3) var(--space-4)}
   /* Every field in the app carries `.input`, selects and textareas included. */
   /* A tap leaves a hover style stuck until the next tap lands elsewhere. */
