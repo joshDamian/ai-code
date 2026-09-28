@@ -30,11 +30,12 @@ export function Select({ label, value, onChange, options, disabled, loading, inl
   `;
 }
 
-export function TextArea({ label, value, onInput, onKeyDown, placeholder, disabled, loading, rows = 6, autofocus }) {
+export function TextArea({ label, value, onInput, onKeyDown, placeholder, disabled, loading, rows = 6, autofocus, ref }) {
   return html`
     <label class="field">
       ${label ? html`<span class="field-label">${label}</span>` : null}
       <textarea
+        ref=${ref}
         class="input"
         rows=${rows}
         value=${value}

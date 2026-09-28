@@ -1,4 +1,4 @@
-import { html, useState, useEffect, useMemo } from '../lib.mjs';
+import { html, useState, useEffect, useMemo, useRef } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
@@ -32,6 +32,13 @@ export function Tasks({ navigate }) {
   // id is not what you remember about it.
   const [parentId, setParentId] = useState('');
   const [saving, setSaving] = useState(false);
+  const descriptionRef = useRef(null);
+
+  useEffect(() => {
+    if (showForm) {
+      descriptionRef.current?.focus();
+    }
+  }, [showForm]);
 
   async function load() {
     try {
@@ -166,6 +173,7 @@ export function Tasks({ navigate }) {
         showForm
           ? html`
               <form class="card inline-form" onSubmit=${submit} onKeyDown=${(e) => {
+                if (e.defaultPrevented) return;
                 if (e.key === 'Escape') {
                   e.preventDefault();
                   setShowForm(false);
@@ -193,6 +201,7 @@ export function Tasks({ navigate }) {
                   />
                 </div>
                 <${TextArea}
+                  ref=${descriptionRef}
                   label="Description"
                   value=${title}
                   onInput=${setTitle}
