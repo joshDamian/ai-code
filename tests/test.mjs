@@ -681,6 +681,72 @@ test('a message after streaming leaves the stall detector armed',async()=>{
   assert.match(run.error,/STALLED/,'and it is recorded on the run');
 });
 
+test('a provider that starts and then says nothing is stopped at the first-frame budget',async()=>{
+  // `started` is a notice: it says a process exists, not that the provider produces
+  // anything. A provider that then wedges has no work frame to arm the stall budget,
+  // so only the total timeout bounds it.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'mute',name:'Mute',kind:'mock',enabled:true,config:{routable:true,delayMs:30000}});
+  s.addModel({id:'mute-m',providerId:'mute',name:'mute',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  // The stall budget is 60s, so only the first-frame budget can stop this run.
+  s.saveRouting({...r,planner:{...r.planner,stall:60,firstFrame:1,timeout:60}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const started=Date.now();
+  const err=await s.plan(t.id).then(()=>null,e=>e);
+  const ms=Date.now()-started;
+  assert.equal(err?.code,'STALLED','a run that never produced a frame is stopped for that reason');
+  assert.ok(ms<15000,`cut off at 1s after the spawn rather than waited out (${ms}ms)`);
+  const run=s.store.listRuns(t.id).find(x=>x.role==='planner');
+  assert.match(run.error,/after it started/,'the record names the budget that fired');
+  assert.equal(s.providerHealthList().find(h=>h.providerId==='mute').state,'DEGRADED','a stall counts against the provider');
+});
+
+test('a first message later than the stall budget is not a stall, and silence after it is',async()=>{
+  // The two budgets in one run. The mock sleeps 2s before its first frame, which is
+  // longer than the 1s stall budget, so a stall budget armed at the spawn would kill
+  // a working provider there. The 5s first-frame budget covers that wait instead.
+  // Then 30s of silence follows the message, and the stall budget the message
+  // re-armed is what catches it.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'late',name:'Late',kind:'mock',enabled:true,config:{routable:true,delayMs:2000,toolCalls:1,stallMs:30000}});
+  s.addModel({id:'late-m',providerId:'late',name:'late',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,stall:1,firstFrame:5,timeout:60}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const started=Date.now();
+  const err=await s.plan(t.id).then(()=>null,e=>e);
+  const ms=Date.now()-started;
+  assert.equal(err?.code,'STALLED','silence after the first frame is a stall');
+  assert.ok(ms>=2000,`the 2s wait for the first frame outlived the 1s stall budget (${ms}ms)`);
+  assert.ok(ms<15000,`the message re-armed the budget, which then caught the silence (${ms}ms)`);
+  const run=s.store.listRuns(t.id).find(x=>x.role==='planner');
+  assert.match(run.error,/after its response began/,'the post-frame budget fired, not the first-frame budget');
+});
+
+test('tool_progress as the first frame clears the first-frame budget',async()=>{
+  // A tool that takes real time is the case the dispatching exists for, and it holds
+  // before the first message as much as after one. This provider writes a
+  // tool_progress frame every 500ms and produces nothing else until the plan. Both
+  // budgets are 1s, so a first-frame budget that tool_progress did not clear would
+  // kill it.
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'tool-first',name:'ToolFirst',kind:'mock',enabled:true,config:{routable:true,toolProgressMs:3000,toolProgressEvents:6}});
+  s.addModel({id:'tool-first-m',providerId:'tool-first',name:'tf',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,stall:1,firstFrame:1,timeout:60}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const planned=await s.plan(t.id);
+  assert.equal(planned.state,'AWAITING_APPROVAL','a tool that starts within the budget is not killed while it works');
+  assert.equal(s.store.listRuns(t.id).filter(x=>/STALLED/.test(x.error||'')).length,0,'no stall recorded');
+});
+
 test('a run waiting on a subagent is not charged for the wait',async()=>{
   // The planner of task f70c23a7 was cut at 300s having spent 127 of them inside
   // three Explore spawns, with the run still streaming when it died. A subagent runs

@@ -344,6 +344,14 @@ const TOOL_ROLES = new Set(['implementer', 'repair']);
 // the tickMs option so tests can exercise cross-process cancel without waiting.
 const TICK_MS = 2000;
 
+// Seconds a run may spend between its spawn and its first work-carrying frame.
+// A provider that ignores `--include-partial-messages` writes nothing until its
+// first block is complete, so this budget sits far above `stall`. The reviewer of
+// task 8e900a8c (run 14185f67) was silent for 277s before its first block arrived.
+// It sits below the 600s and 900s role timeouts, so a provider that emits `started`
+// and then wedges is stopped before the total timeout would stop it.
+const FIRST_FRAME_S = 300;
+
 // What one line of test output may cost in the events table. A suite that prints a
 // stack trace, a minified bundle or a progress bar can put megabytes on one line,
 // and the store keeps every event it is given - so the line is cut at write time.
@@ -4084,11 +4092,10 @@ export class Service {
         // it fires on both and the only safe value for it is one that fits the slowest
         // honest run. This one measures silence instead. Every frame that carries work
         // arms it - progress, message, result, completed - and only a tool_progress
-        // frame clears it, so it covers both the window between a request and the
-        // model's first word, where the whole of the 277s gap in run 14185f67 lived,
-        // and the window after a finished turn, where the same wedge reappears past a
-        // response that has already answered once: a message cleared the timer and
-        // nothing re-armed it, leaving that silence to the much larger total timeout.
+        // frame clears it. That covers the window after a finished turn, where the
+        // same wedge reappears past a response that has already answered once. A
+        // message cleared the timer and nothing re-armed it, leaving that silence to
+        // the much larger total timeout.
         //
         // tool_progress is the one frame that clears it, and it has to be: a local
         // tool call like `npm test` writes nothing between its progress events,
@@ -4096,11 +4103,12 @@ export class Service {
         // would kill the subprocess while it worked (the fc4cfb2c exit-137 case).
         //
         // The frames outside those five - `started`, the CLI's own status notices,
-        // `rate_limit` - neither arm nor clear. Arming on a notice would start the
-        // budget for a provider before it had shown that it produces anything at all,
-        // which would kill a working provider that ignores
-        // `--include-partial-messages`: until its first work-carrying frame arrives,
-        // the total timeout is the only bound.
+        // `rate_limit` - neither arm nor clear. So a separate first-frame budget is
+        // armed at the spawn, and it bounds the window before the first work-carrying
+        // frame arrives. That budget is larger than `stall`, because a provider that
+        // ignores `--include-partial-messages` writes nothing until its first block is
+        // complete. The first work frame hands over to the stall budget in its place,
+        // and `tool_progress` stays the only frame that clears either.
         const stallMs = (policy.stall || 0) * 1000;
         let stallId = null;
         const clearStall = () => {
@@ -4108,13 +4116,27 @@ export class Service {
           stallId = null;
         };
         const armStall = () => {
-          if (!stallMs) return;
+          // Above the guard: the first-frame timer shares this slot, so the first
+          // work frame has to clear it even when `stall` is 0 and nothing follows.
           clearTimeout(stallId);
+          stallId = null;
+          if (!stallMs) return;
           stallId = setTimeout(() => {
             const err = new Error(`${role} produced nothing for ${Math.round(stallMs / 1000)}s after its response began`);
             err.code = 'STALLED';
             controller.abort(err);
           }, stallMs);
+        };
+        // The first-frame budget shares the `stallId` slot, so the frame dispatch
+        // below needs no case of its own. Zero disables it, as it does `stall`.
+        const firstMs = (policy.firstFrame ?? FIRST_FRAME_S) * 1000;
+        const armFirstFrame = () => {
+          if (!firstMs) return;
+          stallId = setTimeout(() => {
+            const err = new Error(`${role} produced nothing for ${Math.round(firstMs / 1000)}s after it started`);
+            err.code = 'STALLED';
+            controller.abort(err);
+          }, firstMs);
         };
 
         // The permission gate, for a session run. Written per attempt rather than
@@ -4149,6 +4171,9 @@ export class Service {
           : {};
 
         try {
+          // The spawn point: the generator below starts its process on the first
+          // iteration, and the budget runs from there.
+          armFirstFrame();
           for await (const e of runAgent(p, m, {
             role,
             task,
@@ -4172,7 +4197,8 @@ export class Service {
             // the wedge window the detector exists for, while a tool that is
             // actively running writes tool_progress and nothing else - so a timer
             // left armed across it would fire while the tool still worked, killing
-            // the subprocess (exit 137) and stalling the run.
+            // the subprocess (exit 137) and stalling the run. On the first of these
+            // frames the first-frame budget is replaced by the stall budget.
             if (e.type === 'tool_progress') clearStall();
             else if (e.type === 'progress' || e.type === 'message' || e.type === 'result' || e.type === 'completed') armStall();
             if (e.type === 'completed' && e.data?.sessionId) sessionId = e.data.sessionId;
