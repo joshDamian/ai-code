@@ -30,12 +30,16 @@ export function Select({ label, value, onChange, options, disabled, loading, inl
   `;
 }
 
-export function TextArea({ label, value, onInput, onKeyDown, placeholder, disabled, loading, rows = 6, autofocus, ref }) {
+// The DOM node reaches the caller as `inputRef`, never as `ref`: Preact strips
+// `ref` off the props it hands a component, so a `ref` written here is always
+// undefined and the caller's ref is set to this component's own instance - which
+// has no `focus`, and throws the moment anyone calls one.
+export function TextArea({ label, value, onInput, onKeyDown, placeholder, disabled, loading, rows = 6, autofocus, inputRef }) {
   return html`
     <label class="field">
       ${label ? html`<span class="field-label">${label}</span>` : null}
       <textarea
-        ref=${ref}
+        ref=${inputRef}
         class="input"
         rows=${rows}
         value=${value}
