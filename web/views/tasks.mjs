@@ -22,6 +22,8 @@ export function Tasks({ navigate }) {
   const [tab, setTab] = useState('all');
   const [showCancelled, setShowCancelled] = useState(false); // false = hide, the default
   const [query, setQuery] = useState('');
+  // Empty means every project, which is the default the toolbar starts on.
+  const [projectFilter, setProjectFilter] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [projectId, setProjectId] = useState('');
   const [title, setTitle] = useState('');
@@ -46,32 +48,42 @@ export function Tasks({ navigate }) {
     load();
   }, []);
 
+  // The id a task row carries, resolved to the name a person recognises. A task
+  // whose project row is gone keeps its id, so the row still names something.
+  const projectNames = useMemo(() => new Map(projects.map((p) => [p.id, p.name])), [projects]);
+
+  // The project filter narrows every tab, and the tab then chooses the states
+  // inside it. It sits before the tab split so the counts and the rows below them
+  // are counted from the same list - a count that ignored the project would count
+  // tasks the tab is not showing.
+  const scoped = useMemo(() => (tasks && projectFilter ? tasks.filter((t) => t.project_id === projectFilter) : tasks), [tasks, projectFilter]);
+
   // The All tab's count has to be the count of what the tab lists, so the toggle
   // moves the number with the rows. Only the All tab has `states: null`, so every
   // other tab's count is untouched by it.
   const counts = useMemo(() => {
-    if (!tasks) return {};
+    if (!scoped) return {};
     const c = {};
     for (const t of TABS) {
       c[t.id] = t.states
-        ? tasks.filter((x) => t.states.includes(x.state)).length
-        : tasks.filter((x) => showCancelled || x.state !== 'CANCELLED').length;
+        ? scoped.filter((x) => t.states.includes(x.state)).length
+        : scoped.filter((x) => showCancelled || x.state !== 'CANCELLED').length;
     }
     return c;
-  }, [tasks, showCancelled]);
+  }, [scoped, showCancelled]);
 
   // `states: null` is the All tab, the only list that mixes CANCELLED in - which is
   // why the toggle applies to it alone. Hidden by default: cancelled tasks already
   // have a tab of their own, so in the default view they are clutter.
   const filtered = useMemo(() => {
-    if (!tasks) return [];
+    if (!scoped) return [];
     const t = TABS.find((x) => x.id === tab);
-    const base = t.states ? tasks.filter((x) => t.states.includes(x.state)) : showCancelled ? tasks : tasks.filter((x) => x.state !== 'CANCELLED');
+    const base = t.states ? scoped.filter((x) => t.states.includes(x.state)) : showCancelled ? scoped : scoped.filter((x) => x.state !== 'CANCELLED');
     const q = query.trim().toLowerCase();
     // The tab is the filter of record; the query narrows what the tab already shows.
     if (!q) return base;
     return base.filter((x) => String(x.title || '').toLowerCase().includes(q));
-  }, [tasks, tab, showCancelled, query]);
+  }, [scoped, tab, showCancelled, query]);
 
   // The candidates the picker may offer. Same project only: the server refuses a
   // cross-project parent, so listing one would be offering a dead end.
@@ -114,6 +126,20 @@ export function Tasks({ navigate }) {
           )}
         </div>
         <div class="row">
+          ${
+            // A single project leaves the control nothing to filter, so it is not
+            // rendered at all rather than shown with one option.
+            projects.length > 1
+              ? html`
+                  <${Select}
+                    label="Project"
+                    value=${projectFilter}
+                    onChange=${setProjectFilter}
+                    options=${[{ value: '', label: 'All projects' }, ...projects.map((p) => ({ value: p.id, label: p.name }))]}
+                  />
+                `
+              : null
+          }
           <input
             class="input search-input"
             type="search"
@@ -185,7 +211,7 @@ export function Tasks({ navigate }) {
                     <div class="list-row clickable" key=${t.id} onClick=${() => navigate(`#/tasks/${t.id}`)}>
                       <div class="list-row-main">
                         <b>${t.title}</b>
-                        <span class="muted">${t.project_id} · ${t.created_at ? new Date(t.created_at).toLocaleString() : ''}</span>
+                        <span class="muted">${projectNames.get(t.project_id) || t.project_id} · ${t.created_at ? new Date(t.created_at).toLocaleString() : ''}</span>
                       </div>
                       <${StatusBadge} status=${t.state} />
                     </div>
