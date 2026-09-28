@@ -59,7 +59,7 @@ function trendLabel(name, values) {
   return `${name}, last 7 days: ${values[0]} to ${values[values.length - 1]}.`;
 }
 
-export function Overview() {
+export function Overview({ navigate, onNewTask }) {
   const [data, setData] = useState(null);
   const [usage, setUsage] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -137,6 +137,42 @@ export function Overview() {
   const providerTrend = usage ? days.map((d) => providerByDay[d] || 0) : null;
 
   const attentionCount = waiting.length + failed.length;
+
+  // A first run. Every section below would be empty and every count zero, and none of
+  // that says what to do - so the page is the three steps to a first task instead.
+  if (!data.projects.length) {
+    const hasProvider = activeProviders.length > 0;
+    return html`
+      <div class="view-overview">
+        <section class="card welcome">
+          <div class="welcome-head">
+            <h2>Welcome to AI Code</h2>
+            <p class="muted">It plans, builds and reviews changes in your repositories, and asks you before anything lands. Three steps to the first one.</p>
+          </div>
+          <ol class="welcome-steps">
+            <li class="welcome-step">
+              <span class="welcome-num">1</span>
+              <div><b>Add a project</b><span class="muted">A git repository the pipeline may work in, or an idea it should start from.</span></div>
+              <a class="btn primary" href="#/projects/new">Add a project</a>
+            </li>
+            <li class="welcome-step ${hasProvider ? 'done' : ''}">
+              <span class="welcome-num">${hasProvider ? '✓' : '2'}</span>
+              <div>
+                <b>Check a model provider</b>
+                <span class="muted">${hasProvider ? `${activeProviders.length} enabled: ${activeProviders.map((p) => p.name).join(', ')}.` : 'No provider is enabled, so nothing can run yet.'}</span>
+              </div>
+              <a class="btn secondary" href="#/providers">Providers</a>
+            </li>
+            <li class="welcome-step pending">
+              <span class="welcome-num">3</span>
+              <div><b>Describe a task</b><span class="muted">One change you want. You approve its plan before any code is written.</span></div>
+              <button class="btn secondary" type="button" disabled title="Add a project first" onClick=${onNewTask}>New task</button>
+            </li>
+          </ol>
+        </section>
+      </div>
+    `;
+  }
 
   return html`
     <div class="view-overview">

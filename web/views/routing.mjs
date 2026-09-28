@@ -2,7 +2,7 @@ import { html, useState, useEffect } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
-import { Select, TextInput } from '../components/form.mjs';
+import { Select } from '../components/form.mjs';
 
 const ROLES = ['planner', 'implementer', 'reviewer', 'repair'];
 const ROLE_CAPABILITY = { planner: 'planning', implementer: 'coding', reviewer: 'review', repair: 'repair' };
@@ -49,14 +49,47 @@ export function Routing() {
 
   if (!routing) return html`<${Spinner} message="Loading routing policy..." />`;
 
+  const dirty = JSON.stringify(draft) !== JSON.stringify(routing);
+
   return html`
-    <div class="view-routing">
+    <div class="view-routing stack">
       <div class="view-toolbar">
-        <button class="btn" disabled=${saving} onClick=${save}>${saving ? 'Saving…' : 'Save routing'}</button>
+        <p class="view-lead">Which model each role in the pipeline runs on, and where it goes when that model fails. Automatic picks the best enabled model for the strategy.</p>
       </div>
-      <div class="stack">
-        ${ROLES.map((role) => html`<${RoleCard} key=${role} role=${role} policy=${draft[role] || {}} models=${models} onChange=${(p) => updateRole(role, p)} />`)}
-      </div>
+      ${ROLES.map((role) => html`<${RoleCard} key=${role} role=${role} policy=${draft[role] || {}} models=${models} onChange=${(p) => updateRole(role, p)} />`)}
+      ${
+        dirty
+          ? html`
+              <div class="save-bar" role="region" aria-label="Unsaved changes">
+                <span>You have unsaved routing changes.</span>
+                <button class="btn secondary" type="button" disabled=${saving} onClick=${() => setDraft(routing)}>Discard</button>
+                <button class="btn primary" type="button" disabled=${saving} onClick=${save}>${saving ? 'Saving…' : 'Save routing'}</button>
+              </div>
+            `
+          : null
+      }
+    </div>
+  `;
+}
+
+// What each role does, in the words a person choosing a model for it needs.
+const ROLE_ABOUT = {
+  planner: 'Reads the task and the code, and writes the plan you approve.',
+  implementer: 'Carries out the approved plan in the task’s worktree.',
+  reviewer: 'Reads the diff and judges it against the plan.',
+  repair: 'Fixes what the tests or the review found.',
+};
+
+function Seg({ value, options, onChange, label }) {
+  return html`
+    <div class="seg" role="radiogroup" aria-label=${label}>
+      ${options.map(
+        (o) => html`
+          <button type="button" role="radio" aria-checked=${value === o ? 'true' : 'false'} class="seg-btn ${value === o ? 'active' : ''}" onClick=${() => onChange(o)} key=${o}>
+            ${o[0].toUpperCase() + o.slice(1)}
+          </button>
+        `
+      )}
     </div>
   `;
 }
@@ -67,45 +100,50 @@ function RoleCard({ role, policy, models, onChange }) {
   const preferred = (policy.preferred && policy.preferred[0]) || '';
   const fallback = policy.fallback || [];
 
-  const label = (m) => `${m.displayName || m.name} — ${m.provider_id}`;
-  const modelOptions = [{ value: '', label: 'Automatic' }, ...eligible.map((m) => ({ value: m.id, label: label(m) }))];
-  const fallbackOptions = [{ value: '', label: 'None' }, ...eligible.map((m) => ({ value: m.id, label: label(m) }))];
+  const option = (m) => ({ value: m.id, label: m.displayName || m.name, hint: m.provider_id });
+  const modelOptions = [{ value: '', label: 'Automatic' }, ...eligible.map(option)];
+  const fallbackOptions = [{ value: '', label: 'None' }, ...eligible.map(option)];
 
   return html`
-    <div class="card">
-      <div class="provider-card-head">
-        <div>
-          <b>${role[0].toUpperCase() + role.slice(1)}</b>
-          <div class="muted">${policy.strategy || 'balanced'} routing</div>
+    <section class="card role-card">
+      <div class="role-card-head">
+        <div class="role-card-title">
+          <h2>${role[0].toUpperCase() + role.slice(1)}</h2>
+          <p class="muted">${ROLE_ABOUT[role]}</p>
         </div>
-        <${Select}
-          value=${policy.strategy || 'balanced'}
-          onChange=${(v) => onChange({ strategy: v })}
-          options=${STRATEGIES.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))}
-        />
+        <${Seg} label=${`${role} strategy`} value=${policy.strategy || 'balanced'} options=${STRATEGIES} onChange=${(v) => onChange({ strategy: v })} />
       </div>
-      <div class="grid3">
+      <div class="role-chain">
         <${Select} label="Preferred model" value=${preferred} onChange=${(v) => onChange({ preferred: v ? [v] : [] })} options=${modelOptions} />
+        <span class="role-chain-arrow" aria-hidden="true">→</span>
         <${Select}
-          label="Fallback 1"
+          label="Then"
           value=${fallback[0] || ''}
           onChange=${(v) => onChange({ fallback: [v, fallback[1] || ''].filter(Boolean) })}
           options=${fallbackOptions}
         />
+        <span class="role-chain-arrow" aria-hidden="true">→</span>
         <${Select}
-          label="Fallback 2"
+          label="Then"
           value=${fallback[1] || ''}
           onChange=${(v) => onChange({ fallback: [fallback[0] || '', v].filter(Boolean) })}
           options=${fallbackOptions}
-        />
-        <${Select} label="Effort" value=${policy.effort || 'medium'} onChange=${(v) => onChange({ effort: v })} options=${EFFORTS.map((x) => ({ value: x, label: x }))} />
-        <${TextInput}
-          label="Timeout (seconds)"
-          type="number"
-          value=${policy.timeout || ''}
-          onInput=${(v) => onChange({ timeout: Number(v) || undefined })}
+          disabled=${!fallback[0]}
         />
       </div>
-    </div>
+      <div class="role-knobs">
+        <div class="field">
+          <span class="field-label">Effort</span>
+          <${Seg} label=${`${role} effort`} value=${policy.effort || 'medium'} options=${EFFORTS} onChange=${(v) => onChange({ effort: v })} />
+        </div>
+        <label class="field role-timeout">
+          <span class="field-label">Timeout</span>
+          <span class="input-suffix">
+            <input class="input" type="number" min="0" value=${policy.timeout || ''} placeholder="600" onInput=${(e) => onChange({ timeout: Number(e.target.value) || undefined })} />
+            <span>seconds</span>
+          </span>
+        </label>
+      </div>
+    </section>
   `;
 }

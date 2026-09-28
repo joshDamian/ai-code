@@ -20,3 +20,16 @@ export function EmptyState({ message, title, hint, icon, actionLabel, onAction }
     </div>
   `;
 }
+
+// What a pane says when there is no project to work in: why it needs one, and the
+// way to add one. Sessions and Chat both start from a project, and both reach this dead end.
+export function NoProject({ what }) {
+  return html`
+    <div class="no-project">
+      <h2>Add a project first</h2>
+      <p class="muted">${what}</p>
+      <a class="btn primary" href="#/projects/new">Add a project</a>
+    </div>
+  `;
+}
+

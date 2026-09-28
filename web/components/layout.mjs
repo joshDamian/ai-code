@@ -202,7 +202,11 @@ export function Layout({ route, title, serverDown = false, onOpenPalette, onNewT
                   <span class="kbd-keys"><span class="kbd">⌘</span><span class="kbd">K</span></span>
                 </button>`
               : null}
-            ${onNewTask ? html`<button class="btn primary" type="button" onClick=${onNewTask}>New task</button>` : null}
+            ${onNewTask
+              ? html`<button class="btn secondary header-new" type="button" onClick=${onNewTask}>
+                  ${icon(html`<path d="M8 3v10M3 8h10" />`)}<span>New task</span>
+                </button>`
+              : null}
           </div>
         </header>
         <main class="content">${children}</main>

@@ -8,6 +8,26 @@ import { Service, permissionDecision } from './service.mjs';
 import { Runner } from './runner.mjs';
 import { TerminalSessions, TERMINAL_TARGETS, terminalTargets } from './terminal.mjs';
 
+// The job kinds whose conversation writes a spec for the project.
+const SPEC_KINDS = new Set(['intake', 'infer-spec']);
+
+// What a conversation drafted, so the approval panel under it shows that and nothing
+// else. Drafts belong to the project and carry the id of the conversation whose pass
+// wrote them. Drafts written before that id existed are matched to the conversation
+// whose answer was stored within 100ms of them, since both are written by the same call.
+function chatDrafting(session, jobs, messages) {
+  const drafts = svc.project(session.project_id).drafts || [];
+  const answers = messages.filter((m) => m.role === 'assistant').map((m) => Date.parse(m.created_at));
+  const draftIds = drafts
+    .filter((d) =>
+      d.chat_session_id
+        ? d.chat_session_id === session.id
+        : answers.some((t) => Math.abs(Date.parse(d.at) - t) <= 100)
+    )
+    .map((d) => d.id);
+  return { specPass: jobs.some((j) => SPEC_KINDS.has(j.kind)), draftIds };
+}
+
 const root = process.env.AI_CODE_ROOT || process.cwd();
 // One Service for the whole process. Every request shares it, so the in-process
 // run registry (`svc.active`) is visible to the cancel route.
@@ -1036,7 +1056,9 @@ const server = http.createServer(async (req, res) => {
       }
       if (!chat[2]) {
         const session = svc.chatSession(id);
-        return json(res, { session, messages: svc.store.listChatMessages(id), job: svc.store.listJobs(id)[0] || null });
+        const jobs = svc.store.listJobs(id);
+        const messages = svc.store.listChatMessages(id);
+        return json(res, { session, messages, job: jobs[0] || null, ...chatDrafting(session, jobs, messages) });
       }
     }
 
@@ -1060,8 +1082,12 @@ const server = http.createServer(async (req, res) => {
     // The second is that the answer routes take an action word and nothing else.
     // `allow` is the only word that grants; the Service reads everything else as a
     // denial, so a misspelled verb cannot become an approval.
+    // Today's spend across sessions, for the list's footer. Its own path rather than
+    // a field on the list, which is an array every other caller reads as one.
+    if (u.pathname === '/api/session-spend' && req.method === 'GET') return json(res, svc.sessionsSpend());
+
     if (u.pathname === '/api/sessions') {
-      if (req.method === 'GET') return json(res, svc.listSessions(u.searchParams.get('projectId') || undefined));
+      if (req.method === 'GET') return json(res, svc.sessionSummaries(u.searchParams.get('projectId') || undefined));
       const b = await body(req);
       return json(res, svc.createSession(b.projectId, b.name, { providerId: b.providerId, modelId: b.modelId }), 201);
     }
@@ -1178,6 +1204,7 @@ const server = http.createServer(async (req, res) => {
             history: svc.store.listPermissionRequests(id),
             nudge: svc.nudgeFor(id),
             budget: svc.sessionBudget(id),
+            changes: svc.sessionChanges(id),
             job: svc.store.listJobs(id)[0] || null,
           });
         }

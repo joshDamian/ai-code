@@ -246,6 +246,37 @@ export function describeEvent(event) {
   return describeSystem(data);
 }
 
+// What a supervised session's turn did, as the steps a person would name: read this,
+// edited that, ran this. One row per tool call, in order, with the call's result
+// folded onto it - a failed call is marked on the step it failed rather than listed
+// as a row of its own, because "the edit failed" is one fact and not two.
+//
+// Shared by the server, which builds the steps of every settled turn from its stored
+// events, and the dashboard, which builds the turn in flight from the events it is
+// being streamed - so a turn looks the same while it runs and after it has landed.
+export function sessionSteps(events) {
+  const steps = [];
+  const byId = new Map();
+  for (const e of events || []) {
+    for (const b of contentBlocks(e?.data)) {
+      if (b?.type === 'tool_use') {
+        const step = { id: b.id || null, tool: String(b.name || 'tool'), target: toolTarget(b.input), status: 'done' };
+        steps.push(step);
+        if (b.id) byId.set(b.id, step);
+      } else if (b?.type === 'tool_result' && b.is_error) {
+        const step = byId.get(b.tool_use_id);
+        if (step) {
+          step.status = 'failed';
+          step.error = toolOutput(b).text;
+        }
+      }
+    }
+  }
+  return steps;
+}
+
+export { toolTarget };
+
 // The one-line form, for callers with no room for a badge. Always a string: the TUI
 // renders it directly into a Text node, and an event with nothing to say yields the
 // empty line that node already handles.
@@ -282,10 +313,10 @@ export function formatCost(c) {
 
 export function formatState(s) {
   const map = {
-    CREATED: 'Created', CONTEXT_READY: 'Context Ready', PLANNING: 'Planning',
-    AWAITING_APPROVAL: 'Awaiting Approval', APPROVED: 'Approved',
+    CREATED: 'Created', CONTEXT_READY: 'Context ready', PLANNING: 'Planning',
+    AWAITING_APPROVAL: 'Awaiting approval', APPROVED: 'Approved',
     IMPLEMENTING: 'Implementing', TESTING: 'Testing', REVIEWING: 'Reviewing',
-    REPAIRING: 'Repairing', AWAITING_DECISION: 'Awaiting Decision',
+    REPAIRING: 'Repairing', AWAITING_DECISION: 'Awaiting decision',
     COMPLETE: 'Complete', FAILED: 'Failed', CANCELLED: 'Cancelled'
   };
   return map[s] || s;

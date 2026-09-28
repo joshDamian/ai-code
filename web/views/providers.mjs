@@ -3,8 +3,7 @@ import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
-import { StatusBadge } from '../components/status-badge.mjs';
-import { HealthDot } from '../components/health-dot.mjs';
+import { Toggle } from '../components/form.mjs';
 
 export function Providers() {
   const [data, setData] = useState(null);
@@ -27,9 +26,18 @@ export function Providers() {
   // Keyed by provider id so a card can find its own breaker state without a
   // second lookup per render.
   const health = new Map((data.health || []).map((h) => [h.providerId, h]));
+  const on = data.providers.filter((p) => p.enabled).length;
 
   return html`
-    <div class="provider-grid">
+    <div class="stack">
+      <div class="view-toolbar">
+        <p class="view-lead">${on} of ${data.providers.length} provider${data.providers.length === 1 ? '' : 's'} enabled · ${(() => {
+          // A model on a disabled provider is one the router cannot reach, however it is set.
+          const live = new Set(data.providers.filter((p) => p.enabled).map((p) => p.id));
+          const n = data.models.filter((m) => m.enabled && live.has(m.provider_id)).length;
+          return `${n} model${n === 1 ? '' : 's'} the router may pick from.`;
+        })()}</p>
+      </div>
       ${data.providers.map(
         (p) => html`
           <${ProviderCard}
@@ -45,20 +53,18 @@ export function Providers() {
   `;
 }
 
+const HEALTH = { HEALTHY: ['good', 'Healthy'], DEGRADED: ['warn', 'Degraded'], OPEN: ['bad', 'Circuit open'] };
+
 function ProviderCard({ provider, models, health, onChange }) {
-  const [expanded, setExpanded] = useState(false);
-  const [configuring, setConfiguring] = useState(false);
-  const [enabled, setEnabled] = useState(provider.enabled);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [saving, setSaving] = useState(false);
 
-  async function saveEnabled() {
+  async function setEnabled(enabled) {
     setSaving(true);
     try {
       await api.updateProvider(provider.id, { enabled });
       showToast(`${provider.name} ${enabled ? 'enabled' : 'disabled'}.`, 'success');
-      setConfiguring(false);
       onChange();
     } catch (e) {
       showToast(e.message, 'error');
@@ -79,102 +85,68 @@ function ProviderCard({ provider, models, health, onChange }) {
       const r = await api.testProvider(provider.id, target && target.id);
       // A failed test is a 200 carrying {ok:false}, not a rejection, so the result has
       // to be read rather than caught - which is how this toasted success on failure.
-      setTestResult({ ok: r.ok, detail: r.ok ? JSON.stringify(r) : r.error });
-      if (!r.ok) {
-        showToast(`Connection test failed: ${r.error}`, 'error');
-        return;
-      }
-      // 'cleared' is the state the circuit was in, and the reason this toast is worth
-      // reading: a test that passes is what lifts the breaker.
-      showToast(r.cleared ? `Connection test succeeded — circuit cleared from ${r.cleared}.` : 'Connection test succeeded.', 'success');
-      // The health dot renders from the parent's data.health and nothing here reloads
-      // it, so a cleared circuit would leave the dot red until the next navigation.
+      setTestResult({ ok: r.ok, detail: r.ok ? (r.cleared ? `Connected. The circuit was ${r.cleared} and is now cleared.` : 'Connected.') : r.error });
+      if (!r.ok) return;
+      // The health reading renders from the parent's data and nothing here reloads it,
+      // so a cleared circuit would otherwise read as open until the next navigation.
       if (r.cleared) onChange();
     } catch (e) {
       setTestResult({ ok: false, detail: e.message });
-      showToast('Connection test failed.', 'error');
     } finally {
       setTesting(false);
     }
   }
 
+  const [tone, label] = health ? HEALTH[health.state] || ['good', health.state] : [null, null];
+  const seconds = Math.ceil((health?.cooldownRemainingMs || 0) / 1000);
+
   return html`
-    <div class="card provider-card">
+    <section class="card provider-card ${provider.enabled ? '' : 'off'}">
       <div class="provider-card-head">
-        <div>
-          <b>${provider.name}</b>
-          <div class="muted">${provider.kind}</div>
+        <div class="provider-card-title">
+          <h2>${provider.name}</h2>
+          <div class="provider-card-meta">
+            <span class="mono-sm">${provider.kind}</span>
+            ${health
+              ? html`<span aria-hidden="true">·</span><span class="provider-health ${tone}"><span class="health ${tone}"></span>${label}${
+                  tone === 'bad' && seconds > 0 ? ` · retrying in ${seconds}s` : health.failures ? ` · ${health.failures} recent failure${health.failures === 1 ? '' : 's'}` : ''
+                }</span>`
+              : null}
+          </div>
         </div>
-        <div class="row">
-          <${HealthDot} health=${health} />
-          <${StatusBadge} status=${provider.enabled ? 'Enabled' : 'Disabled'} />
-        </div>
+        <button class="btn secondary sm" type="button" disabled=${testing || !provider.enabled} onClick=${test}>${testing ? 'Testing…' : 'Test connection'}</button>
+        <${Toggle} checked=${!!provider.enabled} disabled=${saving} onChange=${setEnabled} label=${provider.enabled ? 'Enabled' : 'Disabled'} />
       </div>
-
-      <div class="row">
-        <span class="muted">${models.length} model${models.length === 1 ? '' : 's'}</span>
-        <button class="btn secondary" onClick=${() => setExpanded((e) => !e)}>${expanded ? 'Hide models' : 'Show models'}</button>
-      </div>
-
-      ${
-        expanded
-          ? html`
-              <div class="model-list">
-                ${
-                  models.length
-                    ? models.map((m) => html`<${ModelRow} key=${m.id} model=${m} onChange=${onChange} />`)
-                    : html`<div class="muted">No models.</div>`
-                }
-              </div>
-            `
-          : null
-      }
-
-      ${
-        configuring
-          ? html`
-              <div class="card inline-form">
-                <label class="field">
-                  <span class="field-label">Enabled</span>
-                  <select class="input" value=${enabled ? 'true' : 'false'} onChange=${(e) => setEnabled(e.target.value === 'true')}>
-                    <option value="true">Enabled</option>
-                    <option value="false">Disabled</option>
-                  </select>
-                </label>
-                <div class="row">
-                  <button class="btn" disabled=${saving} onClick=${saveEnabled}>${saving ? 'Saving…' : 'Save'}</button>
-                  <button
-                    class="btn secondary"
-                    onClick=${() => {
-                      setEnabled(provider.enabled);
-                      setConfiguring(false);
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            `
-          : html`
-              <div class="row">
-                <button class="btn secondary" onClick=${() => setConfiguring(true)}>Configure</button>
-                <button class="btn secondary" disabled=${testing} onClick=${test}>${testing ? 'Testing…' : 'Test Connection'}</button>
-              </div>
-            `
-      }
 
       ${testResult ? html`<div class="test-result ${testResult.ok ? 'good' : 'bad'}">${testResult.detail}</div>` : null}
-    </div>
+
+      ${
+        models.length
+          ? html`
+              <div class="table-wrap">
+                <table class="model-table">
+                  <thead>
+                    <tr><th>Model</th><th>Context</th><th>Price per 1M tokens</th><th>Capabilities</th><th class="num">On</th></tr>
+                  </thead>
+                  <tbody>
+                    ${models.map((m) => html`<${ModelRow} key=${m.id} model=${m} onChange=${onChange} disabled=${!provider.enabled} />`)}
+                  </tbody>
+                </table>
+              </div>
+            `
+          : html`<p class="muted">This provider lists no models.</p>`
+      }
+    </section>
   `;
 }
 
-function ModelRow({ model, onChange }) {
+function ModelRow({ model, onChange, disabled }) {
   const [saving, setSaving] = useState(false);
 
-  async function toggle() {
+  async function toggle(enabled) {
     setSaving(true);
     try {
-      await api.updateModel(model.id, { enabled: !model.enabled });
+      await api.updateModel(model.id, { enabled });
       onChange();
     } catch (e) {
       showToast(e.message, 'error');
@@ -183,22 +155,27 @@ function ModelRow({ model, onChange }) {
     }
   }
 
+  const caps = [
+    ...(model.capabilities || []),
+    model.reasoning ? `${model.reasoning} reasoning` : null,
+    model.toolUse === false ? 'no tools' : null,
+  ].filter(Boolean);
+  const ctx = model.contextLength || model.context_length;
+
   return html`
-    <div class="model-row">
-      <div>
-        <b>${model.displayName || model.name}</b>
-        <div class="muted">${model.id}</div>
-        <div class="muted">${(model.capabilities || []).join(' · ')}</div>
-        <div class="muted">
-          ${[model.reasoning ? `${model.reasoning} reasoning` : null, model.toolUse === false ? 'no tools' : null, model.contextLength ? `${Math.round(model.contextLength / 1000)}k ctx` : null]
-            .filter(Boolean)
-            .join(' · ') || 'capabilities unknown'}
-        </div>
-        <div class="muted">
-          ${model.input_cost_per_mtok != null ? `$${model.input_cost_per_mtok}/M in · $${model.output_cost_per_mtok}/M out` : 'no published price'}
-        </div>
-      </div>
-      <button class="btn secondary" disabled=${saving} onClick=${toggle}>${model.enabled ? 'Disable' : 'Enable'}</button>
-    </div>
+    <tr class=${model.enabled ? '' : 'off'}>
+      <td>
+        <div class="model-name">${model.displayName || model.name}</div>
+        <div class="mono-sm muted">${model.id}</div>
+      </td>
+      <td>${ctx ? `${Math.round(ctx / 1000)}k` : html`<span class="muted">—</span>`}</td>
+      <td>
+        ${model.input_cost_per_mtok != null
+          ? html`<span class="mono-sm">$${model.input_cost_per_mtok}</span> <span class="muted">in</span> · <span class="mono-sm">$${model.output_cost_per_mtok}</span> <span class="muted">out</span>`
+          : html`<span class="muted">Not published</span>`}
+      </td>
+      <td>${caps.length ? html`<div class="chips">${caps.map((c) => html`<span class="chip" key=${c}>${c}</span>`)}</div>` : html`<span class="muted">Unknown</span>`}</td>
+      <td class="num"><${Toggle} checked=${!!model.enabled} disabled=${saving || disabled} onChange=${toggle} label=${`Use ${model.displayName || model.name}`} hideLabel /></td>
+    </tr>
   `;
 }

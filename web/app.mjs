@@ -30,6 +30,10 @@ function parseHash() {
   if (parts[0] === 'chat' && parts[1]) return { view: 'chat-detail', id: parts[1] };
   if (parts[0] === 'sessions' && parts[1]) return { view: 'session-detail', id: parts[1] };
   if (parts[0] === 'project' && parts[1]) return { view: 'project', id: parts[1] };
+  // One run's detail, opened over the list: what a link to a particular run points at.
+  if (parts[0] === 'runs' && parts[1]) return { view: 'runs', id: parts[1] };
+  // The add form opened on arrival, for the links that exist to add a project.
+  if (parts[0] === 'projects' && parts[1] === 'new') return { view: 'projects', intent: 'new' };
   return { view: parts[0] };
 }
 
@@ -92,14 +96,6 @@ function App() {
     paletteRef.current = paletteOpen;
   }, [paletteOpen]);
 
-  // The keydown listener is bound once, so it reaches `newTask` through a ref rather
-  // than through its closure - which would be the first render's version, and the
-  // first render's version is the one that captured an empty intent counter.
-  const newTaskRef = useRef(() => {});
-  useEffect(() => {
-    newTaskRef.current = newTask;
-  }, [newTask]);
-
   // New task is the palette's one action that is not a navigation: the form belongs
   // to the tasks view, so the route is set and an intent is raised. The view opens
   // its form when the intent changes, which means the request survives the route
@@ -111,6 +107,14 @@ function App() {
     setNewTaskIntent((n) => n + 1);
   }, []);
   const consumeNewTask = useCallback(() => setNewTaskIntent(0), []);
+
+  // The keydown listener is bound once, so it reaches `newTask` through a ref rather
+  // than through its closure - which would be the first render's version, and the
+  // first render's version is the one that captured an empty intent counter.
+  const newTaskRef = useRef(() => {});
+  useEffect(() => {
+    newTaskRef.current = newTask;
+  }, [newTask]);
 
   useEffect(() => {
     function onHashChange() {
@@ -273,10 +277,10 @@ function App() {
   let view;
   switch (route.view) {
     case 'overview':
-      view = html`<${Overview} navigate=${navigate} />`;
+      view = html`<${Overview} navigate=${navigate} onNewTask=${newTask} />`;
       break;
     case 'projects':
-      view = html`<${Projects} navigate=${navigate} />`;
+      view = html`<${Projects} navigate=${navigate} openForm=${route.intent === 'new'} />`;
       break;
     case 'project':
       view = html`<${Project} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
@@ -306,7 +310,7 @@ function App() {
       view = html`<${Routing} navigate=${navigate} />`;
       break;
     case 'runs':
-      view = html`<${Runs} navigate=${navigate} />`;
+      view = html`<${Runs} navigate=${navigate} runId=${route.id} />`;
       break;
     case 'usage':
       view = html`<${Usage} navigate=${navigate} />`;
@@ -315,7 +319,7 @@ function App() {
       view = html`<${Settings} navigate=${navigate} />`;
       break;
     default:
-      view = html`<${Overview} navigate=${navigate} />`;
+      view = html`<${Overview} navigate=${navigate} onNewTask=${newTask} />`;
   }
 
   // The server this page was loaded from is gone. Every view would render an error per

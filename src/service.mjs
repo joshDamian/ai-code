@@ -7,12 +7,12 @@ import { inspect, writeContext, readDependencies, relevantFiles, buildTaskContex
 import {
   ensureGit, gitInit, hasCommits, commitInitial, status, createWorktree, diffAgainst, diffBetween, diffPaths, statusPaths, untracked, dirtyPaths, dirtyAndUntracked, worktreeHashes, changedPaths, head, changedBetween, protectAiCode,
   currentBranch, revParse, isAncestor, mergeBase, findCommit, branches, checkedOut, mergeTree, commitTree, setBranch, commitAll, removeWorktree, commitDiff,
-  landingCommit, commitRef,
+  landingCommit, commitRef, git,
 } from './git.mjs';
 import { runAgent, classify, permissionMcpConfig, removeMcpConfig, DISCUSSION_OPENS } from './agents.mjs';
 import { loadPolicies, savePolicies } from './policy.mjs';
 import { isTransient, healthThresholds, effectiveHealth } from './health.mjs';
-import { unifiedDiff } from './format.mjs';
+import { unifiedDiff, sessionSteps, toolTarget } from './format.mjs';
 
 const exec = promisify(execFile);
 
@@ -624,9 +624,33 @@ export function taskShaped({ status, events = [], changedPaths = [] } = {}) {
 // The changed paths a run left in the checkout, as `git status` reports them. The
 // second signal above, read at the moment the turn ends rather than reconstructed
 // later: what the tree looks like after a later turn is not evidence about this one.
+// A step the person refused, or let time out, marked on the step it refused. The
+// request carries the tool and its input but not the call's id, so the match is the
+// first step of that tool pointed at the same target that is not already marked.
+function markRefused(steps, refused) {
+  for (const r of refused) {
+    let input = null;
+    try {
+      input = JSON.parse(r.input);
+    } catch {}
+    const target = toolTarget(input);
+    const step = steps.find((x) => x.status === 'done' && x.tool === r.tool && x.target === target);
+    if (step) step.status = r.status === 'timeout' ? 'timed out' : 'denied';
+  }
+  return steps;
+}
+
+// A reply's opening line, for a list row that has room for one.
+function firstLineOf(text) {
+  const line = String(text || '').split('\n').map((l) => l.replace(/^[#>*\-\s]+/, '').trim()).find(Boolean) || '';
+  return line.length > 140 ? `${line.slice(0, 139)}…` : line;
+}
+
 function changedInCheckout(root) {
   try {
-    return status(root).map((line) => line.slice(3).trim()).filter(Boolean);
+    // `statusPaths`, not `status`: the latter is one trimmed string, which has no
+    // rows to map and loses the first row's leading status column besides.
+    return statusPaths(root).map((line) => line.slice(3).trim()).filter(Boolean);
   } catch {
     // An unreadable tree is not evidence of a change, and a nudge built on a guess
     // is worse than no nudge.
@@ -1341,7 +1365,7 @@ export class Service {
         try { fs.rmdirSync(before); } catch { /* not empty, or already gone */ }
       }
     }
-    const added = this.addDrafts(projectId, parsed.tasks, 'intake');
+    const added = this.addDrafts(projectId, parsed.tasks, 'intake', sessionId);
     return { project: this.project(projectId), session: this.chatSession(sessionId), draft: { spec: parsed.spec, tasks: added } };
   }
 
@@ -1374,9 +1398,12 @@ export class Service {
     return this.project(projectId).drafts || [];
   }
 
-  addDrafts(projectId, tasks, source) {
+  // `chatSessionId` is the conversation the pass answered in, so that conversation
+  // can show the drafts it proposed and no others.
+  addDrafts(projectId, tasks, source, chatSessionId = null) {
     const drafts = this.drafts(projectId);
-    const added = tasks.map((t) => ({ id: this.store.id(), title: t.title, description: t.description, source, at: new Date().toISOString() }));
+    const at = new Date().toISOString();
+    const added = tasks.map((t) => ({ id: this.store.id(), title: t.title, description: t.description, source, at, chat_session_id: chatSessionId }));
     this.store.updateProjectDrafts(projectId, [...drafts, ...added]);
     return added;
   }
@@ -1446,7 +1473,7 @@ export class Service {
         return tasks.length ? { tasks } : null;
       });
       this.store.addChatMessage({ id: this.store.id(), sessionId, role: 'assistant', content: text || 'The model returned no proposals.', runId: result.runId });
-      return { project: this.project(project.id), session: this.chatSession(sessionId), tasks: parsed ? this.addDrafts(project.id, parsed.tasks, 'proposal') : [] };
+      return { project: this.project(project.id), session: this.chatSession(sessionId), tasks: parsed ? this.addDrafts(project.id, parsed.tasks, 'proposal', sessionId) : [] };
     } finally {
       this.chatBusy.delete(sessionId);
     }
@@ -2365,8 +2392,10 @@ export class Service {
   // answer - `finalText` would hand back whatever streamed before the turn was cut
   // short, which reads as a reply the agent never finished making.
   sessionTurns(sessionId) {
+    const answered = this.store.listPermissionRequests(sessionId).filter((r) => r.status === 'denied' || r.status === 'timeout');
     return this.store.listSessionRuns(sessionId).map((run) => {
-      const instruction = this.store.listEvents(run.id).filter((e) => e.type === 'instruction').pop();
+      const events = this.store.listEvents(run.id);
+      const instruction = events.filter((e) => e.type === 'instruction').pop();
       return {
         run_id: run.id,
         at: run.started_at,
@@ -2374,10 +2403,82 @@ export class Service {
         status: run.status,
         error: run.error,
         cost: run.cost || 0,
+        model_id: run.model_id || null,
         instruction: instruction?.data?.text || '',
         answer: run.status === 'succeeded' ? (this.finalText(run.id) || '').trim() : '',
+        steps: markRefused(
+          sessionSteps(events),
+          answered.filter((r) => r.run_id === run.id)
+        ),
       };
     });
+  }
+
+  // One row per session for the list, carrying what the row has to say without
+  // opening the session: what it is asking for, what it is doing, and what it last
+  // said. Read per row rather than joined, because each half lives in a different
+  // table and the list is a person's sessions in one project - tens, not thousands.
+  sessionSummaries(projectId) {
+    return this.store.listSessions(projectId).map((s) => {
+      const runs = this.store.listSessionRuns(s.id);
+      const pending = this.permissionFor(s.id);
+      let activity = null;
+      if (s.pending_run_id) {
+        const steps = sessionSteps(this.store.listEvents(s.pending_run_id));
+        const last = steps[steps.length - 1];
+        activity = last ? { tool: last.tool, target: last.target } : null;
+      }
+      const settled = [...runs].reverse().find((r) => r.status === 'succeeded');
+      const preview = settled ? firstLineOf(this.finalText(settled.id)) : '';
+      return {
+        ...s,
+        turn_count: runs.length,
+        pending: pending ? { tool: pending.tool, target: toolTarget(pending.input), timeout_at: pending.timeout_at } : null,
+        activity,
+        preview,
+      };
+    });
+  }
+
+  // What is uncommitted in the checkout the session works in, with line counts. The
+  // checkout is the person's own, so this is everything in it and not only what the
+  // session wrote - which is the honest reading, since a session's edits and the
+  // person's are the same kind of change to the same tree.
+  sessionChanges(sessionId) {
+    const s = this.sessionById(sessionId);
+    const root = this.project(s.project_id).path;
+    let lines;
+    try {
+      lines = statusPaths(root);
+    } catch {
+      return [];
+    }
+    const counts = new Map();
+    try {
+      for (const row of git(root, ['diff', '--numstat', 'HEAD']).split('\n').filter(Boolean)) {
+        const [added, removed, ...file] = row.split('\t');
+        counts.set(file.join('\t'), { added: Number(added) || 0, removed: Number(removed) || 0 });
+      }
+    } catch {
+      // No HEAD yet: every path is new, and there is nothing to count against.
+    }
+    return lines.map((line) => {
+      const code = line.slice(0, 2);
+      const file = line.slice(3).trim().replace(/^"|"$/g, '').split(' -> ').pop();
+      const c = counts.get(file);
+      return { path: file, status: code.includes('?') ? 'new' : code.includes('D') ? 'deleted' : 'modified', added: c?.added ?? null, removed: c?.removed ?? null };
+    });
+  }
+
+  // Today's spend across every session, for the list, which has no session of its own
+  // to ask. The same three figures `sessionBudget` reads, minus the session's tally.
+  sessionsSpend() {
+    const policy = this.policies.session || {};
+    return {
+      todaySpent: this.store.sessionSpendSince(startOfDayIso()),
+      dailyCap: Number(policy.dailyCap) || 0,
+      runCap: Number(policy.maxRunCost) || 0,
+    };
   }
 
   // A cancel, durable first, for the reason cancelTask gives: the session column is
@@ -2560,7 +2661,12 @@ export class Service {
   // approval queue exactly as every other proposal does. What is new is only the
   // input: a pass with a focus is asked to describe the work that already happened
   // rather than to guess at work that has not.
-  async draftSessionTask(sessionId) {
+  //
+  // It returns once the conversation exists and leaves the model run to the queue's
+  // `proposals` job, which is the pass every other drafting route runs. Running it
+  // here as well made the route wait on a whole model run - and, since the route did
+  // not wait, answer with a Promise where the conversation should have been.
+  draftSessionTask(sessionId) {
     const s = this.sessionById(sessionId);
     const project = this.project(s.project_id);
     const last = this.store.listSessionRuns(sessionId).filter((r) => r.status === 'succeeded').pop();
@@ -2581,35 +2687,11 @@ export class Service {
       content: `Draft the tasks that describe the work this session did in the checkout.`,
       runId,
     });
-    // Run the proposals prompt immediately to draft the tasks.
-    const open = this.store.listTasks(project.id).filter((t) => !CLOSED_STATES.has(t.state));
-    const spec = cap(project.spec || '', SPEC_PROMPT_CHARS);
-    const result = await this.runRole(
-      {
-        id: null,
-        project_id: project.id,
-        title: `Task from session: ${s.name}`,
-        description: focus || s.name,
-        plan: SESSION_NO_PLAN,
-      },
-      'chat',
-      PROPOSALS_PROMPT(spec, open, cap(focus, DECISION_DIFF_CHARS)),
-      project.path,
-      [],
-      { runId, chatSessionId: chat.id }
-    );
-    const text = this.finalText(result.runId).trim();
-    const parsed = draftPayload(text, (x) => {
-      const tasks = draftTasks(x.tasks);
-      return tasks.length ? { tasks } : null;
-    });
-    this.store.addChatMessage({ id: this.store.id(), sessionId: chat.id, role: 'assistant', content: text || 'The model returned no proposals.', runId: result.runId });
-    const drafts = parsed ? this.addDrafts(project.id, parsed.tasks, 'proposal') : [];
     // The session is done as a session. Its work is on its way to a task, which is
     // the only thing that can review and land it, and a session left running beside
     // that task would be a second agent editing the same files.
     this.store.updateSession(sessionId, { status: 'stopped', nudge_dismissed: 1 });
-    return { project: this.project(project.id), chatSession: this.chatSession(chat.id), drafts };
+    return { project: this.project(project.id), chatSession: this.chatSession(chat.id) };
   }
 
   // -- execution ------------------------------------------------------------

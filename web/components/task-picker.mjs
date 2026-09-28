@@ -11,6 +11,7 @@
 // pickers read as one control in two places rather than as two lookalikes that
 // drift apart.
 import { html, useState, useMemo, useRef, fuzzy, shortId } from '../lib.mjs';
+import { useAnchor } from './anchor.mjs';
 
 export function TaskPicker({ label, tasks, value, onInput, placeholder, loading, excludeId }) {
   // `open` is a focus state, not a value: the input holds the query while the
@@ -20,6 +21,10 @@ export function TaskPicker({ label, tasks, value, onInput, placeholder, loading,
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const inputRef = useRef(null);
+  const wrapRef = useRef(null);
+  // Placed from the field rather than inside it, so a dialog or a scrolling card
+  // cannot clip the results.
+  const place = useAnchor(wrapRef, open, 220);
 
   const selected = (tasks || []).find((t) => t.id === value) || null;
 
@@ -106,7 +111,7 @@ export function TaskPicker({ label, tasks, value, onInput, placeholder, loading,
   return html`
     <div class="field task-picker">
       ${label ? html`<span class="field-label">${label}</span>` : null}
-      <div class="task-picker-wrap">
+      <div class="task-picker-wrap" ref=${wrapRef}>
         <input
           type="text"
           class="input"
@@ -151,7 +156,7 @@ export function TaskPicker({ label, tasks, value, onInput, placeholder, loading,
       </div>
       ${open
         ? html`
-            <ul class="cmd-list" role="listbox" aria-label="Parent task">
+            <ul class="cmd-list" style=${place || { visibility: 'hidden' }} role="listbox" aria-label="Parent task">
               ${items.map(
                 (item, i) => html`
                   <li

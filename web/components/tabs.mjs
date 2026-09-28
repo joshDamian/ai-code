@@ -6,12 +6,29 @@
 // - because a tab is not a link and Tab is how you leave the strip, not how you
 // walk it. That is the whole convention, and it is the difference between seven
 // buttons and one control.
-import { html, useRef } from '../lib.mjs';
+import { html, useRef, useEffect } from '../lib.mjs';
 
 // `id` doubles as the panel's, so the two ends of `aria-controls` are derived
 // from one name rather than kept in step by hand.
+//
+// Only the current tab is in the tab order (`tabIndex` below). Without that, Tab
+// walks through all seven before it reaches the panel they control.
 export function Tabs({ tabs, value, onChange, label }) {
   const refs = useRef({});
+  const stripRef = useRef(null);
+
+  // The open tab is kept in view when the strip is narrower than its tabs, which on a
+  // phone it is. Scrolled on the strip itself: scrollIntoView would also move the
+  // page, and a tab switch is not a reason to jump the reader somewhere else.
+  useEffect(() => {
+    const strip = stripRef.current;
+    const el = refs.current[value];
+    if (!strip || !el || strip.scrollWidth <= strip.clientWidth) return;
+    const left = el.offsetLeft - strip.offsetLeft;
+    const right = left + el.offsetWidth;
+    if (left < strip.scrollLeft + 24) strip.scrollLeft = Math.max(0, left - 24);
+    else if (right > strip.scrollLeft + strip.clientWidth - 40) strip.scrollLeft = right - strip.clientWidth + 40;
+  }, [value]);
 
   function move(to) {
     onChange(to);
@@ -37,7 +54,7 @@ export function Tabs({ tabs, value, onChange, label }) {
   }
 
   return html`
-    <div class="tabs" role="tablist" aria-label=${label} onKeyDown=${onKeyDown}>
+    <div class="tabs" role="tablist" aria-label=${label} onKeyDown=${onKeyDown} ref=${stripRef}>
       ${tabs.map(
         (t) => html`
           <button
@@ -51,14 +68,15 @@ export function Tabs({ tabs, value, onChange, label }) {
             id=${`tab-${t.id}`}
             aria-selected=${value === t.id ? 'true' : 'false'}
             aria-controls=${`panel-${t.id}`}
-            // Only the current tab is in the tab order. Without this, Tab walks
-            // through all seven before it reaches the panel they control.
             tabIndex=${value === t.id ? 0 : -1}
             onClick=${() => onChange(t.id)}
           >
-            ${t.label}
+            ${t.label}${' '}
+            ${t.done
+              ? html`<svg class="tab-done" viewBox="0 0 16 16" role="img" aria-label="Done"><path d="m3.5 8.5 3 3 6-7" /></svg>`
+              : null}
             ${t.dot ? html`<span class="tab-dot" role="img" aria-label=${t.dotLabel || 'Updated'}></span>` : null}
-            ${t.count == null ? null : html`<span class="tab-count">${t.count}</span>`}
+            ${t.count == null ? null : html`${' '}<span class="tab-count">${t.count}</span>`}
           </button>
         `
       )}

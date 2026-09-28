@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -6026,6 +6026,91 @@ test('task-shaped counts what a turn wrote, not that it wrote', () => {
   assert.equal(taskShaped({}), false);
 });
 
+test('sessionSteps names each tool call and folds a failed result onto its step', () => {
+  const use = (id, name, input) => ({ data: { message: { content: [{ type: 'tool_use', id, name, input }] } } });
+  const result = (id, isError, content) => ({ data: { message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: isError, content }] } } });
+  const steps = sessionSteps([
+    { type: 'instruction', data: { text: 'go' } },
+    use('a', 'Read', { file_path: '/r/README.md' }),
+    result('a', false, 'x'),
+    use('b', 'Grep', { pattern: 'install' }),
+    result('b', true, '<tool_use_error>No matches</tool_use_error>'),
+    use('c', 'Bash', { command: 'npm test\n--watch' }),
+  ]);
+  assert.deepEqual(
+    steps.map((x) => [x.tool, x.target, x.status]),
+    [
+      ['Read', '/r/README.md', 'done'],
+      ['Grep', 'install', 'failed'],
+      ['Bash', 'npm test', 'done'],
+    ]
+  );
+  // The failure is the step's, with claude's wrapper taken off it.
+  assert.equal(steps[1].error, 'No matches');
+  assert.deepEqual(sessionSteps(null), []);
+});
+
+test('session turns carry their steps, and a refused step is marked on the step it refused', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Steps');
+  s.askSession(session.id, 'Edit the readme.');
+  await s.sessionTurn(session.id);
+  const runId = s.store.listSessionRuns(session.id)[0].id;
+  const file = path.join(root, 'README.md');
+  for (const [id, name] of [['r', 'Read'], ['e', 'Edit']]) {
+    s.store.addEvent({ runId, type: 'message', data: { message: { content: [{ type: 'tool_use', id, name, input: { file_path: file } }] } } });
+  }
+  const asked = s.addPermissionRequest({ sessionId: session.id, runId, tool: 'Edit', input: { file_path: file }, cwd: root });
+  s.answerPermission(asked.id, 'deny');
+  const [turn] = s.sessionTurns(session.id);
+  assert.deepEqual(turn.steps.map((x) => [x.tool, x.status]), [['Read', 'done'], ['Edit', 'denied']]);
+});
+
+test('the session list says what each session is asking for, and the checkout says what changed', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const asking = s.createSession(p.id, 'Asking');
+  s.addPermissionRequest({ sessionId: asking.id, runId: null, tool: 'Bash', input: { command: 'npm test' }, cwd: root });
+  const answered = s.createSession(p.id, 'Answered');
+  s.askSession(answered.id, 'Say something.');
+  await s.sessionTurn(answered.id);
+  const rows = new Map(s.sessionSummaries(p.id).map((r) => [r.name, r]));
+  assert.deepEqual(
+    { tool: rows.get('Asking').pending.tool, target: rows.get('Asking').pending.target },
+    { tool: 'Bash', target: 'npm test' }
+  );
+  assert.ok(rows.get('Asking').pending.timeout_at);
+  assert.equal(rows.get('Answered').pending, null);
+  assert.equal(rows.get('Answered').turn_count, 1);
+  assert.ok(rows.get('Answered').preview.length > 0, 'a settled turn previews its answer');
+
+  // A modified file is counted against HEAD and an untracked one is new. The first
+  // row is the one `git status` would print with a leading space, which a trimmed
+  // read turns into a path missing its first letter.
+  fs.writeFileSync(path.join(root, 'README.md'), 'x\ny\n');
+  fs.writeFileSync(path.join(root, 'added.txt'), 'new');
+  const changes = s.sessionChanges(asking.id);
+  assert.deepEqual(changes.find((c) => c.path === 'README.md'), { path: 'README.md', status: 'modified', added: 2, removed: 1 });
+  assert.equal(changes.find((c) => c.path === 'added.txt').status, 'new');
+  assert.equal(s.sessionsSpend().todaySpent, 0);
+});
+
+test('a turn records the paths it left changed in the checkout', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Changes');
+  fs.writeFileSync(path.join(root, 'README.md'), 'changed');
+  s.askSession(session.id, 'Look around.');
+  await s.sessionTurn(session.id);
+  // Read from the session row: `changedInCheckout` once called `.map` on a string,
+  // threw, and was caught into an empty list - so no turn ever recorded a path.
+  assert.deepEqual(JSON.parse(s.sessionById(session.id).changed_paths), ['README.md']);
+});
+
 test('a session is created, renamed, listed and archived', () => {
   const root = repo();
   const s = new Service(root, { allowMock: true, silent: true });
@@ -6317,8 +6402,12 @@ test('draftSessionTask drafts a task-shaped session run into the proposals queue
   s.askSession(session.id,'write hello.txt');
   await s.sessionTurn(session.id);
   // The turn has completed; draft it into a task proposal.
-  const draftResult=await s.draftSessionTask(session.id);
+  // The draft opens the conversation and returns; the queued proposals pass is
+  // what runs the model, so it is run here the way the runner would.
+  const draftResult=s.draftSessionTask(session.id);
+  assert.ok(!(draftResult instanceof Promise),'the route reads the conversation off the return value');
   assert.ok(draftResult.chatSession,'a chat session was created for the proposals');
+  await s.proposeTasks(draftResult.chatSession.id);
   assert.equal(draftResult.chatSession.project_id,p.id);
   // The session is now stopped, not available for new instructions.
   const stoppedSession=s.sessionById(session.id);
@@ -6351,7 +6440,9 @@ test('draftSessionTask grounds the draft in the project spec, not the session pl
   const prompts=[];
   const realRunRole=s.runRole.bind(s);
   s.runRole=(...args)=>{prompts.push(String(args[2]));return realRunRole(...args)};
-  await s.draftSessionTask(session.id);
+  const {chatSession}=s.draftSessionTask(session.id);
+  assert.equal(prompts.length,0,'drafting runs nothing until the queue picks it up');
+  await s.proposeTasks(chatSession.id);
   assert.equal(prompts.length,1,'the drafting pass is one run');
   assert.match(prompts[0],/THE PROJECT SPEC/);
   // And the session's own work is what the draft is asked to describe.

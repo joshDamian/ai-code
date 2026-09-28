@@ -665,6 +665,75 @@ test('a supervised session is created, receives an instruction, and streams the 
   }finally{srv.stop()}
 });
 
+// The approval panel under a conversation shows what that conversation drafted.
+// Drafts are the project's, so each carries the conversation whose pass wrote it,
+// and the server hands a conversation the ids of its own.
+test('a conversation is told which of the waiting drafts it proposed',async()=>{
+  const root=gitRepo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'chat-provider',name:'Chat',kind:'mock',enabled:true,config:{routable:true,chatText:'Ideas.\n\n```json\n{"tasks":[{"title":"Add a README section","description":"Document usage"}]}\n```'}});
+  s.addModel({id:'chat-m',providerId:'chat-provider',name:'chat',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  // Two proposals passes, run the way the queue runs them.
+  const first=s.askProposals(p.id);await s.proposeTasks(first.id);
+  const second=s.askProposals(p.id);await s.proposeTasks(second.id);
+  const plain=s.createChatSession(p.id,'A question',null);
+  // A draft from before drafts named their conversation.
+  const legacy=s.askProposals(p.id);
+  const [d]=s.addDrafts(p.id,[{title:'Legacy',description:'old'}],'proposal');
+  const answerId=s.store.id();
+  s.store.addChatMessage({id:answerId,sessionId:legacy.id,role:'assistant',content:'Legacy answer.'});
+  // Pinned an hour back, so only the legacy answer is near it.
+  const then=new Date(Date.now()-3600e3);
+  s.store.db.prepare('UPDATE chat_messages SET created_at=? WHERE id=?').run(new Date(then.getTime()+1).toISOString(),answerId);
+  s.store.updateProjectDrafts(p.id,s.drafts(p.id).map((x)=>x.id===d.id?{...x,at:then.toISOString(),chat_session_id:undefined}:x));
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const read=async(id)=>JSON.parse((await get(`${srv.base}/api/chat/sessions/${id}`)).body);
+    const drafts=s.drafts(p.id);
+    const byChat=(id)=>drafts.filter((x)=>x.chat_session_id===id).map((x)=>x.id);
+    const a=await read(first.id),b=await read(second.id),c=await read(plain.id),l=await read(legacy.id);
+    assert.deepEqual(a.draftIds,byChat(first.id),'the first pass sees its own draft');
+    assert.deepEqual(b.draftIds,byChat(second.id),'the second pass sees its own, not the first one');
+    assert.equal(a.draftIds.length,1);
+    assert.deepEqual(c.draftIds,[],'an ordinary chat proposed nothing');
+    assert.deepEqual(l.draftIds,[d.id],'a draft with no conversation is matched by when its answer landed');
+    assert.equal(a.specPass,false,'a proposals pass does not own the spec');
+  }finally{srv.stop()}
+});
+
+// Draft as task over HTTP. The route reads the new conversation off the service's
+// return value; when that value was a Promise, every click answered 400 with
+// "Cannot read properties of undefined (reading 'id')" while the drafting run went
+// on unobserved behind it.
+test('drafting a session as a task answers with the conversation and queues the pass',async()=>{
+  const root=gitRepo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'session-provider',name:'Session',kind:'mock',enabled:true,config:{routable:true,chatText:'Wrote hello.txt.\n\n```json\n{"tasks":[{"title":"Review session changes","description":"Check hello.txt"}]}\n```'}});
+  s.addModel({id:'session-m',providerId:'session-provider',name:'session',capabilities:['coding','planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const session=s.createSession(p.id,'draft session');
+  s.askSession(session.id,'write hello.txt');
+  await s.sessionTurn(session.id);
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const r=await post(`${srv.base}/api/sessions/${session.id}/draft-task`,{});
+    assert.equal(r.status,202,r.body);
+    const out=JSON.parse(r.body);
+    assert.ok(out.session?.id,'the reply names the conversation to open');
+    assert.equal(out.job?.kind,'proposals');
+    const chat=JSON.parse((await get(`${srv.base}/api/chat/sessions/${out.session.id}`)).body);
+    assert.equal(chat.session.project_id,p.id);
+    const after=JSON.parse((await get(`${srv.base}/api/sessions/${session.id}`)).body);
+    assert.equal(after.session.status,'stopped');
+    // An unknown session is refused as a 400 by the route's own catch.
+    const missing=await post(`${srv.base}/api/sessions/nope/draft-task`,{});
+    assert.equal(missing.status,400);
+  }finally{srv.stop()}
+});
+
 // Permission round-trip: the core new mechanism. POST endpoint blocks, GET shows it,
 // POST answer allows/denies, timeout auto-denies.
 test('a session permission request blocks the agent, and is answered via the API',async()=>{

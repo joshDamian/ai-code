@@ -14,7 +14,7 @@ import { StatusBadge } from '../components/status-badge.mjs';
 import { DataTable } from '../components/data-table.mjs';
 import { Tabs } from '../components/tabs.mjs';
 import { Time } from '../components/time.mjs';
-import { TextArea, Select } from '../components/form.mjs';
+import { TextArea, Select, Toggle } from '../components/form.mjs';
 import { TaskPicker } from '../components/task-picker.mjs';
 import { shortId } from '../lib.mjs';
 
@@ -188,6 +188,9 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
   ];
 
   const isFiltered = Boolean(query.trim() || projectFilter || tab !== 'all');
+  // Loaded, and nothing to put a task in. Tasks and projects arrive in one read, so a
+  // loaded task list is also a loaded project list.
+  const noProjects = tasks !== null && !projects.length;
 
   return html`
     <div class="view-tasks">
@@ -197,6 +200,7 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
             class="input search-input"
             type="search"
             data-search
+            aria-label="Search tasks"
             placeholder="Search tasks…"
             value=${query}
             onInput=${(e) => setQuery(e.target.value)}
@@ -207,7 +211,7 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
             projects.length > 1
               ? html`
                   <${Select}
-                    label="Project"
+                    ariaLabel="Project"
                     value=${projectFilter}
                     onChange=${setProjectFilter}
                     options=${[{ value: '', label: 'All projects' }, ...projects.map((p) => ({ value: p.id, label: p.name }))]}
@@ -216,7 +220,6 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
                 `
               : null
           }
-          <button class="btn primary tasks-new" onClick=${() => setShowForm(true)} aria-expanded=${showForm}>New task</button>
         </div>
         <div class="tasks-tabs">
           <${Tabs} tabs=${TABS.map((t) => ({ id: t.id, label: t.label, count: counts[t.id] || 0 }))} value=${tab} onChange=${setTab} label="Task state" />
@@ -224,7 +227,7 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
             // Only the All tab mixes cancelled tasks in, so this is the only tab the
             // toggle has anything to do on.
             tab === 'all'
-              ? html`<label class="switch"><input type="checkbox" checked=${showCancelled} onChange=${(e) => setShowCancelled(e.target.checked)} /> Show cancelled</label>`
+              ? html`<${Toggle} checked=${showCancelled} onChange=${setShowCancelled} label="Show cancelled" />`
               : null
           }
         </div>
@@ -235,7 +238,7 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
           ? html`
               <div class="kbd-overlay confirm-overlay" onClick=${(e) => e.target === e.currentTarget && setShowForm(false)}>
                 <form
-                  class="card dialog dialog-wide"
+                  class="card dialog dialog-wide inline-form"
                   onSubmit=${submit}
                   onKeyDown=${(e) => {
                     if (e.defaultPrevented) return;
@@ -249,23 +252,22 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
                     <h2 class="dialog-title">New task</h2>
                     <button type="button" class="icon-btn" aria-label="Close" onClick=${() => setShowForm(false)}>✕</button>
                   </div>
-                  <div class="inline-form-grid">
-                    <${Select}
-                      label="Project"
-                      value=${projectId}
-                      onChange=${setProjectId}
-                      options=${projects.map((p) => ({ value: p.id, label: p.name }))}
-                      loading=${saving}
-                    />
-                    <${TaskPicker}
-                      label="Parent task (optional)"
-                      tasks=${parentCandidates}
-                      value=${parentId}
-                      onInput=${setParentId}
-                      placeholder="Search tasks by title — the task this one builds on"
-                      loading=${saving}
-                    />
-                  </div>
+                  ${noProjects
+                    ? html`
+                        <p class="muted dialog-body">A task is a change to a project’s code, so it needs a project to belong to. Add one, then come back to describe the task.</p>
+                        <div class="inline-form-foot">
+                          <button class="btn secondary" type="button" onClick=${() => setShowForm(false)}>Cancel</button>
+                          <a class="btn primary" href="#/projects/new" onClick=${() => setShowForm(false)}>Add a project</a>
+                        </div>
+                      `
+                    : html`
+                  <${Select}
+                    label="Project"
+                    value=${projectId}
+                    onChange=${setProjectId}
+                    options=${projects.map((p) => ({ value: p.id, label: p.name }))}
+                    loading=${saving}
+                  />
                   <${TextArea}
                     inputRef=${descriptionRef}
                     label="Description"
@@ -283,12 +285,20 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
                       }
                     }}
                   />
+                  <${TaskPicker}
+                    label="Parent task (optional)"
+                    tasks=${parentCandidates}
+                    value=${parentId}
+                    onInput=${setParentId}
+                    placeholder="Search tasks by title — the task this one builds on"
+                    loading=${saving}
+                  />
                   <div class="inline-form-foot">
                     <span class="muted">⌘↵ to create</span>
                     <button class="btn secondary" type="button" onClick=${() => setShowForm(false)}>Cancel</button>
                     <button class="btn primary" type="submit" disabled=${saving || !projects.length}>${saving ? 'Creating…' : 'Create task'}</button>
                   </div>
-                  ${!projects.length ? html`<div class="muted">Add a project first.</div>` : null}
+                    `}
                 </form>
               </div>
             `
@@ -312,13 +322,21 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
                   setProjectFilter('');
                 }}
               />`
-            : html`<${EmptyState}
-                title="No tasks yet"
-                message="This workspace has no tasks."
-                hint="A task is one unit of work: a description, a plan you approve, an implementation, and a review."
-                actionLabel="New task"
-                onAction=${() => setShowForm(true)}
-              />`
+            : noProjects
+              ? html`<${EmptyState}
+                  title="Add a project first"
+                  message="Tasks are changes to a project’s code, and there is no project yet."
+                  hint="Add a repository by its path, or start from an idea and let the draft pass propose one."
+                  actionLabel="Add a project"
+                  onAction=${() => navigate('#/projects/new')}
+                />`
+              : html`<${EmptyState}
+                  title="No tasks yet"
+                  message="This workspace has no tasks."
+                  hint="A task is one unit of work: a description, a plan you approve, an implementation, and a review."
+                  actionLabel="New task"
+                  onAction=${() => setShowForm(true)}
+                />`
       }
     </div>
   `;

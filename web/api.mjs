@@ -201,7 +201,9 @@ export const api = {
   // rather than its result - the turn is read back through the stream, for the same
   // reason a chat turn is.
   sessions: (projectId) => request(`/api/sessions${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
-  createSession: (projectId, name) => request('/api/sessions', { method: 'POST', body: { projectId, name } }),
+  createSession: (projectId, name, { providerId = null, modelId = null } = {}) =>
+    request('/api/sessions', { method: 'POST', body: { projectId, name, providerId, modelId } }),
+  sessionSpend: () => request('/api/session-spend'),
   session: (id) => request(`/api/sessions/${id}`),
   updateSession: (id, body) => request(`/api/sessions/${id}`, { method: 'PATCH', body }),
   archiveSession: (id) => request(`/api/sessions/${id}/archive`, { method: 'POST' }),

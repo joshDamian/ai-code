@@ -1,9 +1,15 @@
-import { html, useState, useEffect } from '../lib.mjs';
+import { html, useState, useEffect, shortDir } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
 import { TextInput, TextArea } from '../components/form.mjs';
+import { Time } from '../components/time.mjs';
+
+// A task counts as active from the moment planning starts until it settles, and as
+// waiting when the next move is a person's. The rest are resting and are not counted.
+const IDLE = new Set(['CREATED', 'COMPLETE', 'FAILED', 'CANCELLED']);
+const WAITING = new Set(['AWAITING_APPROVAL', 'AWAITING_DECISION']);
 
 // The two ways in, and they are not the same thing. `add` names a repository that
 // already exists - the path is realpath'd and refused if it is not one. `idea`
@@ -11,8 +17,9 @@ import { TextInput, TextArea } from '../components/form.mjs';
 // created when the drafted spec is approved, and the drafting is a chat turn.
 const MODES = { add: 'add', idea: 'idea' };
 
-export function Projects({ navigate }) {
+export function Projects({ navigate, openForm }) {
   const [projects, setProjects] = useState(null);
+  const [tasks, setTasks] = useState(null);
   const [mode, setMode] = useState(null);
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
@@ -21,7 +28,11 @@ export function Projects({ navigate }) {
 
   async function load() {
     try {
-      setProjects(await api.projects());
+      // Tasks ride along so each card can say what is happening in it, which is the
+      // question a person opening this page is asking - not what its path is.
+      const [list, all] = await Promise.all([api.projects(), api.tasks().catch(() => [])]);
+      setTasks(all);
+      setProjects(list);
     } catch (e) {
       showToast(e.message, 'error');
     }
@@ -30,6 +41,10 @@ export function Projects({ navigate }) {
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    if (openForm) setMode(MODES.add);
+  }, [openForm]);
 
   function reset() {
     setName('');
@@ -78,18 +93,18 @@ export function Projects({ navigate }) {
 
   if (!projects) return html`<${Spinner} message="Loading projects..." />`;
 
+  const close = html`<button type="button" class="icon-btn" aria-label="Close" onClick=${reset}>✕</button>`;
+
   return html`
     <div class="view-projects">
       <div class="view-toolbar">
+        <p class="view-lead">Repositories the pipeline may plan, change and review.</p>
         <div class="row">
-          <button
-            class="btn ${mode === MODES.add ? 'secondary' : 'primary'}"
-            onClick=${() => setMode((m) => (m === MODES.add ? null : MODES.add))}
-          >
-            ${mode === MODES.add ? 'Cancel' : 'New project'}
+          <button class="btn secondary" type="button" onClick=${() => setMode((m) => (m === MODES.idea ? null : MODES.idea))} aria-expanded=${mode === MODES.idea}>
+            From an idea
           </button>
-          <button class="btn secondary" onClick=${() => setMode((m) => (m === MODES.idea ? null : MODES.idea))}>
-            ${mode === MODES.idea ? 'Cancel' : 'From an idea'}
+          <button class="btn primary" type="button" onClick=${() => setMode((m) => (m === MODES.add ? null : MODES.add))} aria-expanded=${mode === MODES.add}>
+            New project
           </button>
         </div>
       </div>
@@ -97,16 +112,17 @@ export function Projects({ navigate }) {
       ${
         mode === MODES.add
           ? html`
-              <form class="card inline-form" onSubmit=${submit}>
-                <${TextInput} label="Name" value=${name} onInput=${setName} placeholder="my-service" loading=${saving} />
-                <${TextInput}
-                  label="Absolute path"
-                  value=${path}
-                  onInput=${setPath}
-                  placeholder="/Users/you/code/my-service"
-                  loading=${saving}
-                />
-                <button class="btn" type="submit" disabled=${saving}>${saving ? 'Adding…' : 'Add project'}</button>
+              <form class="card inline-form project-form" onSubmit=${submit}>
+                <div class="inline-form-head"><h3>Add a repository</h3>${close}</div>
+                <div class="inline-form-grid">
+                  <${TextInput} label="Name" value=${name} onInput=${setName} placeholder="my-service" loading=${saving} />
+                  <${TextInput} label="Absolute path" value=${path} onInput=${setPath} placeholder="/Users/you/code/my-service" loading=${saving} />
+                </div>
+                <div class="inline-form-foot">
+                  <span class="muted">The path must already be a git repository.</span>
+                  <button class="btn secondary" type="button" onClick=${reset}>Cancel</button>
+                  <button class="btn primary" type="submit" disabled=${saving}>${saving ? 'Adding…' : 'Add project'}</button>
+                </div>
               </form>
             `
           : null
@@ -115,21 +131,22 @@ export function Projects({ navigate }) {
       ${
         mode === MODES.idea
           ? html`
-              <form class="card inline-form" onSubmit=${submit}>
+              <form class="card inline-form project-form" onSubmit=${submit}>
+                <div class="inline-form-head"><h3>Start from an idea</h3>${close}</div>
                 <${TextArea}
                   label="The idea, in your own words"
                   value=${idea}
                   onInput=${setIdea}
-                  rows=${8}
+                  rows=${6}
                   placeholder="A small CLI that renames files in bulk: a dry run, then a confirmation, then the moves."
                   loading=${saving}
                 />
                 <${TextInput} label="Project name (optional)" value=${name} onInput=${setName} placeholder="bulk-renamer" loading=${saving} />
-                <p class="muted">
-                  Nothing is created yet. The draft pass proposes a spec and a first set of tasks; the folder and the repository are created when you approve
-                  the spec, and each task is created when you approve it.
-                </p>
-                <button class="btn" type="submit" disabled=${saving}>${saving ? 'Drafting…' : 'Draft the project'}</button>
+                <div class="inline-form-foot">
+                  <span class="muted">Nothing is created until you approve the drafted spec.</span>
+                  <button class="btn secondary" type="button" onClick=${reset}>Cancel</button>
+                  <button class="btn primary" type="submit" disabled=${saving}>${saving ? 'Drafting…' : 'Draft the project'}</button>
+                </div>
               </form>
             `
           : null
@@ -138,26 +155,42 @@ export function Projects({ navigate }) {
       ${
         projects.length
           ? html`
-              <div class="list">
-                ${projects.map(
-                  (p) => html`
-                    <a class="list-row" key=${p.id} href=${`#/project/${p.id}`}>
-                      <div class="list-row-main">
-                        <b>${p.name}</b>
-                        <span class="muted">
-                          <code>${p.path}</code>
-                          ${p.language ? ` · ${p.language}` : ''}
-                          ${p.framework ? ` · ${p.framework}` : ''}
-                        </span>
+              <div class="project-grid">
+                ${projects.map((p) => {
+                  const mine = (tasks || []).filter((t) => t.project_id === p.id);
+                  const count = (pred) => mine.filter(pred).length;
+                  const active = count((t) => !IDLE.has(t.state) && !WAITING.has(t.state));
+                  const waiting = count((t) => WAITING.has(t.state));
+                  const done = count((t) => t.state === 'COMPLETE');
+                  const last = mine.reduce((m, t) => (t.updated_at > m ? t.updated_at : m), '');
+                  const facts = [p.language, p.framework].filter((x) => x && x !== 'unknown');
+                  return html`
+                    <a class="card project-card" key=${p.id} href=${`#/project/${p.id}`}>
+                      <div class="project-card-head">
+                        <b class="project-card-name">${p.name}</b>
+                        ${p.spec
+                          ? html`<span class="badge badge-good">Spec</span>`
+                          : p.idea
+                            ? html`<span class="badge badge-info">Idea only</span>`
+                            : html`<span class="badge badge-neutral">No spec</span>`}
                       </div>
-                      <div class="list-row-side">
+                      <span class="project-card-path" title=${p.path}>${shortDir(p.path)}</span>
+                      <div class="project-card-stats">
+                        <span><b>${active}</b> active</span>
+                        <span class=${waiting ? 'warn' : ''}><b>${waiting}</b> waiting on you</span>
+                        <span><b>${done}</b> done</span>
+                      </div>
+                      <div class="project-card-foot muted">
+                        <span>${facts.join(' · ') || 'Language not detected'}${(() => {
+                          const n = Object.keys(p.commands || {}).length;
+                          return ` · ${n} command${n === 1 ? '' : 's'}`;
+                        })()}</span>
                         ${p.drafts?.length ? html`<span class="badge badge-info">${p.drafts.length} drafted</span>` : null}
-                        ${p.spec ? html`<span class="badge badge-good">spec</span>` : p.idea ? html`<span class="badge badge-info">idea only</span>` : html`<span class="badge badge-neutral">no spec</span>`}
-                        <span class="badge badge-neutral">${Object.keys(p.commands || {}).length} commands</span>
+                        ${last ? html`<span>Active <${Time} at=${last} /></span>` : html`<span>No tasks yet</span>`}
                       </div>
                     </a>
-                  `
-                )}
+                  `;
+                })}
               </div>
             `
           : html`<${EmptyState}

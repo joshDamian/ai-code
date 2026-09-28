@@ -12,7 +12,7 @@
 // having to leave the transcript to approve what it just wrote would be a page load
 // between a draft and the button that accepts it. Both surfaces read the same
 // component, so there is one place where "approve" means anything.
-import { html, useState, useEffect } from '../lib.mjs';
+import { html, useState, useEffect, shortDir } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
@@ -20,6 +20,7 @@ import { TextInput, TextArea } from '../components/form.mjs';
 import { Markdown } from '../components/markdown.mjs';
 import { DiffViewer } from '../components/diff-viewer.mjs';
 import { Time } from '../components/time.mjs';
+import { StatusBadge } from '../components/status-badge.mjs';
 
 // What a decision's state is called on screen. A draft is the one that has not
 // landed, which is the only one with buttons on it.
@@ -87,27 +88,37 @@ export function Project({ id, navigate, onTitle }) {
 
   const taskTitle = (tid) => tasks.find((t) => t.id === tid)?.title || null;
 
+  const facts = [data.language, data.framework].filter((x) => x && x !== 'unknown');
+  const recent = [...tasks].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+  const count = (pred) => tasks.filter(pred).length;
+
   return html`
-    <div class="stack">
-      <div class="card">
-        <div class="view-toolbar">
-          <div>
-            <h1>${data.name}</h1>
-            <span class="muted">${data.path} ${data.language ? `· ${data.language}` : ''} ${data.framework ? `· ${data.framework}` : ''}</span>
-          </div>
-          <div class="list-row-side">
-            <button class="btn secondary" onClick=${() => navigate('#/projects')}>Projects</button>
-            <button class="btn secondary" disabled=${!!busy} onClick=${openProposals}>What else should I build?</button>
+    <div class="stack project-page">
+      <header class="page-head">
+        <div class="page-head-main">
+          <h1>${data.name}</h1>
+          <div class="page-head-meta">
+            <span class="mono-sm" title=${data.path}>${shortDir(data.path)}</span>
+            ${facts.length ? html`<span aria-hidden="true">·</span><span>${facts.join(' · ')}</span>` : null}
+            <span aria-hidden="true">·</span>
+            <span>${count((t) => !['CREATED', 'COMPLETE', 'FAILED', 'CANCELLED'].includes(t.state))} active</span>
+            <span aria-hidden="true">·</span>
+            <span>${count((t) => t.state === 'COMPLETE')} done</span>
           </div>
         </div>
-        ${error ? html`<div class="chat-error">${error}</div>` : null}
-        ${
-          data.idea && !data.spec
-            ? html`<p class="muted">This project came from an idea note. Approving the spec creates the folder, initializes the repository and commits the note.</p>`
-            : null
-        }
-      </div>
+        <div class="row">
+          <button class="btn primary" type="button" disabled=${!!busy} onClick=${openProposals}>What else should I build?</button>
+        </div>
+      </header>
+      ${error ? html`<div class="chat-error">${error}</div>` : null}
+      ${
+        data.idea && !data.spec
+          ? html`<div class="notice">This project came from an idea note. Approving the spec creates the folder, initializes the repository and commits the note.</div>`
+          : null
+      }
 
+      <div class="project-layout">
+      <div class="stack">
       <${MemoryPanel} project=${data} onReload=${load} navigate=${navigate} />
 
       <div class="card">
@@ -148,6 +159,34 @@ export function Project({ id, navigate, onTitle }) {
             : html`<p class="muted">No decisions recorded yet. Completing a task drafts its entries from the change and the review.</p>`
         }
       </div>
+      </div>
+
+      <aside class="card project-side">
+        <div class="view-toolbar">
+          <h2>Recent tasks</h2>
+          <a class="link" href="#/tasks">All tasks</a>
+        </div>
+        ${
+          recent.length
+            ? html`
+                <div class="list">
+                  ${recent.slice(0, 8).map(
+                    (t) => html`
+                      <a class="list-row" key=${t.id} href=${`#/tasks/${t.id}`}>
+                        <div class="list-row-main">
+                          <b class="clip">${t.title}</b>
+                          <span class="muted"><${Time} at=${t.updated_at} /></span>
+                        </div>
+                        <div class="list-row-side"><${StatusBadge} status=${t.state} /></div>
+                      </a>
+                    `
+                  )}
+                </div>
+              `
+            : html`<p class="muted">No tasks in this project yet.</p>`
+        }
+      </aside>
+      </div>
     </div>
   `;
 }
@@ -155,7 +194,10 @@ export function Project({ id, navigate, onTitle }) {
 // The spec and the tasks waiting to become tasks. `project` is the payload
 // `GET /api/projects/:id` answers with - the approved text, the draft on the table,
 // the revision that diffs them, and the queue of drafted tasks.
-export function MemoryPanel({ project, onReload, navigate }) {
+// On the project page it shows the spec and every waiting draft. Under a conversation
+// it shows what that conversation drafted: the spec only after a spec pass, and only
+// the drafts whose ids it is given, with a pointer to the rest.
+export function MemoryPanel({ project, onReload, navigate, showSpec = true, draftIds = null }) {
   const [busy, setBusy] = useState(null);
   const [editing, setEditing] = useState(false);
   // The two drafts a person writes by hand: the spec they are proposing, and the
@@ -228,7 +270,13 @@ export function MemoryPanel({ project, onReload, navigate }) {
     if (r && navigate) navigate(`#/chat/${r.session.id}`);
   }
 
+  const own = draftIds ? new Set(draftIds) : null;
+  const drafts = own ? project.drafts.filter((d) => own.has(d.id)) : project.drafts;
+  const others = project.drafts.length - drafts.length;
+
   return html`
+    ${showSpec
+      ? html`
     <div class="card">
       <div class="view-toolbar">
         <h2>Spec</h2>
@@ -291,18 +339,25 @@ export function MemoryPanel({ project, onReload, navigate }) {
             `
           : !waiting && project.spec
             ? html`<div class="md"><${Markdown} text=${project.spec} /></div>`
-            : null
+            : !waiting
+              ? html`<p class="muted">No spec yet. The spec is what every plan in this project is checked against: its goals, what it is not, and the decisions already made.</p>`
+              : null
       }
 
+    </div>
+        `
+      : null}
+
+    <div class="card">
       <div class="view-toolbar">
-        <h3>Drafted tasks</h3>
-        <span class="badge badge-neutral">${project.drafts.length} waiting</span>
+        <h2>Drafted tasks</h2>
+        <span class="badge ${drafts.length ? 'badge-info' : 'badge-neutral'}">${drafts.length} waiting</span>
       </div>
       ${
-        project.drafts.length
+        drafts.length
           ? html`
               <div class="list">
-                ${project.drafts.map(
+                ${drafts.map(
                   (d) => html`
                     <div class="list-row" key=${d.id}>
                       <div class="list-row-main">
@@ -321,8 +376,11 @@ export function MemoryPanel({ project, onReload, navigate }) {
                 )}
               </div>
             `
-          : html`<p class="muted">Nothing is waiting.</p>`
+          : html`<p class="muted">Nothing is waiting. “What else should I build?” drafts a batch from the spec and the code.</p>`
       }
+      ${own && others > 0
+        ? html`<p class="muted">${others} more drafted elsewhere · <a class="link" href=${`#/project/${project.id}`}>Review on the project page</a></p>`
+        : null}
     </div>
   `;
 }

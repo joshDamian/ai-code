@@ -1,8 +1,9 @@
-import { html, useState, useEffect } from '../lib.mjs';
+import { html, useState, useEffect, shortDir } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
+import { Toggle } from '../components/form.mjs';
 import { getToken, setToken, clearToken, onLocalhost } from '../auth.mjs';
 
 // The pairing screen. A phone arrives carrying the machine's Tailscale name, which the
@@ -73,6 +74,21 @@ function uptime(ms) {
   const h = Math.floor(m / 60);
   if (h < 48) return `${h}h ${m % 60}m`;
   return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+// One group of settings: what it is for, and its controls. At module level so it is
+// the same component on every render - defined inside Settings it would be a new type
+// each time, and Preact would rebuild its contents on every keystroke.
+function Section({ title, about, children }) {
+  return html`
+    <section class="settings-section">
+      <div class="settings-about">
+        <h2>${title}</h2>
+        <p>${about}</p>
+      </div>
+      <div class="card settings-body">${children}</div>
+    </section>
+  `;
 }
 
 export function Settings() {
@@ -161,12 +177,57 @@ export function Settings() {
 
   return html`
     <div class="view-settings">
-      <div class="card">
-        <div class="provider-card-head">
-          <h2>Doctor</h2>
-          <button class="btn" disabled=${running} onClick=${runDoctor}>${running ? 'Running…' : 'Run Doctor'}</button>
+      <${Section} title="Server" about="The process serving this dashboard, and the jobs it is running.">
+        ${
+          server
+            ? html`
+                <div class="settings-status">
+                  <span class="health good"></span>
+                  <b>Running</b>
+                  <span class="muted">for ${uptime(server.uptimeMs)} · ${server.jobs.running} job${server.jobs.running === 1 ? '' : 's'} running, ${server.jobs.queued} queued</span>
+                </div>
+                <dl class="facts">
+                  <dt>Address</dt><dd class="mono-sm">${server.host}:${server.port ?? '—'}</dd>
+                  <dt>Process</dt><dd class="mono-sm">${server.pid}</dd>
+                  <dt>Data root</dt><dd class="mono-sm" title=${server.root}>${shortDir(server.root)}</dd>
+                </dl>
+                ${
+                  server.supervisorPort != null && server.port != null && server.supervisorPort !== server.port
+                    ? html`
+                        <div class="notice notice-warn">
+                          The installed supervisor watches port <code>${server.supervisorPort}</code>, not <code>${server.port}</code>, so it will not restart this
+                          server. Align it with${' '}<code>AI_CODE_SUPERVISOR_PORT=${server.port} ./bin/install-ai-code --supervisor</code>.
+                        </div>`
+                    : null
+                }
+                <div class="danger-zone">
+                  <div>
+                    <b>Stop the server</b>
+                    <p class="muted">Queued jobs are cancelled, runs in flight are aborted and open terminals close. Nothing restarts it unless a supervisor holds this port.</p>
+                  </div>
+                  ${
+                    stopping
+                      ? html`<button class="btn danger-outline" disabled>Stopping…</button>`
+                      : confirmStop
+                        ? html`
+                            <div class="row">
+                              <button class="btn secondary" onClick=${() => setConfirmStop(false)}>Cancel</button>
+                              <button class="btn danger" onClick=${stopServer}>Stop now</button>
+                            </div>
+                          `
+                        : html`<button class="btn danger-outline" onClick=${() => setConfirmStop(true)}>Stop server</button>`
+                  }
+                </div>
+              `
+            : html`<p class="muted">The server's own status is not available from this page.</p>`
+        }
+      </${Section}>
+
+      <${Section} title="Diagnostics" about="Checks the environment: the git binary, provider credentials and the tools each role needs.">
+        <div class="settings-row">
+          <span class="muted">${doctor ? `${Object.values(doctor).filter(passed).length} of ${Object.keys(doctor).length} checks passed` : 'Not run in this session.'}</span>
+          <button class="btn secondary" disabled=${running} onClick=${runDoctor}>${running ? 'Checking…' : doctor ? 'Run again' : 'Run checks'}</button>
         </div>
-        ${running ? html`<${Spinner} message="Running diagnostics..." />` : null}
         ${
           doctor
             ? html`
@@ -181,110 +242,54 @@ export function Settings() {
                   )}
                 </div>
               `
-            : html`<div class="muted">Run Doctor to inspect environment and credentials.</div>`
+            : null
         }
-      </div>
+      </${Section}>
 
-      <div class="card section">
-        <div class="provider-card-head">
-          <h2>Server</h2>
-          ${
-            !server
-              ? null
-              : stopping
-              ? html`<button class="btn" disabled>Stopping…</button>`
-              : confirmStop
-              ? html`
-                  <div class="row">
-                    <button class="btn secondary" onClick=${() => setConfirmStop(false)}>Cancel</button>
-                    <button class="btn danger" onClick=${stopServer}>Confirm stop</button>
-                  </div>
-                `
-              : html`<button class="btn" onClick=${() => setConfirmStop(true)}>Stop server</button>`
-          }
-        </div>
-        ${
-          server
-            ? html`
-                <p class="muted">
-                  Stopping ends this process: queued jobs are cancelled, runs in flight are aborted, and open terminals
-                  are closed. Nothing restarts it unless a supervisor is holding this port, or it is started again by
-                  hand.
-                </p>
-                ${
-                  server.supervisorPort != null && server.port != null && server.supervisorPort !== server.port
-                    ? html`
-                        <p class="muted">
-                          The installed supervisor is configured for port <code>${server.supervisorPort}</code>, not the port this
-                          server is on. If the server stops, the Start button will not appear here. Align it with
-                          <code>AI_CODE_SUPERVISOR_PORT=${server.port} ./bin/install-ai-code --supervisor</code>.
-                        </p>`
-                    : null
-                }
-                <div class="kv-grid">
-                  <span class="muted">Status</span>
-                  <span><${StatusBadge} status="ok" /> running</span>
-                  <span class="muted">Port</span>
-                  <code>${server.port ?? '—'}</code>
-                  <span class="muted">PID</span>
-                  <code>${server.pid}</code>
-                  <span class="muted">Host</span>
-                  <code>${server.host}</code>
-                  <span class="muted">Root</span>
-                  <code>${server.root}</code>
-                  <span class="muted">Uptime</span>
-                  <code>${uptime(server.uptimeMs)}</code>
-                  <span class="muted">Jobs</span>
-                  <code>${server.jobs.running} running · ${server.jobs.queued} queued</code>
-                </div>
-              `
-            : html`<div class="muted">The server's own status is not available from this page.</div>`
-        }
-      </div>
-
-      <div class="card section">
-        <h2>Automations</h2>
+      <${Section} title="Automations" about="Actions the server takes by itself when something happens.">
         ${
           automations === null
             ? html`<${Spinner} />`
             : automations.length
-            ? html`
-                <div class="list">
-                  ${automations.map(
-                    (a) => html`
-                      <div class="list-row" key=${a.id}>
-                        <div class="list-row-main">
-                          <b>${a.name}</b>
-                          <span class="muted">${a.trigger} → ${a.action}</span>
+              ? html`
+                  <div class="list">
+                    ${automations.map(
+                      (a) => html`
+                        <div class="list-row" key=${a.id}>
+                          <div class="list-row-main">
+                            <b>${a.name}</b>
+                            <span class="muted">When ${a.trigger} → ${a.action}</span>
+                          </div>
+                          <${Toggle} checked=${!!a.enabled} onChange=${() => toggleAutomation(a)} label=${a.enabled ? 'On' : 'Off'} />
                         </div>
-                        <button class="btn secondary" onClick=${() => toggleAutomation(a)}>${a.enabled ? 'Disable' : 'Enable'}</button>
-                      </div>
-                    `
-                  )}
-                </div>
-              `
-            : html`<div class="muted">No automation definitions.</div>`
+                      `
+                    )}
+                  </div>
+                `
+              : html`<p class="muted">No automations are defined.</p>`
         }
-      </div>
+      </${Section}>
 
-      <div class="card section">
-        <h2>Phone access</h2>
+      <${Section} title="Phone access" about="Use the dashboard from a phone over Tailscale.">
         ${onLocalhost() && !paired
-          ? html`<div class="muted">
-              This browser is on the server's own machine, which needs no token. To use a phone, run
-              <code>tailscale serve https / http://127.0.0.1:${server?.port ?? 4317}</code> on this machine, open the
-              <code>.ts.net</code> address it prints, and paste the token the server logged at startup.
-            </div>`
+          ? html`
+              <ol class="steps-list">
+                <li>On this machine, run${' '}<code>tailscale serve https / http://127.0.0.1:${server?.port ?? 4317}</code>.</li>
+                <li>Open the${' '}<code>.ts.net</code>${' '}address it prints on your phone.</li>
+                <li>Paste the API token the server printed at startup.</li>
+              </ol>
+              <p class="muted">This browser is on the server's own machine, so it needs no token.</p>
+            `
           : html`
-              <div class="list-row">
+              <div class="settings-row">
                 <div class="list-row-main">
                   <b>Paired</b>
-                  <span class="muted">This browser carries an API token. Reload after forgetting to pair again.</span>
+                  <span class="muted">This browser carries an API token. Forget it to pair again.</span>
                 </div>
                 <button class="btn secondary" onClick=${forget}>Forget token</button>
               </div>
             `}
-      </div>
+      </${Section}>
     </div>
   `;
 }

@@ -1,28 +1,41 @@
 // Direct chat view. URL hash: #/chat (the conversations) or #/chat/:id (one of them).
-import { html, useState, useEffect, useRef, useCallback } from '../lib.mjs';
+import { html, useState, useEffect, useRef, useCallback, shortDir } from '../lib.mjs';
 import { api, chatStreamUrl } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
-import { TextArea, Select } from '../components/form.mjs';
+import { Select } from '../components/form.mjs';
 import { Markdown } from '../components/markdown.mjs';
 import { Time } from '../components/time.mjs';
 import { MemoryPanel } from './project.mjs';
+import { NoProject } from '../components/empty-state.mjs';
 
 // A turn the queue is still holding. Read from the job row rather than from a local
 // flag, so a reload and a second tab see the same thing this one does.
 const IN_FLIGHT = new Set(['queued', 'running']);
 
-// Whether the conversation's project has something for the reader to decide. Intake
-// and the proposals pass both answer in a chat turn, and their drafts land on the
-// project - so the approval surface is rendered under the transcript that explains
-// what is being approved, and nowhere else. A conversation in a settled project
-// shows nothing, because there is nothing waiting in it.
+// Whether the conversation's project has something for the reader to decide. Intake,
+// the proposals pass and spec inference answer in a chat turn, and their drafts land
+// on the project - so the approval surface is rendered under the transcript that
+// explains what is being approved. Any other conversation in the same project gets a
+// one-line pointer instead: the drafts are the project's, not that conversation's.
 function toDecide(project) {
   if (!project) return false;
   // The intake's first spec: approving it is also what creates the folder and the
   // repository, so it is offered even before any draft exists.
   if (project.idea && !project.spec) return true;
   return !!project.spec_draft || (project.drafts || []).length > 0;
+}
+
+const NOTHING_DRAFTED = { specPass: false, draftIds: [] };
+
+// The pointer's words: what is waiting, counted.
+function waitingText(project) {
+  const n = (project.drafts || []).length;
+  const bits = [];
+  if (project.idea && !project.spec) bits.push('The first spec is waiting');
+  else if (project.spec_draft) bits.push('A spec change is waiting');
+  if (n) bits.push(`${n} drafted task${n === 1 ? '' : 's'} waiting`);
+  return bits.join(' · ');
 }
 
 // Where the composer stops growing and starts scrolling instead. The same number
@@ -39,8 +52,13 @@ function turnFailure(job, messages) {
   return job.error || `The answer ${job.state}.`;
 }
 
-export function Chat({ id, navigate, onTitle }) {
+export function Chat({ id: routeId, navigate, onTitle }) {
+  // `#/chat/new` is the question box on its own, which is how a phone reaches it: the
+  // list and the box do not fit side by side there.
+  const isNew = routeId === 'new';
+  const id = isNew ? null : routeId;
   const [projects, setProjects] = useState([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectId, setProjectId] = useState('');
   const [sessions, setSessions] = useState(null);
   const [session, setSession] = useState(null);
@@ -48,10 +66,15 @@ export function Chat({ id, navigate, onTitle }) {
   // The conversation's project, read for the approval panel below the transcript.
   // Null in a conversation with nothing to decide, which is most of them.
   const [project, setProject] = useState(null);
+  // What this conversation drafted, as the server reports it: whether a spec pass
+  // ran here, and the ids of the waiting drafts its passes wrote.
+  const [drafted, setDrafted] = useState(NOTHING_DRAFTED);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState(null);
+  const [filter, setFilter] = useState('');
+  const [listTick, setListTick] = useState(0);
   const streamRef = useRef(null);
   const transcriptRef = useRef(null);
   const composerRef = useRef(null);
@@ -82,7 +105,7 @@ export function Chat({ id, navigate, onTitle }) {
   // instead. TextArea is a generic field and renders its own <label>, so the height
   // is set on the textarea the chat shell owns rather than by the component.
   useEffect(() => {
-    const ta = composerRef.current && composerRef.current.querySelector('textarea');
+    const ta = composerRef.current;
     if (!ta) return;
     ta.style.height = 'auto';
     ta.style.height = `${Math.min(ta.scrollHeight, COMPOSER_MAX_PX)}px`;
@@ -98,9 +121,14 @@ export function Chat({ id, navigate, onTitle }) {
       .then((p) => {
         if (cancelled) return;
         setProjects(p);
+        setProjectsLoaded(true);
         setProjectId((cur) => cur || (p[0] && p[0].id) || '');
       })
-      .catch((e) => !cancelled && setError(e.message));
+      .catch((e) => {
+        if (cancelled) return;
+        setProjectsLoaded(true);
+        setError(e.message);
+      });
     return () => {
       cancelled = true;
     };
@@ -140,6 +168,7 @@ export function Chat({ id, navigate, onTitle }) {
       const d = await api.chatSession(id);
       setSession(d.session);
       setMessages(d.messages || []);
+      setDrafted({ specPass: !!d.specPass, draftIds: d.draftIds || [] });
       loadProject(d.session.project_id);
       onTitle?.(d.session.title);
       setError(turnFailure(d.job, d.messages || []));
@@ -195,6 +224,7 @@ export function Chat({ id, navigate, onTitle }) {
       }
       if (!sawAnswering) return;
       finish();
+      setListTick((n) => n + 1);
       setError(turnFailure(st.job, messagesRef.current));
       // The title is derived from the first question and the answer is stored as its
       // own message, so the settled transcript is read back rather than assembled.
@@ -216,12 +246,11 @@ export function Chat({ id, navigate, onTitle }) {
   openStreamRef.current = openStream;
 
   useEffect(() => {
-    if (id) return undefined;
+    if (!projectId) return undefined;
     let cancelled = false;
     // The list on screen belongs to the project that was selected: cleared before
     // the fetch, so a moment of loading is shown rather than another project's
     // conversations read as this one's.
-    setSessions(null);
     (async () => {
       try {
         const list = await api.chatSessions(projectId);
@@ -233,7 +262,13 @@ export function Chat({ id, navigate, onTitle }) {
     return () => {
       cancelled = true;
     };
-  }, [id, projectId]);
+  }, [projectId, listTick]);
+
+  // The list follows the open conversation's project, so a link into a chat in
+  // another project shows that project's conversations beside it.
+  useEffect(() => {
+    if (session?.project_id) setProjectId(session.project_id);
+  }, [session?.project_id]);
 
   useEffect(() => {
     if (!id) return undefined;
@@ -246,29 +281,36 @@ export function Chat({ id, navigate, onTitle }) {
       setSession(null);
       setMessages([]);
       setProject(null);
+      setDrafted(NOTHING_DRAFTED);
       setError(null);
       // The stream is closed on the way out of a conversation, but nothing else
       // clears the flag it was running under - so Back mid-answer used to leave the
       // list's composer disabled behind it.
       setStreaming(false);
-      onTitle?.(null);
+      onTitle?.(isNew ? 'New chat' : null);
     }
-  }, [id, onTitle]);
+  }, [id, isNew, onTitle]);
 
   const openSession = useCallback((sessionId) => navigate(`#/chat/${sessionId}`), [navigate]);
 
-  const createSession = useCallback(async () => {
-    if (!projectId) return;
+  // A conversation is made by its first question: created and asked in one step, so
+  // the list never holds an empty "New chat" nobody asked anything in.
+  const startChat = useCallback(async () => {
+    const text = input.trim();
+    if (!projectId || !text || busy) return;
     setBusy(true);
     try {
       const s = await api.createChatSession(projectId);
+      await api.sendChatMessage(s.id, text);
+      setInput('');
+      setListTick((n) => n + 1);
       openSession(s.id);
     } catch (e) {
       showToast(e.message, 'error');
     } finally {
       setBusy(false);
     }
-  }, [projectId, openSession]);
+  }, [projectId, input, busy, openSession]);
 
   const sendMessage = useCallback(async () => {
     const text = input.trim();
@@ -305,45 +347,95 @@ export function Chat({ id, navigate, onTitle }) {
     [sendMessage]
   );
 
-  // List view.
+  const list = html`
+    <aside class="ss-list" aria-label="Conversations">
+      <div class="ss-list-head">
+        <div class="ss-list-title">
+          ${projects.length > 1
+            ? html`<${Select} className="ss-project" ariaLabel="Project" value=${projectId} onChange=${setProjectId} options=${projects.map((p) => ({ value: p.id, label: p.name }))} />`
+            : html`<span class="ss-project-name">${projects[0]?.name || ''}</span>`}
+          <button class="btn primary sm ss-new" type="button" onClick=${() => navigate('#/chat/new')} disabled=${!projectId} aria-label="New chat">
+            <svg class="ss-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg><span>New</span>
+          </button>
+        </div>
+        <label class="ss-filter">
+          <svg class="ss-ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" /><path d="m10.5 10.5 3 3" /></svg>
+          <input type="search" placeholder="Filter" aria-label="Filter conversations" value=${filter} onInput=${(e) => setFilter(e.target.value)} />
+        </label>
+      </div>
+      <div class="ss-list-body">
+        ${!projectsLoaded
+          ? html`<div class="ss-list-empty"><${Spinner} /></div>`
+          : !projects.length
+          ? html`<p class="ss-list-empty muted">No projects yet.</p>`
+          : sessions === null
+            ? html`<div class="ss-list-empty"><${Spinner} /></div>`
+            : !sessions.length
+              ? html`<p class="ss-list-empty muted">No conversations in this project yet.</p>`
+              : html`
+                  <div class="ss-group">
+                    ${sessions
+                      .filter((s) => !filter.trim() || s.title.toLowerCase().includes(filter.trim().toLowerCase()))
+                      .map(
+                        (s) => html`
+                          <a class="ss-row ${s.id === id ? 'active' : ''}" key=${s.id} href=${`#/chat/${s.id}`} aria-current=${s.id === id ? 'page' : null}>
+                            <svg class="ss-ic chat-row-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3h10v7H7l-3 3v-3H3z" /></svg>
+                            <span class="ss-row-main">
+                              <span class="ss-row-top">
+                                <span class="ss-row-name">${s.title}</span>
+                                <span class="ss-row-when"><${Time} at=${s.updated_at} /></span>
+                              </span>
+                            </span>
+                          </a>
+                        `
+                      )}
+                  </div>
+                `}
+      </div>
+    </aside>
+  `;
+
+  // No conversation open: the list, and a question box beside it. Asking is the one
+  // thing to do from here that is not opening a conversation, so it is not a button
+  // that makes an empty one first.
   if (!id) {
     const project = projects.find((p) => p.id === projectId);
     return html`
-      <div class="chat-list">
-        <div class="card">
-          <div class="card-header">
-            <h1>Direct Chat</h1>
-            <button class="btn" onclick=${createSession} ?disabled=${busy || !projectId}>
-              ${busy ? 'Creating…' : 'New Chat'}
-            </button>
-          </div>
-          <div class="row">
-            <${Select}
-              label="Project"
-              value=${projectId}
-              onChange=${setProjectId}
-              options=${projects.map((p) => ({ value: p.id, label: p.name }))}
-            />
-          </div>
-          ${error ? html`<div class="chat-error">${error}</div>` : ''}
-          ${!projects.length
-            ? html`<p class="muted">Add a project first.</p>`
-            : sessions === null
-              ? html`<div class="spinner"><${Spinner} /></div>`
-              : sessions.length === 0
-                ? html`<p class="muted">No chats in ${project?.name || 'this project'} yet. Ask a question to start one.</p>`
-                : html`
-                    <div class="sessions-list">
-                      ${sessions.map(
-                        (s) => html`
-                          <div class="session-item" onclick=${() => openSession(s.id)}>
-                            <div class="session-title">${s.title}</div>
-                            <div class="session-date"><${Time} at=${s.updated_at} /></div>
-                          </div>
-                        `
-                      )}
-                    </div>
-                  `}
+      <div class="ss-shell ${isNew ? 'ss-shell-new' : 'ss-shell-index'} chat-shell">
+        ${list}
+        <div class="ss-new-pane">
+          ${projectsLoaded && !projects.length
+            ? html`<div class="ss-new-inner"><${NoProject} what="A conversation reads a project’s code to answer, so it needs a project to read." /></div>`
+            : html`<div class="ss-new-inner">
+            ${isNew ? html`<a class="ss-back" href="#/chat"><svg class="ss-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3-5 5 5 5" /></svg> Conversations</a>` : null}
+            <div class="ss-new-head">
+              <span class="muted">A conversation about <strong>${project?.name || '—'}</strong>${project ? html` · <span class="ss-mono" title=${project.path}>${shortDir(project.path)}</span>` : null}</span>
+              <h2>What do you want to know?</h2>
+            </div>
+            <div class="ss-new-box">
+              <textarea
+                rows="4"
+                aria-label="Question"
+                placeholder="e.g. Where is the retry policy for provider calls, and what does it do on a 429?"
+                value=${input}
+                disabled=${busy || !projectId}
+                onInput=${(e) => setInput(e.target.value)}
+                onKeyDown=${(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    startChat();
+                  }
+                }}
+              ></textarea>
+              <div class="ss-new-bar">
+                <span class="muted chat-note">Read-only: the agent reads the project and answers. Nothing is changed.</span>
+                <span class="ss-new-spacer"></span>
+                <span class="ss-mono muted ss-kbd-hint">⌘↵</span>
+                <button class="btn primary" type="button" onClick=${startChat} disabled=${busy || !input.trim() || !projectId}>${busy ? 'Asking…' : 'Ask'}</button>
+              </div>
+            </div>
+            ${error ? html`<div class="ss-failure">${error}</div>` : null}
+          </div>`}
         </div>
       </div>
     `;
@@ -351,55 +443,72 @@ export function Chat({ id, navigate, onTitle }) {
 
   // Conversation view.
   return html`
-    <div class="chat-conversation">
-      <div class="card chat-card">
-        <div class="card-header">
-          <h1>${session?.title || 'Chat'}</h1>
-          <button class="btn secondary" onclick=${() => navigate('#/chat')}>Back</button>
-        </div>
+    <div class="ss-shell ss-shell-index chat-shell chat-open">
+      ${list}
+      <main class="ss-conv" aria-label=${session?.title || 'Chat'}>
+        <header class="ss-conv-head">
+          <a class="btn secondary ss-icon-btn ss-back-btn" href="#/chat" aria-label="Back to conversations">
+            <svg class="ss-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3-5 5 5 5" /></svg>
+          </a>
+          <div class="ss-conv-title">
+            <div class="ss-title-row"><h2>${session?.title || 'Chat'}</h2></div>
+            <div class="ss-meta">
+              ${session ? html`<span>${projects.find((p) => p.id === session.project_id)?.name || ''}</span><span aria-hidden="true">·</span>` : null}
+              <span>${messages.filter((m) => m.role === 'user').length} question${messages.filter((m) => m.role === 'user').length === 1 ? '' : 's'}</span>
+              <span aria-hidden="true">·</span>
+              <span>Read-only</span>
+            </div>
+          </div>
+        </header>
 
-        <div class="chat-transcript" ref=${transcriptRef}>
-          ${messages.map(
-            (msg) => html`
-              <div class="chat-turn" data-role=${msg.role}>
-                ${msg.role === 'assistant' ? html`<div class="chat-role">Assistant</div>` : null}
-                <div class="chat-bubble">
-                  ${msg.role === 'assistant'
-                    ? html`<${Markdown} text=${msg.content} />`
-                    : html`<div class="user-message">${msg.content}</div>`}
-                </div>
-              </div>
-            `
+        <div class="ss-transcript" ref=${transcriptRef}>
+          ${messages.map((msg) =>
+            msg.role === 'assistant'
+              ? html`<div class="ss-answer" key=${msg.id}><${Markdown} text=${msg.content} className="md ss-md" /></div>`
+              : html`<div class="ss-said" key=${msg.id}>${msg.content}</div>`
           )}
-          ${streaming ? html`<div class="chat-turn answering"><${Spinner} /> <span class="chat-live">reading the project…</span></div>` : ''}
-          ${error ? html`<div class="chat-error">${error}</div>` : ''}
+          ${streaming ? html`<div class="ss-live"><${Spinner} /> <span>Reading the project…</span></div>` : null}
+          ${error ? html`<div class="ss-failure">${error}</div>` : null}
+          ${(() => {
+            if (!toDecide(project)) return null;
+            const own = new Set(drafted.draftIds);
+            const mine = (project.drafts || []).filter((d) => own.has(d.id));
+            if (drafted.specPass || mine.length)
+              return html`<div class="chat-decide">
+                <${MemoryPanel}
+                  project=${project}
+                  navigate=${navigate}
+                  onReload=${() => loadProject(project.id)}
+                  showSpec=${drafted.specPass}
+                  draftIds=${drafted.draftIds}
+                />
+              </div>`;
+            return html`<div class="chat-waiting">
+              <span>${waitingText(project)}</span>
+              <a class="link" href=${`#/project/${project.id}`}>Review on the project page</a>
+            </div>`;
+          })()}
         </div>
 
-        <div class="chat-composer" ref=${composerRef}>
-          <${TextArea}
-            value=${input}
-            onInput=${setInput}
-            onKeyDown=${onKeyDown}
-            placeholder="Ask a question about this project…"
-            rows=${1}
-            ?disabled=${busy || streaming}
-          />
-          <button
-            class="btn"
-            onclick=${sendMessage}
-            ?disabled=${!input.trim() || busy || streaming}
-            title=${streaming ? 'Answering…' : 'Send'}
-            aria-label=${streaming ? 'Answering…' : 'Send'}
-          >↑</button>
+        <div class="ss-dock">
+          <div class="ss-composer ${busy || streaming ? 'locked' : ''}">
+            <textarea
+              ref=${composerRef}
+              rows="1"
+              aria-label="Question"
+              placeholder=${streaming ? 'Answering…' : 'Ask a follow-up…'}
+              value=${input}
+              disabled=${busy || streaming}
+              onInput=${(e) => setInput(e.target.value)}
+              onKeyDown=${onKeyDown}
+            ></textarea>
+            <button class="ss-send" type="button" aria-label=${streaming ? 'Answering…' : 'Send'} onClick=${sendMessage} disabled=${!input.trim() || busy || streaming}>
+              <svg class="ss-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M4 7l4-4 4 4" /></svg>
+            </button>
+          </div>
+          <div class="ss-hint">Enter to send · Shift+Enter for a new line</div>
         </div>
-        <div class="chat-hint">Enter to send · Shift+Enter for a new line</div>
-      </div>
-
-      ${
-        toDecide(project)
-          ? html`<${MemoryPanel} project=${project} navigate=${navigate} onReload=${() => loadProject(project.id)} />`
-          : null
-      }
+      </main>
     </div>
   `;
 }

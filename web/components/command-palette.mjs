@@ -1,5 +1,7 @@
 // Command palette: one keyboard-first list over navigation targets, the actions
-// that live in a view, and the tasks worked on most recently.
+// that live in a view, and everything a person might be looking for by name -
+// tasks, projects, conversations and sessions. With no query it offers the tasks
+// worked on most recently; with one it searches all of them.
 //
 // The overlay chrome is the shortcut legend's (components/kbd.mjs) so the two
 // dialogs stack, dim and dismiss identically. app.mjs owns Escape from a
@@ -25,12 +27,10 @@ const NAV = [
 export function CommandPalette({ open, onClose, navigate, onNewTask }) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
-  const [recent, setRecent] = useState(null);
-
-  // The recent-task list is fetched on the first open and kept: it is a
-  // convenience group, and a list one task stale reads better than a dialog that
-  // re-fetches, and flashes, every time it is summoned.
-  const loadedRef = useRef(false);
+  // What can be searched by name. Re-read on every open, but the last reading stays
+  // on screen while the new one is in flight, so the palette never opens empty and
+  // never flashes - and a task created a minute ago is findable.
+  const [index, setIndex] = useState(null);
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -41,20 +41,15 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
   }, [open]);
 
   useEffect(() => {
-    if (!open || loadedRef.current) return;
+    if (!open) return;
     let cancelled = false;
-    api.tasks()
-      .then((tasks) => {
-        // `cancelled` covers close-while-in-flight: a response that lands after the
-        // palette shut must not mark the cache loaded and squat on stale data.
-        if (cancelled) return;
-        loadedRef.current = true;
-        // listTasks orders by updated_at DESC, so the head is the recent five.
-        setRecent((tasks || []).slice(0, 5));
-      })
-      // Swallowed deliberately: no Recent group is a fine outcome, an error toast
-      // over a palette the user just opened is not.
-      .catch(() => {});
+    // Each list on its own: a failure in one leaves that group out rather than the
+    // whole palette empty, and an error toast over a palette the user just opened
+    // is worse than a group that is missing.
+    const safe = (p) => p.catch(() => []);
+    Promise.all([safe(api.tasks()), safe(api.projects()), safe(api.chatSessions()), safe(api.sessions())]).then(([tasks, projects, chats, sessions]) => {
+      if (!cancelled) setIndex({ tasks: tasks || [], projects: projects || [], chats: chats || [], sessions: sessions || [] });
+    });
     return () => {
       cancelled = true;
     };
@@ -65,20 +60,36 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
   // which is what holds Go to / Actions / Recent tasks in their fixed slots.
   // Items are built inside the memo so the per-row index is never shared.
   const { groups, flat } = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const { tasks = [], projects = [], chats = [], sessions = [] } = index || {};
+    const projectName = new Map(projects.map((p) => [p.id, p.name]));
+    const stateLabel = (s) => String(s || '').toLowerCase().replace(/_/g, ' ');
     const commands = [
       ...NAV.map((n) => ({ group: 'Go to', kind: 'nav', key: n.href, label: n.label, hint: n.href.slice(1), href: n.href })),
       { group: 'Actions', kind: 'new-task', key: 'new-task', label: 'New task' },
-      ...(recent || []).map((t) => ({
-        group: 'Recent tasks',
+      { group: 'Actions', kind: 'nav', key: 'new-session', label: 'New session', href: '#/sessions/new' },
+      { group: 'Actions', kind: 'nav', key: 'new-chat', label: 'New chat', href: '#/chat/new' },
+      // listTasks orders by updated_at DESC, so with no query the head is the recent
+      // five; with one, every task is a candidate.
+      ...(q ? tasks : tasks.slice(0, 5)).map((t) => ({
+        group: q ? 'Tasks' : 'Recent tasks',
         kind: 'nav',
         key: `#/tasks/${t.id}`,
         label: t.title,
-        hint: t.state,
+        hint: stateLabel(t.state),
         href: `#/tasks/${t.id}`,
       })),
+      ...(q
+        ? [
+            ...projects.map((p) => ({ group: 'Projects', kind: 'nav', key: `#/project/${p.id}`, label: p.name, hint: 'project', href: `#/project/${p.id}` })),
+            ...chats.map((c) => ({ group: 'Conversations', kind: 'nav', key: `#/chat/${c.id}`, label: c.title, hint: projectName.get(c.project_id) || 'chat', href: `#/chat/${c.id}` })),
+            ...sessions.map((x) => ({ group: 'Sessions', kind: 'nav', key: `#/sessions/${x.id}`, label: x.name, hint: stateLabel(x.status), href: `#/sessions/${x.id}` })),
+          ]
+        : []),
     ];
-
-    const q = query.trim().toLowerCase();
+    // How many rows a searched group may hold. A query that matches forty tasks is a
+    // query to refine, not forty rows to scroll past on the way to Projects.
+    const CAP = { Tasks: 8, Projects: 5, Conversations: 5, Sessions: 5 };
     const buckets = new Map();
     for (const c of commands) {
       const m = q ? fuzzy(c.label, q) : { score: 0, hits: [] };
@@ -95,6 +106,7 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
       // Best match first. sort is stable, so equal scores keep the order the
       // commands were declared in, and the groups themselves never reorder.
       if (q) items.sort((a, b) => b.score - a.score);
+      if (CAP[label]) items.splice(CAP[label]);
       groups.push({ label, items });
       for (const item of items) {
         item.i = flat.length;
@@ -102,7 +114,7 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
       }
     }
     return { groups, flat };
-  }, [query, recent]);
+  }, [query, index]);
 
   // The label as nodes, with the characters the query matched tinted. A fuzzy
   // hit is not self-evident - "ovw" landing on Overview looks arbitrary

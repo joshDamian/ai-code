@@ -21,7 +21,7 @@ import { formatCost, formatDuration, formatTokens, shortId } from '../lib.mjs';
 // never quotes. It stays available in the drawer, where there is room for it.
 const EMPTY = { runs: [], tasks: [], providers: [] };
 
-export function Runs() {
+export function Runs({ navigate, runId }) {
   const [data, setData] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
   const [roleFilter, setRoleFilter] = useState('');
@@ -33,7 +33,7 @@ export function Runs() {
       // The run rows carry a task id and a provider id, and neither is a name. The
       // table is unreadable without both lists, so they arrive together rather than
       // as three renders of "…".
-      const [runs, tasks, providers] = await Promise.all([api.runs(), api.tasks(), api.providers()]);
+      const [runs, tasks, { providers }] = await Promise.all([api.runs(), api.tasks(), api.providers()]);
       setData({ runs, tasks, providers });
     } catch (e) {
       showToast(e.message, 'error');
@@ -44,6 +44,20 @@ export function Runs() {
   useEffect(() => {
     load();
   }, []);
+
+  // `#/runs/:id` opens that run's drawer once the list that holds it has arrived.
+  useEffect(() => {
+    if (!data || !runId) return;
+    const hit = data.runs.find((r) => r.id === runId);
+    if (hit) setSelected(hit);
+  }, [data, runId]);
+
+  // Closing a drawer that a link opened puts the address back to the list, so Back
+  // and a reload agree with what is on screen.
+  const closeRun = () => {
+    setSelected(null);
+    if (runId && navigate) navigate('#/runs');
+  };
 
   const { runs, tasks, providers } = data || EMPTY;
   const taskById = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
@@ -94,10 +108,10 @@ export function Runs() {
       sortable: true,
       sortValue: (r) => providerName.get(r.provider_id) || r.provider_id,
       render: (r) => html`
-        <div class="stack">
+        <span class="cell-pair">
           <span>${providerName.get(r.provider_id) || r.provider_id}</span>
           <span class="muted mono-sm">${r.model_id}</span>
-        </div>
+        </span>
       `,
     },
     { key: 'status', label: 'Status', sortable: true, render: (r) => html`<${StatusBadge} status=${r.status} />` },
@@ -123,19 +137,23 @@ export function Runs() {
 
   return html`
     <div class="view-runs">
-      <div class="view-toolbar">
-        <div class="row">
-          <${Select} label="Status" value=${statusFilter} onChange=${setStatusFilter} options=${[{ value: '', label: 'All' }, ...statuses.map((s) => ({ value: s, label: s }))]} />
-          <${Select} label="Role" value=${roleFilter} onChange=${setRoleFilter} options=${[{ value: '', label: 'All' }, ...roles.map((s) => ({ value: s, label: s }))]} />
-        </div>
+      <div class="filter-bar">
         <input
           class="input search-input"
           type="search"
           data-search
-          placeholder="Search runs…"
+          aria-label="Search runs"
+          placeholder="Search by task, provider or model…"
           value=${query}
           onInput=${(e) => setQuery(e.target.value)}
         />
+        <${Select} ariaLabel="Status" value=${statusFilter} onChange=${setStatusFilter} options=${[{ value: '', label: 'All statuses' }, ...statuses.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))]} />
+        <${Select} ariaLabel="Role" value=${roleFilter} onChange=${setRoleFilter} options=${[{ value: '', label: 'All roles' }, ...roles.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))]} />
+        <span class="filter-summary">
+          <b>${filtered.length}</b> run${filtered.length === 1 ? '' : 's'}${' · '}<b>${formatCost(filtered.reduce((n, r) => n + (r.cost || 0), 0))}</b>${filtered.some((r) => r.status === 'failed')
+            ? html`${' · '}<b class="bad">${filtered.filter((r) => r.status === 'failed').length}</b> failed`
+            : null}
+        </span>
       </div>
       ${
         filtered.length
@@ -160,7 +178,7 @@ export function Runs() {
                 hint="Runs appear here as soon as a task reaches planning."
               />`
       }
-      ${selected ? html`<${RunDrawer} run=${selected} task=${taskById.get(selected.task_id)} providerName=${providerName.get(selected.provider_id)} onClose=${() => setSelected(null)} />` : null}
+      ${selected ? html`<${RunDrawer} run=${selected} task=${taskById.get(selected.task_id)} providerName=${providerName.get(selected.provider_id)} onClose=${closeRun} />` : null}
     </div>
   `;
 }

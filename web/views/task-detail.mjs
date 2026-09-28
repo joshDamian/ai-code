@@ -1,14 +1,13 @@
 // Full-page task view (not a modal). URL hash: #/tasks/:id
-import { html, useState, useEffect, useRef, useCallback, useMemo, bodyKind, decisionView, describeEvent, formatDuration, formatTokens, formatCost } from '../lib.mjs';
+import { html, useState, useEffect, useRef, useCallback, useMemo, bodyKind, decisionView, describeEvent, formatDuration, formatTokens, formatCost, formatWhen, shortDir } from '../lib.mjs';
 import { api, taskStreamUrl } from '../api.mjs';
 import { onLocalhost } from '../auth.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
-import { TextArea, Select } from '../components/form.mjs';
+import { TextArea, Select, Toggle } from '../components/form.mjs';
 import { TaskPicker } from '../components/task-picker.mjs';
 import { DiffViewer } from '../components/diff-viewer.mjs';
-import { EventStream } from '../components/event-stream.mjs';
 import { Markdown } from '../components/markdown.mjs';
 import { EmptyState } from '../components/empty-state.mjs';
 import { RunTimeline, BarChart, compactNumber } from '../components/chart.mjs';
@@ -18,6 +17,7 @@ import { Tabs, TabPanel } from '../components/tabs.mjs';
 import { Time } from '../components/time.mjs';
 import { confirmAction } from '../components/confirm.mjs';
 import { SkeletonRows } from '../components/skeleton.mjs';
+import { MoreMenu } from '../components/menu.mjs';
 import { shortId } from '../lib.mjs';
 
 // States in which the harness may have an agent mid-flight. This previously listed
@@ -58,6 +58,17 @@ export function TaskDetail({ id, navigate, onTitle }) {
   // workflow, so it has to re-open the stream too or the repair, its test run and
   // its verification review would all happen off screen.
   const [streamGen, setStreamGen] = useState(0);
+  // The plan's two editing modes, held here rather than in the plan tab because the
+  // next-step bar is what opens them: Edit and Refine sit beside Approve in the bar.
+  const [planMode, setPlanMode] = useState(null);
+  // What the port tab offers the bar - its chosen destination and the two port
+  // calls - registered by the tab, so the bar's Port button ports where the tab says.
+  const [portActions, setPortActions] = useState(null);
+  const [descOpen, setDescOpen] = useState(false);
+  // Whether the clamped description is hiding anything, measured rather than guessed
+  // from its length: a short one with line breaks can overflow, a long line may not.
+  const descRef = useRef(null);
+  const [descLong, setDescLong] = useState(false);
   // The project's name, for the header. The payload carries the project's id and
   // not its name, and the id is the one thing about a project that nobody
   // recognises - so it is fetched alongside, and the header falls back to the short
@@ -92,11 +103,25 @@ export function TaskDetail({ id, navigate, onTitle }) {
     setLinkingParent(false);
     setParentDraft('');
     setCandidates(null);
+    setPlanMode(null);
+    setPortActions(null);
+    setDescOpen(false);
     seenPlanAtRef.current = undefined;
     liveRef.current = null;
     actionRef.current = null;
     load();
   }, [id, load]);
+
+  const description = data?.task?.description;
+  useEffect(() => {
+    const measure = () => {
+      const el = descRef.current;
+      if (el && !el.classList.contains('open')) setDescLong(el.scrollHeight > el.clientHeight + 1);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [description]);
 
   // The header breadcrumb's subject. The shell owns the header and this page is the
   // only thing that knows what it is showing, so the title is handed up rather than
@@ -376,16 +401,34 @@ export function TaskDetail({ id, navigate, onTitle }) {
                 ? html`<span>
                     <span aria-hidden="true">·</span> builds on${' '}
                     <a class="link" href=${`#/tasks/${task.parent_id}`}>${data.parent?.title || shortId(task.parent_id)}</a>
-                    ${data.parent ? html`<span class="muted">${' '}(${data.parent.state})</span>` : null}
+                    ${data.parent ? html`<span class="muted">${' '}(${String(data.parent.state).toLowerCase().replace(/_/g, ' ')})</span>` : null}
                   </span>`
                 : null
             }
+            ${linkingParent
+              ? null
+              : html`<span aria-hidden="true">·</span>
+                  <button
+                    class="link-btn"
+                    type="button"
+                    onClick=${() => {
+                      setParentDraft(task.parent_id || '');
+                      setLinkingParent(true);
+                    }}
+                  >
+                    ${task.parent_id ? 'Change parent' : 'Link a parent task'}
+                  </button>`}
           </div>
-          ${task.description && task.description !== task.title ? html`<p class="task-description">${task.description}</p>` : null}
+          ${task.description && task.description !== task.title
+            ? html`<p class="task-description ${descOpen ? 'open' : ''}" ref=${descRef}>${task.description}</p>
+                ${descLong || descOpen
+                  ? html`<button class="link-btn task-description-toggle" type="button" onClick=${() => setDescOpen((v) => !v)}>${descOpen ? 'Show less' : 'Show all'}</button>`
+                  : null}`
+            : null}
           ${
             linkingParent
               ? html`
-                  <div class="card">
+                  <div class="card parent-link-card">
                     <${TaskPicker}
                       label="Parent task"
                       tasks=${candidates || []}
@@ -415,19 +458,7 @@ export function TaskDetail({ id, navigate, onTitle }) {
                     </div>
                   </div>
                 `
-              : html`
-                  <div class="row">
-                    <button
-                      class="btn secondary"
-                      onClick=${() => {
-                        setParentDraft(task.parent_id || '');
-                        setLinkingParent(true);
-                      }}
-                    >
-                      ${task.parent_id ? 'Change parent' : 'Link parent'}
-                    </button>
-                  </div>
-                `
+              : null
           }
         </div>
         ${/* The two verbs that end a task live up here with the way out, not in a
@@ -436,51 +467,69 @@ export function TaskDetail({ id, navigate, onTitle }) {
              in flight, Close throws the task's worktree away - so neither happens on
              a single click. */ ''}
         <div class="task-header-actions">
-          ${live
-            ? html`<button class="btn danger" disabled=${busy} onClick=${() => confirmCancel(task)}>Cancel run</button>`
-            : null}
-          ${task.state !== 'COMPLETE' && task.state !== 'CANCELLED' && !live
-            ? html`<button class="btn danger" disabled=${busy} onClick=${() => confirmClose(task)}>Close task</button>`
-            : null}
-          <a href="#/tasks" class="link">← Back to tasks</a>
+          <${MoreMenu}
+            label="Task actions"
+            items=${[
+              { label: 'Copy task id', onSelect: () => copyId(task.id) },
+              task.state !== 'COMPLETE' && task.state !== 'CANCELLED' && !live
+                ? { label: 'Close task…', danger: true, disabled: busy, onSelect: () => confirmClose(task) }
+                : null,
+            ]}
+          />
         </div>
       </div>
+
+      <${NextStepBar}
+        task=${task}
+        runs=${runs}
+        live=${live}
+        ported=${data.ported}
+        revision=${data.revision}
+        tab=${tab}
+        busy=${busy}
+        planMode=${planMode}
+        portActions=${portActions}
+        readAction=${readAction}
+        onGoTo=${setTab}
+        onPlanMode=${(m) => {
+          acknowledgeRevision();
+          setPlanMode(m);
+          setTab('plan');
+        }}
+        onApprove=${() => {
+          acknowledgeRevision();
+          run(() => api.taskApprove(task.id), 'Plan approved.');
+        }}
+        onReject=${() => {
+          acknowledgeRevision();
+          run(() => api.taskReject(task.id), 'Plan rejected.');
+        }}
+        onCancel=${() => confirmCancel(task)}
+        run=${run}
+      />
 
       <${Tabs}
         tabs=${TABS.map((t) => {
           // Two things light a tab the user is not on: a plan revision that landed
-          // under them, and the step the workflow is waiting for.
+          // under them, and the step the workflow is waiting for. A stage that is
+          // behind the task carries a check instead.
           const revised = t === 'plan' && !!revisedAt;
           const dot = tab !== t && (revised || t === step?.tab);
-          return { id: t, label: TAB_LABELS[t] || t, dot, dotLabel: revised ? 'Plan revised' : 'Next step' };
+          return { id: t, label: TAB_LABELS[t] || t, dot, dotLabel: revised ? 'Plan revised' : 'Next step', done: !dot && stageDone(t, task, data.ported) };
         })}
         value=${tab}
         onChange=${setTab}
         label="Task sections"
       />
 
-      ${
-        // The step is named on the page it happens on, so it is only shown from
-        // elsewhere. Switching tabs is all this does: the button that starts the work
-        // is that tab's own, and pressing this one is not a way to press that one.
-        step && step.tab !== tab
-          ? html`
-              <div class="next-step-banner">
-                <span>${step.text}</span>
-                <button class="btn" onClick=${() => setTab(step.tab)}>${step.cta} →</button>
-              </div>
-            `
-          : null
-      }
-
       <${TabPanel} tabId=${tab}>
-        ${tab === 'plan' ? html`<${PlanTab} task=${task} busy=${busy} run=${run} live=${live} revision=${data.revision} revisedAt=${revisedAt} readAction=${readAction} onAcknowledge=${acknowledgeRevision} lastRun=${runs[runs.length - 1] || null} />` : null}
-        ${tab === 'execute' ? html`<${ExecuteTab} task=${task} runs=${runs} busy=${busy} run=${run} live=${live} />` : null}
-        ${tab === 'review' ? html`<${ReviewTab} task=${task} busy=${busy} run=${run} live=${live} navigate=${navigate} onReopen=${reopenStream} />` : null}
-        ${tab === 'port' ? html`<${PortTab} task=${task} branches=${data.branches || []} busy=${busy} run=${run} />` : null}
+        ${tab === 'plan' ? html`<${PlanTab} task=${task} runs=${runs} busy=${busy} run=${run} live=${live} revision=${data.revision} revisedAt=${revisedAt} readAction=${readAction} onAcknowledge=${acknowledgeRevision} planMode=${planMode} setPlanMode=${setPlanMode} />` : null}
+        ${tab === 'execute' ? html`<${ExecuteTab} task=${task} runs=${runs} live=${live} onGoTo=${setTab} copy=${(v) => navigator.clipboard.writeText(v).then(() => showToast('Path copied.', 'success'), () => showToast(v))} />` : null}
+        ${tab === 'review' ? html`<${ReviewTab} task=${task} runs=${runs} busy=${busy} run=${run} live=${live} navigate=${navigate} onReopen=${reopenStream} onGoTo=${setTab} />` : null}
+        ${tab === 'port' ? html`<${PortTab} task=${task} branches=${data.branches || []} busy=${busy} run=${run} onActions=${setPortActions} />` : null}
         ${tab === 'terminal' ? html`<${TerminalTab} task=${task} live=${live} terminal=${data.terminal} />` : null}
         ${tab === 'stats' ? html`<${StatsTab} runs=${runs} live=${data.live} />` : null}
-        ${tab === 'activity' ? html`<${ActivityTab} taskId=${task.id} store=${buffer} />` : null}
+        ${tab === 'activity' ? html`<${ActivityTab} taskId=${task.id} store=${buffer} runs=${runs} root=${task.worktree} />` : null}
       <//>
     </div>
   `;
@@ -490,10 +539,13 @@ export function TaskDetail({ id, navigate, onTitle }) {
 // planner running - the first plan or a refine - and a revision that landed. Both are
 // read from the server's `live` and from the revision the task carries, never from a
 // local flag, so a reload mid-refine and a second tab see the same thing this one does.
-function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAcknowledge, lastRun }) {
-  const [editing, setEditing] = useState(false);
+function PlanTab({ task, runs, busy, run, live, revision, revisedAt, readAction, onAcknowledge, planMode, setPlanMode }) {
+  // Opened from the next-step bar, which holds Edit and Refine beside Approve.
+  const editing = planMode === 'edit';
+  const setEditing = (v) => setPlanMode(v ? 'edit' : null);
   const [draft, setDraft] = useState(task.plan || '');
-  const [refining, setRefining] = useState(false);
+  const refining = planMode === 'refine';
+  const setRefining = (v) => setPlanMode(v ? 'refine' : null);
   const [feedback, setFeedback] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
@@ -550,9 +602,11 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
         const chosen = registry.all.find((m) => m.id === task.plan_model);
         const open = chosen && registry.health.get(chosen.provider_id) === 'OPEN';
         return html`
-          <div class="row">
+          <div class="row plan-model">
             <${Select}
               label="Planning model"
+              inline
+              size="sm"
               value=${task.plan_model || ''}
               disabled=${busy}
               options=${options}
@@ -622,18 +676,6 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
     }
   }
 
-  const liveBlock = !planning
-    ? null
-    : html`
-        <div class="card plan-live">
-          <div class="row">
-            <span class="spinner"></span>
-            <b>Refining plan…</b>
-            ${elapsed != null ? html`<span class="muted">${formatDuration(elapsed)}</span>` : null}
-          </div>
-          ${action ? html`<div class="plan-action muted">${describeEvent(action)?.text || ''}</div>` : null}
-        </div>
-      `;
 
   // PLANNING is both "a planner is running" and "ready for a planner to run". Only the
   // second is this branch; the first is the live block above, which a refine needs
@@ -642,22 +684,17 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
   if (task.state === 'PLANNING' && !planning) {
     return html`
       <div class="stack">
-        ${
-          lastRun && lastRun.role === 'planner' && lastRun.status === 'failed'
-            ? html`<p class="error-text">The last planning attempt failed: ${lastRun.error || 'unknown error'}</p>`
-            : html`<p class="muted">No plan yet.</p>`
-        }
-        <div class="row">
-          <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskPlan(task.id), 'Plan ready.')}>Start Planning</button>
-        </div>
-        ${planningModelPicker}
+        <div class="plan-toolbar"><p class="muted">No plan yet. Start planning from the bar above; the planner uses the model picked here.</p>${planningModelPicker}</div>
       </div>
     `;
   }
 
+  // Before approval the model is still a choice; after it, it is a fact about the plan.
+  const choosing = task.state === 'PLANNING' || task.state === 'AWAITING_APPROVAL';
+  const planner = [...(runs || [])].reverse().find((r) => r.role === 'planner' && r.status === 'succeeded') || null;
+
   return html`
     <div class="stack">
-      ${liveBlock}
 
       ${
         // Not while editing: the editor has its own banner for the same event, and it
@@ -673,18 +710,23 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
           : null
       }
 
-      ${
-        hasPlan
-          ? html`
-              <div class="diff-modes">
-                <button class="btn secondary ${view === 'plan' ? 'on' : ''}" onClick=${() => setView('plan')}>Plan</button>
-                <button class="btn secondary ${view === 'changes' ? 'on' : ''}" disabled=${!revision?.hasPrev} onClick=${showChanges}>Changes vs previous</button>
-              </div>
-            `
-          : null
-      }
-
-      ${planningModelPicker}
+      <div class="plan-toolbar">
+        ${
+          hasPlan && revision?.hasPrev
+            ? html`
+                <div class="seg" role="tablist" aria-label="Plan view">
+                  <button type="button" role="tab" aria-selected=${view === 'plan'} class="seg-btn ${view === 'plan' ? 'active' : ''}" onClick=${() => setView('plan')}>Plan</button>
+                  <button type="button" role="tab" aria-selected=${view === 'changes'} class="seg-btn ${view === 'changes' ? 'active' : ''}" onClick=${showChanges}>
+                    Changes vs previous
+                  </button>
+                </div>
+              `
+            : html`<span></span>`
+        }
+        ${choosing
+          ? planningModelPicker
+          : html`<span class="muted plan-meta">${planner?.model_id ? html`Planned with <span class="mono-sm">${planner.model_id}</span>` : 'Planned'}${revision?.at ? html` · ${formatWhen(revision.at)}` : null}</span>`}
+      </div>
 
       ${
         editing
@@ -761,11 +803,8 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
                 <div class="row">
                   <button class="btn" disabled=${busy || submitting || planning || !feedback.trim()} onClick=${submitFeedback}>Submit feedback</button>
                   ${
-                    planning
-                      ? html`<button class="btn danger" disabled=${busy} onClick=${() => run(() => api.taskCancel(task.id), 'Cancel requested.')}>
-                          Cancel refine
-                        </button>`
-                      : html`<button class="btn secondary" onClick=${() => setRefining(false)}>Cancel</button>`
+                    // While the planner runs, the bar above holds Cancel run.
+                    planning ? null : html`<button class="btn secondary" onClick=${() => setRefining(false)}>Cancel</button>`
                   }
                 </div>
               </div>
@@ -773,34 +812,6 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
           : null
       }
 
-      ${
-        !editing && task.state === 'AWAITING_APPROVAL'
-          ? html`
-              <div class="row">
-                <button class="btn" disabled=${busy || planning} onClick=${() => { onAcknowledge(); run(() => api.taskApprove(task.id), 'Plan approved.'); }}>Approve</button>
-                <button class="btn danger" disabled=${busy || planning} onClick=${() => { onAcknowledge(); run(() => api.taskReject(task.id), 'Plan rejected.'); }}>Reject</button>
-                <button class="btn secondary" disabled=${busy || planning} onClick=${() => { onAcknowledge(); setRefining((r) => !r); }}>Refine</button>
-                <button class="btn secondary" disabled=${busy || planning} onClick=${() => { onAcknowledge(); setEditing(true); }}>Edit</button>
-              </div>
-            `
-          : null
-      }
-
-      ${
-        task.state === 'FAILED'
-          ? html`
-              ${
-                lastRun && lastRun.status === 'failed'
-                  ? html`<p class="error-text">The last run failed: ${lastRun.error || 'unknown error'}</p>`
-                  : null
-              }
-              <div class="row">
-                ${task.worktree ? html`<button class="btn" disabled=${busy} onClick=${() => run(() => api.taskRetry(task.id), 'Retrying...')}>Retry Tests</button>` : null}
-                <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskReplan(task.id), 'Replanning...')}>Replan</button>
-              </div>
-            `
-          : null
-      }
     </div>
   `;
 }
@@ -824,25 +835,229 @@ function PlanTab({ task, busy, run, live, revision, revisedAt, readAction, onAck
 function nextStep(task, live, ported) {
   if (live) return null;
   switch (task.state) {
+    case 'PLANNING':
+    case 'AWAITING_APPROVAL':
+      return { tab: 'plan' };
     case 'APPROVED':
-      return { tab: 'execute', text: 'Plan approved.', cta: 'Start execution' };
+    case 'IMPLEMENTING':
+      return { tab: 'execute' };
     case 'REVIEWING':
-      return { tab: 'review', text: 'Execution finished.', cta: 'Start review' };
     case 'REPAIRING':
-      return { tab: 'review', text: 'Review requested changes.', cta: 'Repair' };
-    // The one step in this list that no agent can take. The nudge goes to the tab
-    // where the question and its options are, because that is where the answer is.
     case 'AWAITING_DECISION':
-      return { tab: 'review', text: 'The review needs your decision.', cta: 'Choose an option' };
+      return { tab: 'review' };
     case 'COMPLETE':
-      return ported ? null : { tab: 'port', text: 'Review passed.', cta: 'Port this change' };
+      return ported ? null : { tab: 'port' };
     case 'FAILED':
-      return task.worktree
-        ? { tab: 'execute', text: 'Tests failed.', cta: 'Retry tests' }
-        : { tab: 'plan', text: 'The last run failed.', cta: 'View details' };
+      return { tab: task.worktree ? 'execute' : 'plan' };
     default:
       return null;
   }
+}
+
+// Whether a stage is behind the task, for the check on its tab. Read from the state
+// the task has reached, so a stage is done once the workflow has moved past it.
+const PAST_PLAN = new Set(['APPROVED', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING', 'AWAITING_DECISION', 'COMPLETE']);
+const PAST_EXECUTE = new Set(['REVIEWING', 'REPAIRING', 'AWAITING_DECISION', 'COMPLETE']);
+function stageDone(tab, task, ported) {
+  if (tab === 'plan') return PAST_PLAN.has(task.state);
+  if (tab === 'execute') return PAST_EXECUTE.has(task.state);
+  if (tab === 'review') return task.state === 'COMPLETE';
+  if (tab === 'port') return !!ported;
+  return false;
+}
+
+// What a live run is doing, in the words of its role.
+const LIVE_VERB = { planner: 'Planning', implementer: 'Implementing', tester: 'Testing', reviewer: 'Reviewing', repair: 'Repairing', chat: 'Answering' };
+
+// The one place on the page for the task's next move: what happened, what comes
+// next, and the button that does it. It sits between the header and the tabs and is
+// the same on every tab, so the action is never repeated tab by tab and never sits
+// beside Close. When the next move is a form - feedback for a refine, an answer to
+// the review's question - the bar names it and the form stays in its tab.
+function NextStepBar({ task, runs, live, ported, revision, tab, busy, planMode, portActions, readAction, onGoTo, onPlanMode, onApprove, onReject, onCancel, run }) {
+  const [now, setNow] = useState(Date.now());
+  const [action, setAction] = useState(null);
+  useEffect(() => {
+    if (!live) return undefined;
+    const tick = () => {
+      setNow(Date.now());
+      setAction(readAction?.() || null);
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [live, readAction]);
+
+  const lastOf = (role) => [...(runs || [])].reverse().find((r) => r.role === role) || null;
+  const bar = barFor();
+  if (!bar) return null;
+
+  function barFor() {
+    if (live) {
+      const started = Date.parse(live.startedAt);
+      const elapsed = Number.isFinite(started) ? formatDuration(now - started) : null;
+      const verb = live.role === 'planner' && task.plan ? 'Refining the plan' : LIVE_VERB[live.role] || live.role;
+      const doing = action ? describeEvent(action)?.text : null;
+      return {
+        tone: 'info',
+        spinner: true,
+        title: elapsed ? `${verb} · ${elapsed}` : verb,
+        detail: doing || `${live.providerId || ''}${live.modelId ? ` / ${live.modelId}` : ''}`,
+        actions: [{ label: 'Cancel run', kind: 'danger', onClick: onCancel }],
+      };
+    }
+    switch (task.state) {
+      case 'PLANNING': {
+        const planner = lastOf('planner');
+        const failed = planner && planner.status === 'failed';
+        return {
+          tone: failed ? 'bad' : 'info',
+          icon: failed ? 'cross' : 'plan',
+          title: failed ? 'The last planning attempt failed' : 'Not planned yet',
+          detail: failed ? html`${planner.error || 'Unknown error'} · <a class="link" href=${`#/runs/${planner.id}`}>See the run</a>` : 'The planner reads the task and the code, and writes a plan for you to approve.',
+          actions: [{ label: 'Start planning', kind: 'primary', onClick: () => run(() => api.taskPlan(task.id), 'Plan ready.') }],
+        };
+      }
+      case 'AWAITING_APPROVAL': {
+        if (planMode === 'refine') return { tone: 'info', icon: 'plan', title: 'Refining the plan', detail: 'Say what should change below, then submit it.' };
+        if (planMode === 'edit') return { tone: 'info', icon: 'plan', title: 'Editing the plan', detail: 'Save or cancel your edits below.' };
+        const planner = lastOf('planner');
+        const by = planner?.model_id ? html`written by <span class="mono-sm">${planner.model_id}</span> ` : 'written ';
+        return {
+          tone: 'info',
+          icon: 'plan',
+          title: 'Plan ready for your approval',
+          detail: html`${revision?.at ? html`${by}${formatWhen(revision.at)}. ` : null}Nothing is written until you approve.`,
+          actions: [
+            { label: 'Reject', kind: 'danger', onClick: onReject },
+            { label: 'Edit', kind: 'secondary', onClick: () => onPlanMode('edit') },
+            { label: 'Refine', kind: 'secondary', onClick: () => onPlanMode('refine') },
+            { label: 'Approve plan', kind: 'primary', onClick: onApprove },
+          ],
+        };
+      }
+      case 'APPROVED':
+        return {
+          tone: 'info',
+          icon: 'play',
+          title: 'Plan approved',
+          detail: 'Execution creates a worktree on a new branch and carries out the plan there.',
+          actions: [{ label: 'Start execution', kind: 'primary', onClick: () => run(() => api.taskExecute(task.id), 'Execution started.') }],
+        };
+      case 'IMPLEMENTING':
+        return {
+          tone: 'warn',
+          icon: 'alert',
+          title: 'No implementer running',
+          detail: 'The run that set this state ended before moving the task on. Re-arming returns it to approved; the worktree and its changes are kept.',
+          actions: [{ label: 'Re-arm', kind: 'primary', onClick: () => run(() => api.taskApprove(task.id), 'Re-armed. Start execution when ready.') }],
+        };
+      case 'REVIEWING': {
+        const reviewer = lastOf('reviewer');
+        const failed = reviewer && reviewer.status !== 'succeeded' && reviewer.status !== 'running' ? reviewer : null;
+        return {
+          tone: failed ? 'bad' : 'info',
+          icon: failed ? 'cross' : 'review',
+          title: failed ? 'The last review did not finish' : 'Ready for review',
+          detail: failed
+            ? html`${failed.error || `The reviewer ${failed.status}`} · ${formatWhen(failed.ended_at || failed.started_at)}. The change is untouched.`
+            : 'The reviewer checks the change against the approved plan.',
+          actions: [{ label: failed ? 'Try the review again' : 'Start review', kind: 'primary', onClick: () => run(() => api.taskReview(task.id), 'Review started.') }],
+        };
+      }
+      case 'REPAIRING':
+        return {
+          tone: 'warn',
+          icon: 'alert',
+          title: 'Review requested changes',
+          detail: task.feedback ? html`Feedback waiting to be repaired: “${task.feedback}”` : 'The repair works through the review’s findings, then the change is reviewed again.',
+          actions: [{ label: 'Repair', kind: 'primary', onClick: () => run(() => api.taskRepair(task.id), 'Repair started.') }],
+        };
+      case 'AWAITING_DECISION':
+        return {
+          tone: 'warn',
+          icon: 'question',
+          title: 'The review needs your decision',
+          detail: 'Pick an option or write the instruction yourself. Nothing runs until you approve a repair.',
+          actions: tab === 'review' ? [] : [{ label: 'Go to the question', kind: 'primary', onClick: () => onGoTo('review') }],
+        };
+      case 'COMPLETE': {
+        if (ported) return null;
+        if (tab === 'port' && portActions) {
+          if (!portActions.actionable) return { tone: 'good', icon: 'check', title: 'Review passed', detail: portActions.headline || 'Nothing to port.' };
+          return {
+            tone: 'good',
+            icon: 'check',
+            title: 'Review passed',
+            detail: html`Porting commits the change onto <span class="mono-sm">${portActions.branch}</span>, then merges it into <b>${portActions.target}</b> — chosen below.`,
+            actions: [
+              { label: 'Preview', kind: 'secondary', onClick: portActions.preview },
+              { label: `Port onto ${portActions.target}`, kind: 'primary', onClick: portActions.port },
+            ],
+          };
+        }
+        return {
+          tone: 'good',
+          icon: 'check',
+          title: 'Review passed',
+          detail: 'The change is ready to land. Porting commits it and merges it into a branch you pick.',
+          actions: [{ label: 'Port this change', kind: 'primary', onClick: () => onGoTo('port') }],
+        };
+      }
+      case 'FAILED': {
+        const last = [...(runs || [])].reverse().find((r) => r.status === 'failed') || null;
+        return {
+          tone: 'bad',
+          icon: 'cross',
+          title: 'The last run failed',
+          detail: last?.error || 'Unknown error',
+          actions: [
+            { label: 'Replan', kind: task.worktree ? 'secondary' : 'primary', onClick: () => run(() => api.taskReplan(task.id), 'Replanning...') },
+            task.worktree ? { label: 'Retry tests', kind: 'primary', onClick: () => run(() => api.taskRetry(task.id), 'Retrying...') } : null,
+          ].filter(Boolean),
+        };
+      }
+      default:
+        return null;
+    }
+  }
+
+  const ICON = {
+    plan: html`<path d="M3 3.5h10M3 8h10M3 12.5h6" />`,
+    play: html`<path d="M5 3.5v9l7-4.5z" />`,
+    review: html`<circle cx="7" cy="7" r="4.5" /><path d="m10.5 10.5 3 3" />`,
+    check: html`<path d="m3.5 8.5 3 3 6-7" />`,
+    cross: html`<path d="m4.5 4.5 7 7M11.5 4.5l-7 7" />`,
+    alert: html`<path d="M8 4v5M8 11.5h.01" />`,
+    question: html`<path d="M6 6a2 2 0 1 1 3 1.7c-.6.4-1 .8-1 1.5M8 11.5h.01" />`,
+  };
+
+  return html`
+    <section class="next-bar tone-${bar.tone}" aria-label="Next step" aria-live="polite">
+      <span class="next-bar-icon" aria-hidden="true">
+        ${bar.spinner ? html`<span class="next-bar-spin"></span>` : html`<svg viewBox="0 0 16 16">${ICON[bar.icon] || ICON.plan}</svg>`}
+      </span>
+      <div class="next-bar-text">
+        <b>${bar.title}</b>
+        ${bar.detail ? html`<span>${bar.detail}</span>` : null}
+      </div>
+      ${(bar.actions || []).length
+        ? html`<div class="next-bar-actions">
+            ${bar.actions.map(
+              (a) => html`<button
+                key=${a.label}
+                type="button"
+                class="btn ${a.kind === 'primary' ? 'primary' : a.kind === 'danger' ? 'danger-outline' : 'secondary'}"
+                disabled=${busy}
+                onClick=${a.onClick}
+              >
+                ${a.label}
+              </button>`
+            )}
+          </div>`
+        : null}
+    </section>
+  `;
 }
 
 // What the tree looked like when the plan was written, recorded by plan() so the
@@ -857,104 +1072,80 @@ function planBase(task) {
   }
 }
 
-function ExecuteTab({ task, runs, busy, run, live }) {
+// The run's role as the step it was, for a list read down as a history.
+const RAN_VERB = { planner: 'Planned', implementer: 'Implemented', tester: 'Tested', reviewer: 'Reviewed', repair: 'Repaired', chat: 'Question' };
+
+function ExecuteTab({ task, runs, live, onGoTo, copy }) {
   const base = planBase(task);
+  const list = runs || [];
+  const spent = list.reduce((n, r) => n + (Number(r.cost) || 0), 0);
+  const worked = list.reduce((n, r) => n + (Number(r.duration_ms) || 0), 0);
+  const branch = task.branch || `ai-code/${task.id}`;
   return html`
     <div class="stack">
-      <div class="card">
-        <h3>Worktree</h3>
-        <div class="kv-grid">
-          <span class="muted">Path</span>
-          <code>${task.worktree || 'Not created'}</code>
-          <span class="muted">Branch</span>
-          <code>${task.branch || 'Not created'}</code>
-          <span class="muted">Base commit</span>
-          <code>${task.base_commit || 'Not created'}</code>
-          ${
-            base
-              ? html`
-                  <span class="muted">Plan baseline</span>
-                  <code>${String(base.head || '').slice(0, 12)} · ${base.dirty && base.dirty.length ? `${base.dirty.length} file(s) dirty` : 'clean'}</code>
-                `
-              : null
-          }
-          ${
-            base && base.conflicts && base.conflicts.length
-              ? html`
-                  <span class="muted">Plan conflicts</span>
-                  <code>${base.conflicts.join(', ')}</code>
-                `
-              : null
-          }
+      <section class="card exec-tree" aria-label="Worktree">
+        ${task.worktree
+          ? html`<div class="exec-tree-row">
+              <svg class="ss-ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5" /><circle cx="5" cy="12" r="1.5" /><path d="M5 5.5v5" /></svg>
+              <span class="mono-sm">${task.branch || branch}</span>
+              ${task.base_commit ? html`<span class="muted">from</span><span class="mono-sm" title=${task.base_commit}>${String(task.base_commit).slice(0, 7)}</span>` : null}
+              <span class="muted" aria-hidden="true">·</span>
+              <span class="mono-sm muted exec-tree-path" title=${task.worktree}>${shortDir(task.worktree)}</span>
+              <button class="btn secondary sm" type="button" onClick=${() => copy(task.worktree)}>Copy path</button>
+              ${TABS.includes('terminal') ? html`<button class="link-btn" type="button" onClick=${() => onGoTo('terminal')}>Open a terminal</button>` : null}
+            </div>`
+          : html`<div class="exec-tree-row muted">
+              <svg class="ss-ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5" /><circle cx="5" cy="12" r="1.5" /><path d="M5 5.5v5" /></svg>
+              <span>No worktree yet. Execution creates one on a new branch, <span class="mono-sm" title=${branch}>${branch}</span>.</span>
+            </div>`}
+        ${base
+          ? html`<div class="exec-tree-row exec-tree-base">
+              <span class="muted">Plan baseline</span>
+              <span class="mono-sm">${String(base.head || '').slice(0, 12)}</span>
+              <span class="muted">· ${base.dirty && base.dirty.length ? `${base.dirty.length} file${base.dirty.length === 1 ? '' : 's'} dirty when the plan was written` : 'the tree was clean when the plan was written'}</span>
+            </div>`
+          : null}
+      </section>
+
+      ${base && base.conflicts && base.conflicts.length
+        ? html`<div class="notice notice-warn">
+            <b>Plan conflicts.</b> These files changed after the plan was written:${' '}${base.conflicts.map((c, i) => html`${i ? ', ' : ''}<span class="mono-sm">${c}</span>`)}.
+          </div>`
+        : null}
+
+      <section class="card exec-runs" aria-label="What ran">
+        <div class="exec-runs-head">
+          <h2>What ran</h2>
+          <span class="muted">${list.length} run${list.length === 1 ? '' : 's'}${spent ? ` · ${formatCost(spent)}` : ''}${worked ? ` · ${formatDuration(worked)} of work` : ''}</span>
         </div>
-      </div>
-
-      ${
-        // IMPLEMENTING is set before the implementer starts and moved on after it
-        // ends, so a process that dies mid-run leaves the task here with nothing
-        // running it. Every step a reader would guess refuses - implement wants
-        // APPROVED, test wants TESTING, review wants REVIEWING - and the only
-        // button was Close, which discards the worktree. The way back is `approve`,
-        // a bare transition that the map allows from IMPLEMENTING, so the task can
-        // be re-armed and execution started again over the work already on disk.
-        // Without this the state had no exit from the dashboard at all.
-        task.state === 'IMPLEMENTING' && !live
-          ? html`
-              <div class="card">
-                <h3>No implementer running</h3>
-                <p class="muted">
-                  This task is implementing, but no implementer is running — the run that set this state ended
-                  before it could move the task on. Re-arming it returns the task to APPROVED so execution can
-                  start again; the worktree and anything already changed in it are kept.
-                </p>
-                <div class="row">
-                  <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskApprove(task.id), 'Re-armed. Start execution when ready.')}>Re-arm</button>
-                </div>
-              </div>
-            `
-          : null
-      }
-
-      ${
-        task.state === 'APPROVED'
-          ? html`
-              <div class="row">
-                <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskExecute(task.id), 'Execution started.')}>Start Execution</button>
-              </div>
-            `
-          : null
-      }
-
-      <div class="card">
-        <h3>Runs</h3>
-        ${
-          runs && runs.length
-            ? html`
-                <div class="list">
-                  ${runs.map(
-                    (r) => html`
-                      <div class="list-row" key=${r.id}>
-                        <div class="list-row-main">
-                          <b>${r.role}</b>
-                          <span class="muted">${r.provider_id || '—'} / ${r.model_id || '—'}</span>
-                        </div>
-                        <div class="list-row-side">
-                          <${StatusBadge} status=${r.status} />
-                          <span class="muted">
-                            ${formatTokens(r.tokens)} tok · ${formatCost(r.cost)} · ${formatDuration(r.duration_ms)}
-                          </span>
-                        </div>
-                      </div>
-                    `
-                  )}
-                </div>
-              `
-            : html`<div class="muted">No runs yet.</div>`
-        }
-      </div>
+        ${list.length
+          ? html`<ol class="exec-timeline">
+              ${list.map((r) => {
+                const tone = r.status === 'succeeded' ? 'good' : r.status === 'failed' ? 'bad' : r.status === 'running' ? 'info' : 'muted';
+                const model = r.role === 'tester' ? null : [r.provider_id, r.model_id].filter(Boolean).join(' / ');
+                const facts = [
+                  r.role === 'tester' ? null : r.tokens ? `${formatTokens(r.tokens)} tokens` : null,
+                  r.role === 'tester' ? null : r.cost ? formatCost(r.cost) : null,
+                  r.duration_ms ? formatDuration(r.duration_ms) : null,
+                ].filter(Boolean);
+                return html`<li class="exec-step" key=${r.id}>
+                  <span class="exec-dot ${tone}" aria-hidden="true"></span>
+                  <b>${RAN_VERB[r.role] || r.role}</b>
+                  <span class="muted exec-what">
+                    ${r.status === 'failed' ? html`<span class="bad">Failed</span>${r.error ? html`: ${r.error}` : ''} · ` : r.status === 'running' ? html`<span class="info">Running</span> · ` : r.role === 'tester' && r.status === 'succeeded' ? html`<span class="good">Passed</span> · ` : r.status !== 'succeeded' ? html`${r.status} · ` : ''}
+                    ${model ? html`<span class="mono-sm">${model}</span>` : null}${model && facts.length ? ' · ' : ''}${facts.join(' · ')}
+                    ${r.status === 'failed' ? html` · <a class="link" href=${`#/runs/${r.id}`}>See the run</a>` : null}
+                  </span>
+                  <span class="muted exec-when"><${Time} at=${r.started_at} /></span>
+                </li>`;
+              })}
+            </ol>`
+          : html`<p class="muted">Nothing has run yet.</p>`}
+      </section>
     </div>
   `;
 }
+
 
 // A role that ran more than once is numbered, and the number is the run's
 // ordinal within its own role rather than its index in the list: two repairs
@@ -1055,7 +1246,7 @@ function StatsTab({ runs, live }) {
     { key: 'role', label: 'Role', sortable: true },
     {
       key: 'provider_model',
-      label: 'Provider / Model',
+      label: 'Provider / model',
       sortable: true,
       // One column over two fields, so it sorts on the rendered pair rather than
       // on a key no row carries.
@@ -1089,26 +1280,26 @@ function StatsTab({ runs, live }) {
     },
   ];
 
-  const runNote = stats.waitingDuration > 0 ? `${formatDuration(stats.waitingDuration)} waiting` : '—';
+  const runNote = stats.waitingDuration > 0 ? `${formatDuration(stats.waitingDuration)} waiting` : 'No waiting';
 
   return html`
     <div class="stack">
       <div class="metric-grid">
         <div class="card metric-card">
-          <div class="metric-label muted">Total Cost</div>
+          <div class="metric-label muted">Total cost</div>
           <div class="metric-value">${formatCost(stats.cost)}</div>
         </div>
         <div class="card metric-card">
-          <div class="metric-label muted">Total Tokens</div>
+          <div class="metric-label muted">Total tokens</div>
           <div class="metric-value">${Number(stats.tokens).toLocaleString()}</div>
           <div class="metric-note muted">${formatTokens(stats.inputTokens)} in, ${formatTokens(stats.outputTokens)} out</div>
         </div>
         <div class="card metric-card">
-          <div class="metric-label muted">Active Time</div>
+          <div class="metric-label muted">Active time</div>
           <div class="metric-value">${formatDuration(stats.activeDuration)}</div>
         </div>
         <div class="card metric-card">
-          <div class="metric-label muted">Wall-Clock Time</div>
+          <div class="metric-label muted">Wall-clock time</div>
           <div class="metric-value">${formatDuration(stats.wallClockDuration)}</div>
           <div class="metric-note muted">${runNote}</div>
         </div>
@@ -1123,14 +1314,14 @@ function StatsTab({ runs, live }) {
 
       <figure class="section card chart-card">
         <figcaption class="chart-head">
-          <h2>Run Timeline</h2>
+          <h2>Run timeline</h2>
         </figcaption>
         <${RunTimeline} runs=${runs} live=${live} />
       </figure>
 
       <figure class="section card chart-card">
         <figcaption class="chart-head">
-          <h2>Cost per Run</h2>
+          <h2>Cost per run</h2>
         </figcaption>
         <${BarChart}
           items=${costBars}
@@ -1142,7 +1333,7 @@ function StatsTab({ runs, live }) {
 
       <figure class="section card chart-card">
         <figcaption class="chart-head">
-          <h2>Tokens per Run</h2>
+          <h2>Tokens per run</h2>
         </figcaption>
         <${BarChart}
           items=${tokenBars}
@@ -1153,7 +1344,7 @@ function StatsTab({ runs, live }) {
       </figure>
 
       <section class="section card">
-        <h2>Run Details</h2>
+        <h2>Runs</h2>
         <div class="table-scroll">
           <${DataTable} columns=${runColumns} rows=${runs} rowKey=${(r) => r.id} />
         </div>
@@ -1171,8 +1362,225 @@ function StatsTab({ runs, live }) {
 // this is: every word here is generated from the repository by `assess`, and
 // bodyKind would read the `---` in a diff header as a reason to render an
 // assessment as a diff. The diff itself is the only blob, and it goes to DiffViewer.
-function PortTab({ task, branches, busy, run }) {
+// Where each state sits on the way to a review, for the tab that has nothing to show
+// yet. The step is the one the task is on; the text is what is happening in it; the
+// tab is where the next move is made.
+const BEFORE_REVIEW = {
+  CREATED: { step: 0, text: 'Not planned yet', tab: 'plan', cta: 'Go to the plan' },
+  PLANNING: { step: 0, text: 'Being planned', tab: 'plan', cta: 'Go to the plan' },
+  AWAITING_APPROVAL: { step: 0, text: 'Waiting for your approval', tab: 'plan', cta: 'Go to the plan', note: 'The next move is yours: approve, refine or edit the plan.' },
+  APPROVED: { step: 1, text: 'Approved, ready to run', tab: 'execute', cta: 'Go to execute', note: 'The plan is approved. Start execution to carry it out.' },
+  IMPLEMENTING: { step: 1, text: 'Running', tab: 'execute', cta: 'Watch it run' },
+  TESTING: { step: 1, text: 'Testing', tab: 'execute', cta: 'Watch it run' },
+};
+
+const REVIEW_STEPS = [
+  { label: 'Plan', about: 'A plan you approve before any code is written.' },
+  { label: 'Execute', about: 'The plan is carried out in a worktree, then tested.' },
+  { label: 'Review', about: 'The change is checked against the plan.' },
+  { label: 'Port', about: 'You land the reviewed change on a branch.' },
+];
+
+function ReviewProgress({ state, onGoTo }) {
+  const at = BEFORE_REVIEW[state];
+  return html`
+    <section class="card review-card" aria-label="Where this task is">
+      <div class="review-head">
+        <h2>Nothing to review yet</h2>
+        <p class="muted">Review runs once the plan is approved and carried out. This task is at the ${REVIEW_STEPS[at.step].label.toLowerCase()} step.</p>
+      </div>
+      <ol class="review-steps">
+        ${REVIEW_STEPS.map(
+          (st, i) => html`
+            <li class="review-step ${i < at.step ? 'done' : i === at.step ? 'current' : ''} ${i === 2 ? 'here' : ''}" key=${st.label} aria-current=${i === at.step ? 'step' : null}>
+              <div class="review-step-mark"><span>${i < at.step ? '✓' : i + 1}</span>${i < REVIEW_STEPS.length - 1 ? html`<i></i>` : null}</div>
+              <b>${st.label}${i === 2 ? html` <small>· this tab</small>` : null}</b>
+              <span>${i === at.step ? at.text : st.about}</span>
+            </li>
+          `
+        )}
+      </ol>
+      <div class="review-foot">
+        <span class="muted">${at.note || 'Nothing to do here until it reaches review.'}</span>
+        <button class="btn primary" type="button" onClick=${() => onGoTo?.(at.tab)}>${at.cta}</button>
+      </div>
+    </section>
+  `;
+}
+
+// The files a unified diff touches, with what each gained and lost. Counted inside
+// hunks only: a `---` or `+++` outside one is a file header, and inside one it is a
+// deleted or added line that happens to start with dashes.
+function diffFiles(diff) {
+  const files = [];
+  let cur = null;
+  let inHunk = false;
+  for (const line of String(diff || '').split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      const m = line.match(/ b\/(.+)$/);
+      cur = { path: m ? m[1] : line.slice(11), added: 0, removed: 0 };
+      files.push(cur);
+      inHunk = false;
+    } else if (line.startsWith('@@')) inHunk = true;
+    else if (!cur || !inHunk) continue;
+    else if (line.startsWith('+')) cur.added++;
+    else if (line.startsWith('-')) cur.removed++;
+  }
+  return files;
+}
+
+// The plan's top-level steps, counted the way it is written: numbered lines at the
+// left margin. A plan written as prose has none, and says nothing about a count.
+function planSteps(plan) {
+  return String(plan || '').split('\n').filter((l) => /^\d+[.)]\s/.test(l)).length;
+}
+
+function FileRow({ f }) {
+  const cut = f.path.lastIndexOf('/');
+  return html`
+    <li>
+      <span class="review-file-mark ${f.fresh ? 'fresh' : ''}"></span>
+      <span class="review-file-path">${cut >= 0 ? html`<span class="muted">${f.path.slice(0, cut + 1)}</span>` : null}${f.path.slice(cut + 1)}</span>
+      ${f.added != null
+        ? html`<span class="good">+${f.added}</span><span class="bad">−${f.removed}</span>`
+        : f.fresh
+          ? html`<span class="good review-new">new</span>`
+          : null}
+    </li>
+  `;
+}
+
+// The review, before it has run. What the reviewer will read, what it will read it
+// against, and who will read it - the three things a person decides "start it now"
+// on - with the last attempt's failure on top when there was one.
+function ReadyForReview({ task, runs, busy, run, onAsk, onGoTo }) {
+  const [change, setChange] = useState(null);
+  const [policy, setPolicy] = useState(null);
+  const [showDiff, setShowDiff] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .taskDiff(task.id)
+      .then((d) => alive && setChange(d))
+      .catch(() => alive && setChange({ diff: '', files: [] }));
+    api
+      .routing()
+      .then((r) => alive && setPolicy(r?.reviewer || {}))
+      .catch(() => alive && setPolicy({}));
+    return () => {
+      alive = false;
+    };
+  }, [task.id]);
+
+  const reviews = runs.filter((r) => r.role === 'reviewer');
+  const last = reviews[reviews.length - 1] || null;
+  const failed = last && last.status !== 'succeeded' && last.status !== 'running' ? last : null;
+  const tests = [...runs].reverse().find((r) => r.role === 'tester') || null;
+  const steps = planSteps(task.plan);
+
+  // Counted from the diff, plus the files the diff cannot show: git's diff leaves out
+  // what it has not been told about, so a new file is in the status list and not in
+  // the diff - and a change whose only file is new would otherwise read as empty.
+  const counted = change ? diffFiles(change.diff) : [];
+  const seen = new Set(counted.map((f) => f.path));
+  const extra = (change?.files || [])
+    .map((line) => {
+      const raw = String(line);
+      // Status rows carry a two-letter code; a plain path list does not.
+      const coded = /^[ MADRCU?!]{2} /.test(raw);
+      return { path: (coded ? raw.slice(3) : raw).trim(), fresh: coded && raw.startsWith('??') };
+    })
+    .filter((f) => f.path && !seen.has(f.path))
+    .map((f) => ({ path: f.path, added: null, removed: null, fresh: f.fresh }));
+  const files = [...counted, ...extra];
+  const added = counted.reduce((n, f) => n + f.added, 0);
+  const removed = counted.reduce((n, f) => n + f.removed, 0);
+  const strategy = policy?.strategy || 'quality';
+  const preferred = policy?.preferred?.[0] || null;
+
+  return html`
+    <section class="card review-card" aria-label="Ready for review">
+      <div class="review-head review-head-icon">
+        <span class="review-icon" aria-hidden="true">
+          <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" /><path d="m10.5 10.5 3 3M5 7l1.5 1.5L9.5 5.5" /></svg>
+        </span>
+        <div>
+          <h2>Ready for review</h2>
+          <p class="muted">The reviewer reads this change against the approved plan and returns a pass, a failure with findings to repair, or a question for you.</p>
+        </div>
+      </div>
+
+      ${failed
+        ? html`
+            <div class="review-alert" role="alert">
+              <div>
+                <b>The last review did not finish</b>
+                <span>${failed.model_id || 'The reviewer'} ${failed.status === 'cancelled' ? 'was cancelled' : 'failed'}${failed.error ? html`: ${failed.error}` : ''} · <${Time} at=${failed.ended_at || failed.started_at} />. The change is untouched; running it again starts a fresh review.</span>
+              </div>
+              <a class="link" href=${`#/runs/${failed.id}`}>See the run</a>
+            </div>
+          `
+        : null}
+
+      <div class="review-body">
+        <div class="review-change">
+          <div class="review-label">
+            <h3>The change</h3>
+            ${change
+              ? html`<span class="muted">${files.length} file${files.length === 1 ? '' : 's'}${counted.length ? html` · <span class="good">+${added}</span> <span class="bad">−${removed}</span>` : null}</span>`
+              : null}
+          </div>
+          ${!change
+            ? html`<${SkeletonRows} count=${3} />`
+            : files.length
+              ? html`<ul class="review-files">${files.slice(0, 20).map((f) => html`<${FileRow} key=${f.path} f=${f} />`)}</ul>
+                  ${files.length > 20 ? html`<span class="muted">and ${files.length - 20} more</span>` : null}`
+              : html`<p class="muted">No change was found for this task. The reviewer will have nothing to read.</p>`}
+          ${change?.diff
+            ? html`
+                <button class="link-btn review-toggle" type="button" aria-expanded=${showDiff} onClick=${() => setShowDiff((v) => !v)}>
+                  ${showDiff ? 'Hide the change' : 'View the change'}
+                </button>
+                ${showDiff ? html`<${DiffViewer} diff=${change.diff} />` : null}
+              `
+            : null}
+        </div>
+
+        <dl class="review-facts">
+          <div>
+            <dt>Checked against</dt>
+            <dd>The approved plan${steps ? ` · ${steps} step${steps === 1 ? '' : 's'}` : ''}</dd>
+            <dd><button class="link-btn" type="button" onClick=${() => onGoTo?.('plan')}>Open the plan</button></dd>
+          </div>
+          <div>
+            <dt>Reviewer</dt>
+            <dd>${preferred ? html`<span class="mono-sm">${preferred}</span>` : 'Automatic'} <span class="muted">· ${strategy[0].toUpperCase() + strategy.slice(1)} strategy</span></dd>
+            ${failed?.model_id ? html`<dd class="muted">Last attempt used ${failed.model_id}.</dd>` : null}
+            <dd><a class="link" href="#/routing">Change in Routing</a></dd>
+          </div>
+          <div>
+            <dt>Tests</dt>
+            <dd class="review-tests ${tests ? (tests.status === 'succeeded' ? 'good' : tests.status === 'failed' ? 'bad' : '') : ''}">
+              <span class="health ${tests?.status === 'succeeded' ? 'good' : tests?.status === 'failed' ? 'bad' : 'warn'}"></span>
+              ${tests ? (tests.status === 'succeeded' ? 'Passed after execution' : tests.status === 'failed' ? 'Failed after execution' : `Test run ${tests.status}`) : 'No test run recorded'}
+            </dd>
+          </div>
+        </dl>
+      </div>
+
+      <div class="review-foot">
+        <span class="muted">${reviews.length ? `Attempt ${reviews.length + 1} of the review.` : 'Nothing leaves the worktree until the review passes and you port it.'}</span>
+        <button class="btn secondary" type="button" disabled=${busy} onClick=${onAsk}>Ask about this change</button>
+
+      </div>
+    </section>
+  `;
+}
+
+function PortTab({ task, branches, busy, run, onActions }) {
   const [chosen, setChosen] = useState(null);
+  const [removeWorktree, setRemoveWorktree] = useState(false);
   const [view, setView] = useState(null);
   const [error, setError] = useState(null);
   const [note, setNote] = useState(null);
@@ -1205,6 +1613,29 @@ function PortTab({ task, branches, busy, run }) {
       return r;
     }, portReport);
 
+  // The bar above the tabs holds Preview and Port, since that is where every other
+  // state's main action lives; this tab keeps what they act on: the destination and
+  // whether the worktree goes with it. The registration is cleared on the way out so
+  // the bar never offers a port against a view that is gone.
+  const st0 = view?.state;
+  const actionable0 = !!view && st0?.key !== 'landed' && st0?.key !== 'empty';
+  useEffect(() => {
+    if (!onActions) return undefined;
+    onActions(
+      view
+        ? {
+            actionable: actionable0,
+            headline: st0?.headline || '',
+            branch: view.branch,
+            target,
+            preview: () => port({ to: target, dryRun: true }),
+            port: () => port({ to: target, clean: removeWorktree && !!view.worktree }),
+          }
+        : null
+    );
+  }, [view, target, removeWorktree, actionable0]);
+  useEffect(() => () => onActions && onActions(null), []);
+
   if (error) return html`<div class="card"><p class="error-text">${error}</p></div>`;
   if (!view) return html`<${Spinner} message="Reading the worktree..." />`;
 
@@ -1231,93 +1662,92 @@ function PortTab({ task, branches, busy, run }) {
   if (taskCommit && !sameCommit) refs.push({ ...taskCommit, label: 'Task commit' });
   const options = [...new Set([view.target, ...branches].filter(Boolean))].map((b) => ({ value: b, label: b }));
 
+  const copy = (v) => navigator.clipboard.writeText(v).then(() => showToast('Command copied.', 'success'), () => showToast(v));
+
   return html`
     <div class="stack">
-      <div class="port-state ${st.tone}">
+      <section class="card port-verdict tone-${st.tone}" aria-label="Verdict">
         <div class="port-head">
           <span class="badge badge-${st.tone}">${st.badge}</span>
           <h2>${st.headline}</h2>
         </div>
-        <p class="muted">${st.detail}</p>
-        ${refs.length ? html`<div class="refs">${refs.map((r) => html`<div class="ref" key=${r.sha}>
-            <span class="muted">${r.label}</span>
-            <code class="ref-sha">${r.short}</code>
-            <span class="ref-subject">${r.subject}</span>
-          </div>`)}</div>` : null}
+        ${st.detail ? html`<p class="muted">${st.detail}</p>` : null}
+        ${refs.length
+          ? html`<div class="refs">${refs.map(
+              (r) => html`<div class="ref" key=${r.sha}>
+                <span class="muted">${r.label}</span>
+                <code class="ref-sha">${r.short}</code>
+                <span class="ref-subject">${r.subject}</span>
+              </div>`
+            )}</div>`
+          : null}
         ${note ? html`<p class="port-result">${portReport(note)}</p>` : null}
-      </div>
+      </section>
 
-      <div class="card">
-        <h3>Destination</h3>
-        <${Select} label="Merge into" value=${target} disabled=${busy} onChange=${setChosen} options=${options} />
-        ${view.alreadyPorted ? html`<p class="muted">Change this to ask about another branch.</p>` : null}
-      </div>
+      <div class="port-grid">
+        <section class="card port-dest" aria-label="Destination">
+          <h3>Destination</h3>
+          <${Select} label="Merge into" value=${target} disabled=${busy} onChange=${setChosen} options=${options} />
+          ${view.alreadyPorted ? html`<p class="muted">Change this to ask about another branch.</p>` : null}
+          ${actionable && view.worktree
+            ? html`<${Toggle} checked=${removeWorktree} disabled=${busy} onChange=${setRemoveWorktree} label="Remove the worktree after porting" />`
+            : null}
+          ${actionable
+            ? html`<p class="muted port-tests-note">
+                Tests are not re-run here. They ran in the worktree; the destination is a different tree, and this reports
+                what the merge would do rather than vouching for the result.
+              </p>`
+            : html`<p class="muted">Nothing to run. <code class="mono-sm">ai-code task port ${shortId(task.id)}</code> reports this same verdict.</p>`}
+        </section>
 
-      ${
-        steps.length
-          ? html`<div class="card">
+        ${steps.length
+          ? html`<section class="card port-steps" aria-label="Next steps">
               <h3>Next steps</h3>
               <ol class="steps">
                 ${steps.map(
                   (s, i) => html`<li key=${i}>
                     <span>${s.text}</span>
-                    ${s.command ? html`<pre class="code-block">${s.command}</pre>` : null}
+                    ${s.command
+                      ? html`<div class="port-cmd">
+                          <pre class="code-block">${s.command}</pre>
+                          <button class="btn secondary sm" type="button" onClick=${() => copy(s.command)}>Copy</button>
+                        </div>`
+                      : null}
                   </li>`
                 )}
               </ol>
-            </div>`
-          : null
-      }
-
-      <div class="card">
-        <h3>${actionable ? 'Port' : 'Nothing to do'}</h3>
-        ${
-          actionable
-            ? html`<div class="row">
-                <button class="btn secondary" disabled=${busy} onClick=${() => port({ to: target, dryRun: true })}>Preview</button>
-                <button class="btn" disabled=${busy} onClick=${() => port({ to: target })}>Port onto ${view.target}</button>
-                ${
-                  view.worktree
-                    ? html`<button class="btn secondary" disabled=${busy} onClick=${() => port({ to: target, clean: true })}>
-                        Port, then remove the worktree
-                      </button>`
-                    : null
-                }
-              </div>
-              <p class="muted">
-                Tests are not re-run here. They ran in the worktree; the destination is a different tree, and
-                this reports what the merge would do rather than vouching for the result.
-              </p>`
-            : html`<p class="muted">
-                Nothing to run. \`ai-code task port ${task.id}\` reports this same verdict.
-              </p>`
-        }
+            </section>`
+          : null}
       </div>
 
-      <div class="card">
-        <h3>${changeLabel(view)}</h3>
-        ${
-          view.diff?.trim()
-            ? html`<${DiffViewer} diff=${view.diff} />`
-            : html`<div class="muted">No change was found for this task.</div>`
-        }
-      </div>
+      <div class="port-grid port-grid-wide">
+        <section class="card port-change" aria-label="The change">
+          <h3>${changeLabel(view)}</h3>
+          ${view.diff?.trim() ? html`<${DiffViewer} diff=${view.diff} />` : html`<div class="muted">No change was found for this task.</div>`}
+        </section>
 
-      <div class="card">
-        <h3>Details</h3>
-        <div class="list">
-          ${row('Worktree', worktreeText(view))}
-          ${row('Destination', `${view.target} at ${String(view.targetTip || '').slice(0, 7)}`)}
-          ${row('Merge', conflicts.length ? `${conflicts.length} conflict(s)` : view.clean === null ? 'Unknown' : 'Clean')}
-          ${row('Touches', `${(view.files || []).length} file(s)`)}
-          ${view.untracked?.length ? row('Untracked', view.untracked.map((u) => `${u.path} (${u.bytes} B)`).join(', ')) : null}
-          ${blocked.length ? row('Blocked by', blocked.join(', ')) : null}
-          ${conflicts.length ? row('Conflicts', conflicts.join(', ')) : null}
-          ${view.premisesMoved?.length ? row('Plan premises moved', view.premisesMoved.join(', ')) : null}
-        </div>
+        <section class="card port-details" aria-label="Details">
+          <h3>Details</h3>
+          <dl class="port-dl">
+            ${dlRow('Worktree', worktreeText(view))}
+            ${dlRow('Branch', view.branch)}
+            ${dlRow('Destination', `${view.target} at ${String(view.targetTip || '').slice(0, 7)}`)}
+            ${dlRow('Merge', conflicts.length ? `${conflicts.length} conflict(s)` : view.clean === null ? 'Unknown' : 'Clean')}
+            ${dlRow('Touches', `${(view.files || []).length} file(s)`)}
+            ${view.untracked?.length ? dlRow('Untracked', view.untracked.map((u) => `${u.path} (${u.bytes} B)`).join(', ')) : null}
+            ${blocked.length ? dlRow('Blocked by', blocked.join(', ')) : null}
+            ${conflicts.length ? dlRow('Conflicts', conflicts.join(', ')) : null}
+            ${view.premisesMoved?.length ? dlRow('Plan premises moved', view.premisesMoved.join(', ')) : null}
+          </dl>
+        </section>
       </div>
     </div>
   `;
+}
+
+function dlRow(label, value) {
+  if (value === undefined || value === null || value === '') return null;
+  return html`<div class="port-dl-row" key=${label}><dt>${label}</dt><dd>${value}</dd></div>`;
 }
 
 // What the diff pane is showing, which is one of three things and they are not
@@ -1353,13 +1783,6 @@ function portReport(r) {
   if (r.alreadyPorted) return `${r.target} already contains this work. Nothing was moved.`;
   if (r.landed) return `Ported onto ${r.target}${r.cleaned ? '; the worktree was removed' : ''}.`;
   return `Committed to ${r.branch}${r.cleaned ? ' and removed its worktree' : ''}. ${r.target} was left alone - see Next steps.`;
-}
-
-function row(label, value) {
-  return html`<div class="list-row" key=${label}>
-    <div class="list-row-main"><b>${label}</b></div>
-    <div class="list-row-side"><span class="muted">${value}</span></div>
-  </div>`;
 }
 
 // A shell in one of the task's two directories: its worktree, and the checkout the
@@ -1427,9 +1850,10 @@ function TerminalTab({ task, live, terminal }) {
   `;
 }
 
-function ReviewTab({ task, busy, run, live, navigate, onReopen }) {
+function ReviewTab({ task, runs, busy, run, live, navigate, onReopen, onGoTo }) {
   const [note, setNote] = useState('');
   const [asking, setAsking] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   // The decision gate's own state: which option is picked and what has been typed.
   // Both survive the loads that follow a comment, because the tab is re-rendered
   // rather than remounted and the person is mid-answer.
@@ -1447,14 +1871,7 @@ function ReviewTab({ task, busy, run, live, navigate, onReopen }) {
           ${task.feedback ? html`<p class="muted">Repairing with your feedback: ${task.feedback}</p>` : null}
         </div>
       `;
-    return html`
-      <div class="stack">
-        <p class="muted">This task is in review, but no reviewer is running.</p>
-        <div class="row">
-          <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskReview(task.id), 'Review started.')}>Start Review</button>
-        </div>
-      </div>
-    `;
+    return html`<${ReadyForReview} task=${task} runs=${runs || []} busy=${busy || asking} run=${run} onAsk=${askQuestions} onGoTo=${onGoTo} />`;
   }
   const review = task.review || '';
   const kind = bodyKind(review);
@@ -1484,146 +1901,165 @@ function ReviewTab({ task, busy, run, live, navigate, onReopen }) {
     }
   }
 
+  if (kind === 'empty' && !open) {
+    return BEFORE_REVIEW[task.state]
+      ? html`<${ReviewProgress} state=${task.state} onGoTo=${onGoTo} />`
+      : html`<p class="muted">This task stopped before it was reviewed.</p>`;
+  }
+
+  const reviews = (runs || []).filter((r) => r.role === 'reviewer');
+  const lastOk = [...reviews].reverse().find((r) => r.status === 'succeeded') || null;
+  const verdict =
+    task.state === 'COMPLETE'
+      ? { tone: 'good', icon: html`<path d="m3.5 8.5 3 3 6-7" />`, title: 'Review passed' }
+      : task.state === 'REPAIRING'
+        ? { tone: 'warn', icon: html`<path d="M8 4v5M8 11.5h.01" />`, title: 'Review requested changes' }
+        : task.state === 'AWAITING_DECISION'
+          ? { tone: 'warn', icon: html`<path d="M6 6a2 2 0 1 1 3 1.7c-.6.4-1 .8-1 1.5M8 11.5h.01" />`, title: 'The review needs your decision' }
+          : { tone: 'neutral', icon: html`<circle cx="7" cy="7" r="4.5" /><path d="m10.5 10.5 3 3" />`, title: 'Review' };
+  const nth = ['first', 'second', 'third', 'fourth', 'fifth'];
+
+  const decision = open
+    ? html`
+        <div class="review-decision-grid">
+          <section class="card review-question" aria-label="The reviewer's question">
+            <span class="review-eyebrow warn">The reviewer needs a decision</span>
+            <p class="review-question-text">${open.question}</p>
+            <div class="review-options" role="radiogroup" aria-label="Options">
+              ${open.options.map(
+                (o, i) => html`
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked=${picked === i ? 'true' : 'false'}
+                    class="review-option ${picked === i ? 'on' : ''}"
+                    disabled=${busy}
+                    onClick=${() => setPicked(picked === i ? null : i)}
+                  >
+                    <span class="review-radio" aria-hidden="true"></span>
+                    <span><b>${o.label}</b>${o.detail ? html`<span class="muted">${o.detail}</span>` : null}</span>
+                  </button>
+                `
+              )}
+            </div>
+            ${open.recommendation ? html`<p class="muted review-rec">The reviewer recommends: ${open.recommendation}</p>` : null}
+            <${TextArea}
+              label="Your answer"
+              value=${answer}
+              onInput=${setAnswer}
+              rows=${3}
+              placeholder="Add anything the reviewer should weigh, or write the instruction yourself."
+              loading=${busy}
+            />
+            <div class="review-foot review-foot-inset">
+              <span class="muted">Ask sends your answer back for another round. Approve starts the repair.</span>
+              <button
+                class="btn secondary"
+                disabled=${busy || !answer.trim()}
+                onClick=${() =>
+                  run(async () => {
+                    const r = await api.taskDiscuss(task.id, answer.trim());
+                    setAnswer('');
+                    return r;
+                  }, 'Comment sent — the reviewer will answer.')}
+              >
+                Ask reviewer
+              </button>
+              <button
+                class="btn primary"
+                disabled=${busy || (picked === null && !answer.trim())}
+                onClick=${() =>
+                  run(async () => {
+                    const r = await api.taskResolve(task.id, { option: picked, text: answer.trim() });
+                    setPicked(null);
+                    setAnswer('');
+                    onReopen();
+                    return r;
+                  }, 'Repair approved — running now.')}
+              >
+                Approve repair
+              </button>
+            </div>
+          </section>
+          ${open.thread.length
+            ? html`<section class="card review-thread" aria-label="Discussion">
+                <span class="review-eyebrow">Discussion · oldest first</span>
+                ${open.thread.map(
+                  (m, i) => html`<div class="review-msg ${m.from === 'user' ? 'mine' : ''}" key=${i}>
+                    <span class="muted"><b>${m.from === 'user' ? 'You' : 'Reviewer'}</b>${m.verdict ? ` — ${m.verdict}` : ''}</span>
+                    <${Markdown} text=${m.text} className="md review-md" />
+                  </div>`
+                )}
+              </section>`
+            : null}
+        </div>
+      `
+    : null;
+
   return html`
     <div class="stack">
-      ${
-        kind === 'empty'
-          ? html`<div class="muted">No review yet.</div>`
-          : kind === 'diff'
-            ? html`<${DiffViewer} diff=${review} />`
-            : html`<${Markdown} text=${review} />`
-      }
-      ${
-        open
+      ${decision}
+      <section class="card review-card" aria-label="Review">
+        <div class="review-head review-head-icon">
+          <span class="review-icon tone-${verdict.tone}" aria-hidden="true"><svg viewBox="0 0 16 16">${verdict.icon}</svg></span>
+          <div>
+            <h2>${open ? 'The review' : verdict.title}</h2>
+            ${lastOk
+              ? html`<p class="muted">
+                  <span class="mono-sm">${[lastOk.provider_id, lastOk.model_id].filter(Boolean).join(' / ')}</span> · <${Time} at=${lastOk.ended_at || lastOk.started_at} />
+                  ${reviews.length > 1 ? ` · ${nth[reviews.indexOf(lastOk)] || `attempt ${reviews.indexOf(lastOk) + 1}`} attempt` : ''} · <a class="link" href=${`#/runs/${lastOk.id}`}>See the run</a>
+                </p>`
+              : null}
+          </div>
+        </div>
+        <div class="review-findings">
+          <h3 class="review-eyebrow">Findings</h3>
+          ${kind === 'empty' ? html`<p class="muted">The reviewer left no written findings.</p>` : kind === 'diff' ? html`<${DiffViewer} diff=${review} />` : html`<${Markdown} text=${review} className="md review-md" />`}
+          ${task.feedback && task.state !== 'REPAIRING' ? html`<p class="muted">Feedback waiting to be repaired: ${task.feedback}</p>` : null}
+        </div>
+        ${completed
           ? html`
-              <div class="card">
-                <div class="field-label">The reviewer needs a decision</div>
-                <p>${open.question}</p>
-                <div class="stack">
-                  ${open.options.map(
-                    (o, i) => html`
+              <button class="review-fold" type="button" aria-expanded=${feedbackOpen} onClick=${() => setFeedbackOpen((v) => !v)}>
+                <svg class="ss-ic ${feedbackOpen ? 'open' : ''}" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
+                <b>Not satisfied? Send feedback</b>
+                <span class="muted">Reopens repair and review before the change is ported.</span>
+              </button>
+              ${feedbackOpen
+                ? html`<div class="review-feedback">
+                    <${TextArea}
+                      label="What should change?"
+                      value=${note}
+                      onInput=${setNote}
+                      rows=${3}
+                      placeholder="This re-opens the repair → review loop before the work is ported."
+                      loading=${busy}
+                    />
+                    <div class="row review-feedback-actions">
+                      <button class="btn secondary" type="button" onClick=${() => setFeedbackOpen(false)}>Cancel</button>
                       <button
-                        class=${picked === i ? 'btn' : 'btn secondary'}
-                        disabled=${busy}
-                        onClick=${() => setPicked(picked === i ? null : i)}
+                        class="btn primary"
+                        disabled=${busy || !note.trim()}
+                        onClick=${() =>
+                          run(async () => {
+                            const r = await api.taskFeedback(task.id, note.trim());
+                            setNote('');
+                            setFeedbackOpen(false);
+                            onReopen();
+                            return r;
+                          }, 'Feedback sent — repair started.')}
                       >
-                        <strong>${o.label}</strong>${o.detail ? ` — ${o.detail}` : ''}
+                        Send feedback
                       </button>
-                    `
-                  )}
-                </div>
-                ${open.recommendation ? html`<p class="muted">The reviewer recommends: ${open.recommendation}</p>` : null}
-                <${TextArea}
-                  label="Your answer"
-                  value=${answer}
-                  onInput=${setAnswer}
-                  rows=${4}
-                  placeholder="Add anything the reviewer should weigh, or write the instruction yourself."
-                  loading=${busy}
-                />
-                <div class="row">
-                  <button
-                    class="btn secondary"
-                    disabled=${busy || !answer.trim()}
-                    onClick=${() =>
-                      run(async () => {
-                        const r = await api.taskDiscuss(task.id, answer.trim());
-                        setAnswer('');
-                        return r;
-                      }, 'Comment sent — the reviewer will answer.')}
-                  >
-                    Ask reviewer
-                  </button>
-                  <button
-                    class="btn"
-                    disabled=${busy || (picked === null && !answer.trim())}
-                    onClick=${() =>
-                      run(async () => {
-                        const r = await api.taskResolve(task.id, { option: picked, text: answer.trim() });
-                        setPicked(null);
-                        setAnswer('');
-                        onReopen();
-                        return r;
-                      }, 'Repair approved — running now.')}
-                  >
-                    Approve repair
-                  </button>
-                </div>
-              </div>
+                    </div>
+                  </div>`
+                : null}
             `
-          : null
-      }
-      ${
-        // The exchange that settles the question. Read-only, oldest first, with the
-        // reviewer's verdict on each answer so a revised set of options is visible as
-        // one - the cards above are always the current set.
-        open && open.thread.length
-          ? html`
-              <div class="card">
-                <div class="field-label">Discussion</div>
-                <div class="stack">
-                  ${open.thread.map(
-                    (m) => html`
-                      <div>
-                        <div class="muted">${m.from === 'user' ? 'You' : 'Reviewer'}${m.verdict ? ` — ${m.verdict}` : ''}</div>
-                        <${Markdown} text=${m.text} />
-                      </div>
-                    `
-                  )}
-                </div>
-              </div>
-            `
-          : null
-      }
-      ${
-        // Set for the length of the repair it started, and cleared when that cycle
-        // ends - so a note still on the row here is one the repair has not run yet,
-        // which is exactly what the button below it does.
-        task.feedback ? html`<p class="muted">Feedback waiting to be repaired: ${task.feedback}</p>` : null
-      }
-      ${
-        task.state === 'REPAIRING'
-          ? html`
-              <div class="row">
-                <button class="btn" disabled=${busy} onClick=${() => run(() => api.taskRepair(task.id), 'Repair started.')}>Repair</button>
-              </div>
-            `
-          : null
-      }
-      ${
-        completed
-          ? html`
-              <div class="card">
-                <${TextArea}
-                  label="Feedback"
-                  value=${note}
-                  onInput=${setNote}
-                  rows=${4}
-                  placeholder="What should change? This re-opens the repair → review loop before the work is ported."
-                  loading=${busy}
-                />
-                <div class="row">
-                  <button
-                    class="btn"
-                    disabled=${busy || !note.trim()}
-                    onClick=${() =>
-                      run(async () => {
-                        const r = await api.taskFeedback(task.id, note.trim());
-                        setNote('');
-                        onReopen();
-                        return r;
-                      }, 'Feedback sent — repair started.')}
-                  >
-                    Send feedback
-                  </button>
-                  <button class="btn secondary" disabled=${busy || asking} onClick=${askQuestions}>
-                    ${asking ? 'Opening…' : 'Ask questions'}
-                  </button>
-                </div>
-              </div>
-            `
-          : null
-      }
+          : null}
+        <div class="review-foot">
+          <span class="muted">Questions about the change go to a conversation scoped to this task.</span>
+          <button class="btn secondary" type="button" disabled=${busy || asking} onClick=${askQuestions}>${asking ? 'Opening…' : 'Ask questions'}</button>
+        </div>
+      </section>
     </div>
   `;
 }
@@ -1702,14 +2138,37 @@ export function createEventBuffer() {
   };
 }
 
-function ActivityTab({ taskId, store }) {
+// What each described kind is called on a row. The kinds come from describeEvent,
+// shared with the CLI; these are only their labels here.
+const KIND_LABEL = { run: 'Run', tool: 'Tool', said: 'Said', think: 'Thinking', out: 'Output', done: 'Done', error: 'Failed', limit: 'Warning' };
+const STEP_KINDS = new Set(['run', 'tool', 'done', 'error', 'limit']);
+const PROBLEM_KINDS = new Set(['error', 'limit']);
+const ACTIVITY_FILTERS = [
+  { value: 'all', label: 'Everything' },
+  { value: 'steps', label: 'Steps' },
+  { value: 'problems', label: 'Problems' },
+];
+
+// A path inside the task's worktree, said from the worktree's root. The absolute
+// prefix is the same on every row and pushes the part that differs off the edge.
+function relativeTo(root, text) {
+  if (!root || !text) return text;
+  const prefix = root.endsWith('/') ? root : `${root}/`;
+  return text.split(prefix).join('');
+}
+
+function ActivityTab({ taskId, store, runs, root }) {
   const [events, setEvents] = useState(store.events);
   const [meta, setMeta] = useState(store.meta);
   const [older, setOlder] = useState([]);
   const [allLoaded, setAllLoaded] = useState(false);
   const [olderBusy, setOlderBusy] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
-  const endRef = useRef(null);
+  const [filter, setFilter] = useState('all');
+  const [query, setQuery] = useState('');
+  // Which groups are open, by run id. A group the person has not touched follows the
+  // default below, so the run in progress stays open as it grows.
+  const [openRuns, setOpenRuns] = useState({});
   const boxRef = useRef(null);
 
   useEffect(() => {
@@ -1724,17 +2183,20 @@ function ActivityTab({ taskId, store }) {
     return store.on(sync);
   }, [store]);
 
+  // Scroll the box, not the page. scrollIntoView on a row inside it also scrolled
+  // every ancestor, which pulled the whole page down to the tab on each batch.
+  const toBottom = () => {
+    const el = boxRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  };
   useEffect(() => {
-    if (autoScroll && endRef.current) {
-      endRef.current.scrollIntoView({ block: 'end' });
-    }
-  }, [events, autoScroll]);
+    if (autoScroll) toBottom();
+  }, [events, autoScroll, filter, query]);
 
   function onScroll() {
     const el = boxRef.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    setAutoScroll(nearBottom);
+    setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
   }
 
   const displayed = older.concat(events);
@@ -1764,38 +2226,155 @@ function ActivityTab({ taskId, store }) {
     }
   }
 
+  // Described once, then grouped by the run that wrote them, in the order the runs
+  // appear in the stream. An event whose formatter returns nothing is dropped.
+  const described = useMemo(() => {
+    const out = [];
+    for (const e of displayed) {
+      const d = describeEvent(e);
+      if (d) out.push({ e, kind: d.kind, text: relativeTo(root, d.text) });
+    }
+    return out;
+  }, [displayed, root]);
+  const problems = described.filter((x) => PROBLEM_KINDS.has(x.kind)).length;
+
+  const q = query.trim().toLowerCase();
+  const keep = (x) =>
+    (filter === 'all' || (filter === 'steps' ? STEP_KINDS.has(x.kind) : PROBLEM_KINDS.has(x.kind))) &&
+    (!q || x.text.toLowerCase().includes(q));
+
+  const byId = new Map((runs || []).map((r) => [r.id, r]));
+  const labels = roleLabels(runs || []);
+  const labelOf = new Map((runs || []).map((r, i) => [r.id, labels[i]]));
+  const groups = [];
+  for (const x of described) {
+    const id = x.e.run_id || 'none';
+    let g = groups[groups.length - 1];
+    if (!g || g.id !== id) {
+      g = { id, rows: [], all: 0 };
+      groups.push(g);
+    }
+    g.all++;
+    if (keep(x)) g.rows.push(x);
+  }
+  const shown = groups.filter((g) => g.rows.length);
+  const lastId = groups.length ? groups[groups.length - 1].id : null;
+  const filtering = filter !== 'all' || !!q;
+  const isOpen = (g) => {
+    if (g.id in openRuns) return openRuns[g.id];
+    const r = byId.get(g.id);
+    return filtering || g.id === lastId || r?.status === 'failed' || r?.status === 'running';
+  };
+  const allOpen = shown.length > 0 && shown.every(isOpen);
+  const setAll = (v) => setOpenRuns(Object.fromEntries(shown.map((g) => [g.id, v])));
+
+  // Consecutive output lines are one console block rather than a row each: a test
+  // suite reporting on itself reads as a transcript, not as forty events.
+  function rowsOf(rows) {
+    const out = [];
+    for (const x of rows) {
+      const prev = out[out.length - 1];
+      if (x.kind === 'out' && prev?.console) prev.lines.push(x);
+      else if (x.kind === 'out') out.push({ console: true, lines: [x], key: x.e.id });
+      else out.push({ ...x, key: x.e.id });
+    }
+    return out.map((r) =>
+      r.console
+        ? html`<li class="act-console" key=${r.key}><pre>${r.lines.map((l) => l.text).join('\n')}</pre></li>`
+        : html`<li class="act-row kind-${r.kind}" key=${r.key}>
+            <span class="act-kind">${KIND_LABEL[r.kind] || r.kind}</span>
+            <span class="act-text">${r.text}</span>
+            <span class="act-time muted" title=${r.e.created_at || ''}>${clockOf(r.e.created_at)}</span>
+          </li>`
+    );
+  }
+
+  function head(g, open) {
+    const r = byId.get(g.id);
+    const status = r?.status || 'unknown';
+    const tone = status === 'failed' ? 'bad' : status === 'running' ? 'live' : status === 'succeeded' ? 'good' : 'neutral';
+    const bits = [
+      r?.duration_ms ? formatDuration(r.duration_ms) : null,
+      Number(r?.cost) ? formatCost(r.cost) : null,
+      r?.started_at ? formatWhen(r.started_at) : null,
+      filtering ? `${g.rows.length} of ${g.all}` : `${g.all} event${g.all === 1 ? '' : 's'}`,
+    ].filter(Boolean);
+    const name = r ? String(labelOf.get(g.id) || r.role) : '';
+    const title = r ? `${name.charAt(0).toUpperCase()}${name.slice(1)}${status === 'failed' ? ' · did not finish' : status === 'running' ? ' · running' : ''}` : 'Other activity';
+    return html`
+      <button class="act-head" type="button" aria-expanded=${open} onClick=${() => setOpenRuns((m) => ({ ...m, [g.id]: !open }))}>
+        <span class="act-dot tone-${tone}" aria-hidden="true">
+          ${tone === 'live'
+            ? html`<span class="next-bar-spin"></span>`
+            : html`<svg viewBox="0 0 16 16">${tone === 'bad' ? html`<path d="m4.5 4.5 7 7M11.5 4.5l-7 7" />` : tone === 'good' ? html`<path d="m3.5 8.5 3 3 6-7" />` : html`<circle cx="8" cy="8" r="2" />`}</svg>`}
+        </span>
+        <span class="act-head-text"><b>${title}</b><span class="muted">${bits.join(' · ')}</span></span>
+        <svg class="ss-ic act-chev ${open ? 'open' : ''}" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
+      </button>
+    `;
+  }
+
   return html`
-    <div class="activity-box" ref=${boxRef} onScroll=${onScroll}>
-      ${
-        hidden > 0 || older.length
-          ? html`
-              <div class="activity-notice">
-                <span>
-                  ${`Showing ${displayed.length.toLocaleString()} of ${total.toLocaleString()} events${hidden > 0 ? ` · ${hidden.toLocaleString()} not loaded` : ''}`}
-                </span>
-                ${canPageBack ? html`<button class="link-btn" onClick=${loadOlder}>Load ${MAX_EVENTS} older</button>` : null}
-                ${olderBusy ? html`<span class="spinner"></span>` : null}
-              </div>
-            `
-          : null
-      }
-      <${EventStream} events=${displayed} />
-      <div ref=${endRef}></div>
-      ${
-        !autoScroll
-          ? html`
-              <button
-                class="btn secondary jump-btn"
-                onClick=${() => {
-                  setAutoScroll(true);
-                  if (endRef.current) endRef.current.scrollIntoView({ block: 'end' });
-                }}
-              >
-                New events ↓
-              </button>
-            `
-          : null
-      }
+    <div class="act">
+      <div class="act-bar">
+        <span class="seg act-seg" role="radiogroup" aria-label="Show">
+          ${ACTIVITY_FILTERS.map(
+            (f) => html`<button
+              type="button"
+              role="radio"
+              key=${f.value}
+              aria-checked=${filter === f.value ? 'true' : 'false'}
+              class="seg-btn ${filter === f.value ? 'active' : ''}"
+              onClick=${() => setFilter(f.value)}
+            >
+              ${f.label}${f.value === 'problems' && problems ? html`${' '}<span class="act-count">${problems}</span>` : null}
+            </button>`
+          )}
+        </span>
+        <input class="input act-search" type="search" placeholder="Filter events" aria-label="Filter events" value=${query} onInput=${(e) => setQuery(e.target.value)} />
+        ${shown.length ? html`<button class="link-btn" type="button" onClick=${() => setAll(!allOpen)}>${allOpen ? 'Collapse all' : 'Expand all'}</button>` : null}
+      </div>
+      ${hidden > 0 || older.length
+        ? html`<div class="act-notice">
+            <span>${`Showing ${displayed.length.toLocaleString()} of ${total.toLocaleString()} events${hidden > 0 ? ` · ${hidden.toLocaleString()} not loaded` : ''}`}</span>
+            ${canPageBack ? html`<button class="link-btn" type="button" onClick=${loadOlder}>Load ${MAX_EVENTS} older</button>` : null}
+            ${olderBusy ? html`<span class="spinner"></span>` : null}
+          </div>`
+        : null}
+      <div class="act-box" ref=${boxRef} onScroll=${onScroll}>
+        ${!described.length
+          ? html`<p class="muted act-empty">No events yet.</p>`
+          : !shown.length
+            ? html`<p class="muted act-empty">${filter === 'problems' && !q ? 'No problems — nothing failed or warned.' : 'Nothing matches.'}</p>`
+            : shown.map((g) => {
+                const open = isOpen(g);
+                const r = byId.get(g.id);
+                return html`<section class="act-group ${r?.status === 'failed' ? 'bad' : ''}" key=${g.id}>
+                  ${head(g, open)}
+                  ${open
+                    ? html`<ol class="act-rows">${rowsOf(g.rows)}</ol>
+                        ${r ? html`<a class="act-run-link" href=${`#/runs/${r.id}`}>See the run</a>` : null}`
+                    : null}
+                </section>`;
+              })}
+      </div>
+      ${!autoScroll
+        ? html`<button
+            class="btn secondary jump-btn"
+            type="button"
+            onClick=${() => {
+              setAutoScroll(true);
+              toBottom();
+            }}
+          >
+            New events ↓
+          </button>`
+        : null}
     </div>
   `;
+}
+
+function clockOf(iso) {
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? '' : at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
