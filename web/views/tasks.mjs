@@ -40,22 +40,6 @@ export function Tasks({ navigate }) {
     }
   }, [showForm]);
 
-  // Escape with focus outside the form: a click on "+ New task" leaves the focus on
-  // that button, and the form's own onKeyDown never sees a key pressed there - the
-  // event does not pass through the form on its way to the window. A person who has
-  // just opened the form and presses Escape means "close it", wherever the focus is.
-  useEffect(() => {
-    if (!showForm) return undefined;
-    function onKeyDown(e) {
-      // The task picker handles its own Escape - it closes the listbox and says so
-      // by defaulting the event - and that must not close the form as well.
-      if (e.defaultPrevented || e.key !== 'Escape') return;
-      setShowForm(false);
-    }
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [showForm]);
-
   async function load() {
     try {
       const [t, p] = await Promise.all([api.tasks(), api.projects()]);
