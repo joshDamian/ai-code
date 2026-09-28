@@ -306,7 +306,7 @@ The mock provider is retained for automated tests only and is never eligible for
 
 ### Current published pricing metadata
 
-Anthropic: Claude Sonnet 5 is $2/MTok input and $10/MTok output; Claude Opus 4.8 is $5/MTok input and $25/MTok output. These are API list-price equivalents; Claude Code subscription usage is not represented as a direct per-token bill.
+Anthropic: Claude Opus 5.5 is $4/MTok input and $20/MTok output. Claude Opus 5 and Claude Opus 4.8 are $5/MTok input and $25/MTok output. Claude Sonnet 5 is $2/MTok input and $10/MTok output, and Claude Sonnet 4.6 is $3/MTok input and $15/MTok output. Claude Haiku 4.5 is $1/MTok input and $5/MTok output, and Claude Fable 5.1 is $10/MTok input and $50/MTok output. These are API list-price equivalents; Claude Code subscription usage is not represented as a direct per-token bill.
 
 DeepSeek: `deepseek-flash` is DeepSeek-V4.1-Flash. Current official pricing uses peak/off-peak rates and cache-hit pricing; AI Code stores the rate-card metadata and computes recorded API cost using observed usage and the run timestamp.
 

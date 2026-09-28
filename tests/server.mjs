@@ -536,6 +536,44 @@ test('provider sync re-seeds the openrouter catalog and add-openrouter refuses a
   assert.match(unknown.err,/openrouter/);
 });
 
+// The Anthropic catalog, which is the one list a person cannot refresh by re-running
+// the `add-*` that wrote it. So the newest models and the fields routing reads are
+// pinned here: the prices and the context window come from the official model table,
+// and the three older rows carry the 1M window the 85% context gate checks.
+test('provider add-claude seeds the anthropic catalog and refuses a re-run',async()=>{
+  const root=gitRepo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  s.initProject('p',root);
+  const run=(args)=>new Promise((res)=>{const p=spawn(process.execPath,[cliPath,...args],{cwd:root,env:{...process.env,AI_CODE_ROOT:root},stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});
+
+  const first=await run(['provider','add-claude']);
+  assert.equal(first.code,0);
+  const {models}=JSON.parse((await run(['provider','list'])).out);
+  const at=(id)=>{const m=models.find(x=>x.id===id);assert.ok(m,`${id} is in the catalog`);return m};
+
+  const opus=at('anthropic:claude-opus-5-5');
+  assert.equal(opus.input_cost_per_mtok,4);
+  assert.equal(opus.output_cost_per_mtok,20);
+  assert.equal(opus.reasoning,'frontier');
+  assert.equal(opus.context_length,1000000);
+  assert.equal(opus.enabled,true,'a new row lands routable');
+  assert.ok(opus.capabilities.includes('planning'));
+
+  const fable=at('anthropic:claude-fable-5-1');
+  assert.equal(fable.input_cost_per_mtok,10);
+  assert.equal(fable.output_cost_per_mtok,50);
+  assert.equal(fable.reasoning,'frontier');
+  assert.equal(fable.context_length,1000000);
+  assert.ok(fable.capabilities.includes('planning'));
+
+  for(const id of ['anthropic:claude-opus-5','anthropic:claude-opus-4-8','anthropic:claude-sonnet-4-6'])assert.equal(at(id).context_length,1000000,`${id} carries the window the official table states`);
+
+  const dup=await run(['provider','add-claude']);
+  assert.equal(dup.code,1);
+  assert.match(dup.err,/already exists/);
+  assert.match(dup.err,/provider sync anthropic-claude-code/);
+});
+
 test('POST /api/chat/sessions creates a new chat',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-'));git(root,['init','-q']);fs.writeFileSync(path.join(root,'README.md'),'x');git(root,['add','.']);git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);const s=new Service(root,{allowMock:true,silent:true});const p=s.initProject('p',root);const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{const r=await post(`${srv.base}/api/chat/sessions`,{projectId:p.id});assert.equal(r.status,201);const body=JSON.parse(r.body);assert.ok(body.id);assert.equal(body.project_id,p.id);assert.equal(body.title,'New chat')}finally{srv.stop()}});
 
 test('POST /api/chat/sessions/:id/messages queues a job and returns 202',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-msg-'));git(root,['init','-q']);fs.writeFileSync(path.join(root,'README.md'),'x');git(root,['add','.']);git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);const s=new Service(root,{allowMock:true,silent:true});const p=s.initProject('p',root);s.updateProvider('mock',{enabled:false});s.addProvider({id:'chat-provider',name:'Chat',kind:'mock',enabled:true,config:{routable:true,chatText:'Answer to the question.'}});s.addModel({id:'chat-m',providerId:'chat-provider',name:'chat',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{const createResp=await post(`${srv.base}/api/chat/sessions`,{projectId:p.id});const session=JSON.parse(createResp.body);const msgResp=await post(`${srv.base}/api/chat/sessions/${session.id}/messages`,{message:'What is in this repo?'});assert.equal(msgResp.status,202);const body=JSON.parse(msgResp.body);assert.ok(body.message);assert.equal(body.message.role,'user');assert.equal(body.message.content,'What is in this repo?');assert.ok(body.job);assert.equal(body.job.kind,'chat')}finally{srv.stop()}});
