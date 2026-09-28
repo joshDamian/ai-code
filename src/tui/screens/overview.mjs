@@ -5,7 +5,7 @@ import { StatusBadge, EnabledBadge, HealthBadge } from '../components/status.mjs
 
 const e = React.createElement;
 
-const ACTIVE_STATES = ['CREATED', 'CONTEXT_READY', 'PLANNING', 'AWAITING_APPROVAL', 'APPROVED', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING'];
+const ACTIVE_STATES = ['CREATED', 'CONTEXT_READY', 'PLANNING', 'AWAITING_APPROVAL', 'APPROVED', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING', 'AWAITING_DECISION'];
 
 function MetricBox({ label, value, color }) {
   return e(

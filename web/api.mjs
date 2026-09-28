@@ -144,6 +144,11 @@ export const api = {
   // Re-opens a COMPLETE task with a human's instruction. The call is blocking: the
   // repair, its tests and the verification review all run before it answers.
   taskFeedback: (id, text) => request(`/api/tasks/${id}/feedback`, { method: 'POST', body: { text } }),
+  // The decision gate. `discuss` answers a comment and leaves the task where it is;
+  // `resolve` is the instruction that starts the repair, and it blocks for the whole
+  // of that cycle the way feedback does.
+  taskDiscuss: (id, text) => request(`/api/tasks/${id}/discuss`, { method: 'POST', body: { text } }),
+  taskResolve: (id, { option = null, text = '' } = {}) => request(`/api/tasks/${id}/resolve`, { method: 'POST', body: { option, text } }),
   taskCancel: (id) => request(`/api/tasks/${id}/cancel`, { method: 'POST' }),
   taskClose: (id) => request(`/api/tasks/${id}/close`, { method: 'POST' }),
   // `to` is a query parameter because this is a read: which branch the port would

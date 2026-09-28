@@ -9,7 +9,7 @@ import {
   currentBranch, revParse, isAncestor, mergeBase, findCommit, branches, checkedOut, mergeTree, commitTree, setBranch, commitAll, removeWorktree, commitDiff,
   landingCommit, commitRef,
 } from './git.mjs';
-import { runAgent, classify, permissionMcpConfig, removeMcpConfig } from './agents.mjs';
+import { runAgent, classify, permissionMcpConfig, removeMcpConfig, DISCUSSION_OPENS } from './agents.mjs';
 import { loadPolicies, savePolicies } from './policy.mjs';
 import { isTransient, healthThresholds, effectiveHealth } from './health.mjs';
 import { unifiedDiff } from './format.mjs';
@@ -25,8 +25,18 @@ export const transitions = {
   APPROVED: ['IMPLEMENTING', 'CANCELLED'],
   IMPLEMENTING: ['TESTING', 'FAILED', 'APPROVED', 'CANCELLED'],
   TESTING: ['REVIEWING', 'REPAIRING', 'FAILED', 'CANCELLED'],
-  REVIEWING: ['COMPLETE', 'REPAIRING', 'FAILED', 'CANCELLED'],
+  REVIEWING: ['COMPLETE', 'REPAIRING', 'AWAITING_DECISION', 'FAILED', 'CANCELLED'],
   REPAIRING: ['TESTING', 'FAILED', 'REVIEWING', 'CANCELLED'],
+  // The gate between a review and a repair. A review whose findings cannot be
+  // closed without a choice the plan does not settle lands here instead of in
+  // REPAIRING, and the person makes that choice - after as much discussion with the
+  // reviewer as they need.
+  //
+  // COMPLETE is deliberately not an exit, and neither is AWAITING_APPROVAL. A
+  // decision is a question about work that has already failed a review, so the only
+  // things it can become are a repair (the answer, with the instruction in
+  // `feedback`) or a cancel. Work still cannot land without a passing review.
+  AWAITING_DECISION: ['REPAIRING', 'CANCELLED'],
   // Not terminal, and deliberately so. A review that passed means the agent's work
   // survived its own loop, which is not the same as the work being what the person
   // wanted; the port is human-triggered, so the moment between the two is where a
@@ -138,6 +148,39 @@ export function touches(seen, file) {
 function planBase(task) {
   try {
     return task.plan_base ? JSON.parse(task.plan_base) : null;
+  } catch {
+    return null;
+  }
+}
+
+// The decision a review left open, as the reviewer returned it, or null when what
+// came back is not one a person could answer. `--json-schema` asks for the shape,
+// and this checks it: a provider that ignores the flag can otherwise stop the whole
+// pipeline on an empty question, with nothing on the screen to answer.
+//
+// Two options are the floor rather than one, because a choice between one thing and
+// nothing is not a decision - the reviewer that has one fix to offer has a FAIL, and
+// the caller downgrades to exactly that. Options without a label are dropped rather
+// than kept as blanks: the label is what a person picks, and the detail is the
+// sentence under it.
+function decisionOf(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const question = typeof raw.question === 'string' ? raw.question.trim() : '';
+  const options = (Array.isArray(raw.options) ? raw.options : [])
+    .filter((o) => o && typeof o.label === 'string' && o.label.trim())
+    .map((o) => ({ label: o.label.trim(), detail: typeof o.detail === 'string' ? o.detail.trim() : '' }));
+  if (!question || options.length < 2) return null;
+  return { question, options, recommendation: typeof raw.recommendation === 'string' ? raw.recommendation.trim() : '' };
+}
+
+// The same thing read back off the task row, where it is stored as JSON with the
+// discussion thread beside it. The column follows planBase's rule: a decision that
+// cannot be parsed is a decision that is not there, and a task in
+// AWAITING_DECISION is still discussable and resolvable by text without one.
+function storedDecision(task) {
+  try {
+    const d = task.decision ? JSON.parse(task.decision) : null;
+    return d && typeof d === 'object' ? d : null;
   } catch {
     return null;
   }
@@ -431,8 +474,13 @@ export function repairLimitError(prior) {
 // the same plan-file instruction and needs the same answer. Named and exported
 // rather than left inline for the reason PLANNER_PROMPT is: the clause is worth
 // having a test pin, and a prompt buried in a call site is not inspectable.
+// `verdict`: the approved plan does not settle every question a review can raise.
+// A finding whose fix depends on one of those questions is not a FAIL - a repair
+// agent handed it would pick an answer nobody approved - and it is not a PASS. The
+// clause below names that third answer and the field it travels in, so a reviewer
+// that reaches a fork stops the task instead of choosing at it.
 export const reviewerPrompt = (diff) =>
-  `Review this implementation independently. Return a clear verdict: PASS or FAIL. If FAIL, list concrete findings mapped to the approved plan and test evidence. Do not modify files. No tool that writes a file exists in this session, and the verdict is not read from your reply: it is the \`verdict\` field of your structured output, with the review itself in \`review\`.\n\nDIFF:\n${diff}`;
+  `Review this implementation independently. Return a clear verdict: PASS, FAIL or DECIDE. If FAIL, list concrete findings mapped to the approved plan and test evidence. Answer DECIDE instead of FAIL only when closing a finding needs a choice the approved plan does not settle, and the options change behaviour a user would notice. Put the question, the options and your recommendation in \`decision\`. A finding with one reasonable fix is FAIL. Do not modify files. No tool that writes a file exists in this session, and the verdict is not read from your reply: it is the \`verdict\` field of your structured output, with the review itself in \`review\`.\n\nDIFF:\n${diff}`;
 
 // The reviewer's second job, which is smaller than its first. After a repair the
 // question is not whether the implementation is right - a review already answered
@@ -453,7 +501,27 @@ export const reviewerPrompt = (diff) =>
 // the same schema, the same verdict field. This is a prompt, not a second role - a
 // repair that judged its own fix would be the one thing the loop exists to prevent.
 export const verificationPrompt = ({ findings, changed, test, diff }) =>
-  `Verify a repair, not the implementation. A review found what is listed under FINDINGS and another agent changed the worktree to answer it. Say whether each finding is answered, and whether the repair broke something the review did not know about; do not re-review what the findings do not touch. Do not modify files. No tool that writes a file exists in this session, and the verdict is not read from your reply: it is the \`verdict\` field of your structured output, with the verification itself in \`review\`. PASS only if every finding is answered, FAIL if any is still open or the repair introduced a fault.\n\nFINDINGS:\n${findings}\n\nCHANGED SINCE THE FINDINGS WERE WRITTEN (${changed.length} file${changed.length === 1 ? '' : 's'}):\n${changed.join('\n')}\n\nTEST RESULT:\n${test || 'No test command is configured for this project.'}\n\nDIFF OF THOSE FILES (the rest of the worktree is unchanged since the review; an untracked file carries no diff at all, so read one whose change is not shown above rather than assuming it did not change):\n${diff}`;
+  `Verify a repair, not the implementation. A review found what is listed under FINDINGS and another agent changed the worktree to answer it. Say whether each finding is answered, and whether the repair broke something the review did not know about; do not re-review what the findings do not touch. Do not modify files. No tool that writes a file exists in this session, and the verdict is not read from your reply: it is the \`verdict\` field of your structured output, with the verification itself in \`review\`. PASS only if every finding is answered, FAIL if any is still open or the repair introduced a fault. Answer DECIDE instead of FAIL only when closing a finding needs a choice the approved plan does not settle, and the options change behaviour a user would notice. Put the question, the options and your recommendation in \`decision\`. A finding with one reasonable fix is FAIL.\n\nFINDINGS:\n${findings}\n\nCHANGED SINCE THE FINDINGS WERE WRITTEN (${changed.length} file${changed.length === 1 ? '' : 's'}):\n${changed.join('\n')}\n\nTEST RESULT:\n${test || 'No test command is configured for this project.'}\n\nDIFF OF THOSE FILES (the rest of the worktree is unchanged since the review; an untracked file carries no diff at all, so read one whose change is not shown above rather than assuming it did not change):\n${diff}`;
+
+// The third thing a reviewer is asked, and the only one that does not decide
+// anything. The task is in AWAITING_DECISION, the person has written a comment, and
+// this run answers it: a discussion is the loop between the two, and it is
+// deliberately unbounded by the repair budget because it spends no repair - a
+// question about a choice is not a turn taken on the code.
+//
+// It opens with DISCUSSION_OPENS because that line is what tells this run apart from
+// the two verdicts the same role answers (see the mock in src/agents.mjs).
+//
+// The diff goes in because the question is about code the person may not have read,
+// and the review goes in because it is what they are deciding about. Neither the
+// findings nor the thread is assumed present: a decision stored before this existed
+// has an empty thread, and the first comment of a discussion is the common case.
+//
+// The last sentence is the one that matters most. A reviewer asked a question is
+// free to answer it and then start repairing, and the whole point of the state is
+// that the stop happens before any edit.
+export const discussionPrompt = ({ review, decision, thread, diff }) =>
+  `${DISCUSSION_OPENS} A review left a finding that cannot be closed without a choice the approved plan does not settle, and the person who has to make that choice has written below. Answer their latest comment and nothing else: say what each option would do to the work and what it costs, and say which one you would take and why. Ground every claim in the diff or in the review. Do not modify files. No tool that writes a file exists in this session. Your answer is the \`review\` field of your structured output. Answer DECIDE again, with the revised question, options and recommendation in \`decision\`, only if their comment changes the options - then they are choosing between the new ones. Answer PASS if their comment settles the question, and they approve the repair that follows. Nothing you say here moves the task, and no repair starts until the person approves one.\n\nREVIEW:\n${review}\n\nOPEN QUESTION:\n${decision.question}\n\nOPTIONS:\n${(decision.options || []).map((o, i) => `${i + 1}. ${o.label}${o.detail ? ` - ${o.detail}` : ''}`).join('\n') || 'None recorded.'}\n\nDISCUSSION SO FAR, oldest first:\n${(thread || []).map((m) => `${m.from === 'user' ? 'PERSON' : 'REVIEWER'}${m.verdict ? ` (${m.verdict})` : ''}: ${m.text}`).join('\n\n') || 'Nothing yet.'}\n\nDIFF:\n${diff}`;
 
 export const PLANNER_PROMPT =
   'Produce ONLY a concrete implementation plan. Do not modify source files, create files, run mutating commands, commit, or execute implementation. No tool that writes a file exists in this session - not to the repository, not to a scratch directory, not to a plans folder - and searching for one wastes a turn. The plan is the text of your reply. Identify exact files, intended changes, tests, and verification commands. The harness will reject source changes. If the task is already fully implemented in the current codebase, say so instead of planning work: name the files that already satisfy each requirement and say why no further changes are needed. Do not invent work that does not exist.';
@@ -1694,17 +1762,29 @@ export class Service {
   // produced none. `--json-schema` puts it on the result frame, so nothing here
   // inspects the reply for a word.
   //
-  // The verdict is normalised and checked against the two values the schema
-  // allows. The schema is what keeps it honest, but a provider that ignores the
-  // flag would otherwise be able to answer with anything at all, and the caller
-  // is deciding a task's outcome from this one field.
+  // The verdict is normalised and checked against the values the schema allows. The
+  // schema is what keeps it honest, but a provider that ignores the flag would
+  // otherwise be able to answer with anything at all, and the caller is deciding a
+  // task's outcome from this one field.
+  //
+  // DECIDE is the third value, and it is only ever returned with a decision that can
+  // be answered: one without a question, or with fewer than two options, is
+  // downgraded to FAIL. A malformed question is a reviewer that failed to describe a
+  // choice, and FAIL is the answer that keeps the workflow moving - REPAIRING sends
+  // an agent to fix what the review did say, where AWAITING_DECISION would stop the
+  // task in front of a person with nothing to read.
   structuredOutput(runId) {
     const ended = this.store.listEvents(runId).filter((e) => e.type === 'result').pop();
     const out = ended?.data?.structured_output;
     if (!out || typeof out !== 'object') return null;
-    const verdict = String(out.verdict || '').toUpperCase();
-    if (verdict !== 'PASS' && verdict !== 'FAIL') return null;
-    return { verdict, review: typeof out.review === 'string' ? out.review.trim() : '' };
+    const decision = decisionOf(out.decision);
+    const verdict = String(out.verdict || '').toUpperCase() === 'DECIDE' && !decision ? 'FAIL' : String(out.verdict || '').toUpperCase();
+    if (verdict !== 'PASS' && verdict !== 'FAIL' && verdict !== 'DECIDE') return null;
+    return {
+      verdict,
+      review: typeof out.review === 'string' ? out.review.trim() : '',
+      decision: verdict === 'DECIDE' ? decision : null,
+    };
   }
 
   // The plan a finished planner run left behind. plan() and the startup recovery
@@ -2853,6 +2933,16 @@ export class Service {
       // would put the JSON envelope in the review column, which is worse than
       // saying the reviewer sent no text.
       const text = out.review;
+      if (out.verdict === 'DECIDE') {
+        // The review is written, then the question beside it, then the state. The
+        // decision carries an empty thread: nobody has said anything about it yet,
+        // and the discussion is what fills it.
+        this.store.updateTask(id, {
+          review: text || 'DECIDE, with no findings text returned.',
+          decision: JSON.stringify({ ...out.decision, thread: [] }),
+        });
+        return this.transition(id, 'AWAITING_DECISION');
+      }
       if (out.verdict === 'FAIL') {
         this.store.updateTask(id, { review: text || 'FAIL, with no findings text returned.' });
         return this.transition(id, 'REPAIRING');
@@ -2872,6 +2962,125 @@ export class Service {
       this.store.updateTask(id, { review: String(e) });
       return this.transition(id, 'REPAIRING');
     }
+  }
+
+  // -- the decision gate ----------------------------------------------------
+
+  // A comment from the person who has to make the choice, answered by the reviewer
+  // that asked for it. Nothing moves: the state stays AWAITING_DECISION, no repair
+  // is spent and no budget is touched, so the exchange can run as long as it takes
+  // to settle what the repair should do.
+  //
+  // The comment is written to the thread before the run rather than after it. It is
+  // the person's, and a reviewer that crashes must not take the question with it -
+  // the thread is the only place it is recorded.
+  //
+  // The reviewer's answer is appended with its verdict. DECIDE means it revised the
+  // options, and the revised ones replace the old: a person reading two sets of
+  // options cannot tell which the repair would act on. PASS means the question is
+  // settled, and the person's approval is what starts the repair; the verdict alone
+  // starts nothing, which is the difference between this and review().
+  async discussReview(id, text) {
+    const t = this.task(id);
+    if (t.state !== 'AWAITING_DECISION') throw new Error('Task must be in AWAITING_DECISION to discuss the review');
+    // The same guard every other verb here has, and it matters here as much as for
+    // feedback: a run in flight is a worktree somebody is reading, and a question
+    // answered by two reviewers at once is two threads on one column.
+    this.#assertIdle(id, 'discussing this review');
+    const note = String(text || '').trim();
+    if (!note) throw new Error('A comment is required to discuss a review');
+    const open = storedDecision(t) || { question: '', options: [], recommendation: '', thread: [] };
+    const thread = [...(open.thread || []), { from: 'user', text: note, at: new Date().toISOString() }];
+    this.store.updateTask(id, { decision: JSON.stringify({ ...open, thread }) });
+    const d = worktreeDiff(t.worktree, t);
+    let r;
+    try {
+      r = await this.runRole(t, 'reviewer', discussionPrompt({ review: t.review || '', decision: open, thread, diff: d }), t.worktree);
+    } catch (e) {
+      // A cancelled discussion is the person's own call and leaves the task exactly
+      // where it was, with their comment on it and no answer under it. Nothing is
+      // written back, for the reason review() writes nothing on a cancel: the run
+      // did not finish saying anything.
+      if (e.code === 'CANCELLED') throw e;
+      // A reviewer that crashed is recorded in the thread and does not answer the
+      // question. The state stays AWAITING_DECISION, where one more comment is the
+      // whole recovery - the same reading review() gives a run that said nothing.
+      this.#appendThread(id, open, thread, { from: 'reviewer', text: String(e), verdict: null, error: true });
+      throw e;
+    }
+    const out = this.structuredOutput(r.runId);
+    if (!out) {
+      this.#appendThread(id, open, thread, {
+        from: 'reviewer',
+        text: this.finalText(r.runId) || 'The reviewer returned no verdict.',
+        verdict: null,
+        error: true,
+      });
+      throw Object.assign(new Error('Reviewer returned no structured verdict'), { code: 'NO_VERDICT' });
+    }
+    const entry = { from: 'reviewer', text: out.review, verdict: out.verdict, runId: r.runId, at: new Date().toISOString() };
+    const revised = out.verdict === 'DECIDE' ? out.decision : open;
+    this.store.updateTask(id, { decision: JSON.stringify({ ...revised, thread: [...thread, entry] }) });
+    return this.task(id);
+  }
+
+  // The person's answer, and the only thing that starts the repair a DECIDE stopped.
+  //
+  // The instruction is composed here rather than left to the UI, because the repair
+  // reads one text off the row and the verification after it checks the same text:
+  // the question it answers and the option it picked have to be in that text or the
+  // reviewer has no way to know what it was asked to do. It goes in `feedback`, the
+  // column a human's instruction on a completed task already uses, so repair() needs
+  // no change and neither does anything that reads a repair's findings.
+  //
+  // One repair is spent per resolve, which is what bounds the loop: the verification
+  // that follows can answer DECIDE again, and each answer costs a turn from the same
+  // `maxRepairs` pool until the ceiling lands the task in FAILED.
+  async resolveReview(id, { option = null, text = '' } = {}) {
+    const t = this.task(id);
+    if (t.state !== 'AWAITING_DECISION') throw new Error('Task must be in AWAITING_DECISION to resolve the review');
+    this.#assertIdle(id, 'resolving this review');
+    const open = storedDecision(t) || { question: '', options: [], recommendation: '', thread: [] };
+    const note = String(text || '').trim();
+    let chosen = null;
+    if (option !== null && option !== undefined && option !== '') {
+      const i = Number(option);
+      if (!Number.isInteger(i) || i < 0 || i >= (open.options || []).length) {
+        throw new Error(`No option ${option} on this review; it has ${(open.options || []).length} option(s), numbered from 0`);
+      }
+      chosen = open.options[i];
+    }
+    if (!chosen && !note) throw new Error('Choose an option or write an instruction');
+    const instruction = [
+      open.question ? `Decision: ${open.question}` : null,
+      chosen ? `Chosen: ${chosen.label}${chosen.detail ? ` - ${chosen.detail}` : ''}` : null,
+      note || null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    this.store.updateTask(id, { feedback: instruction });
+    try {
+      this.transition(id, 'REPAIRING');
+      return await this.repair(id);
+    } finally {
+      // The note is spent either way, exactly as feedback()'s is: its whole life is
+      // the repair it was written for, and what the task keeps is the review that
+      // cycle ended on.
+      //
+      // The decision is cleared too, unless the verification came back with a new
+      // one - that is a live question rather than the one this call consumed, and
+      // clearing it would leave the task in AWAITING_DECISION with nothing to read.
+      const after = this.task(id);
+      this.store.updateTask(id, { feedback: null, ...(after.state === 'AWAITING_DECISION' ? {} : { decision: null }) });
+    }
+  }
+
+  // One reviewer turn appended to a thread that is already stored. Used by the two
+  // paths that record an answer which is not an answer - a run that crashed and a
+  // run that returned no verdict - so both leave the person's comment where it was
+  // and put something under it.
+  #appendThread(id, open, thread, entry) {
+    this.store.updateTask(id, { decision: JSON.stringify({ ...open, thread: [...thread, entry] }) });
   }
 
   // The repair budget for the current policy, as a number or Infinity. Read per

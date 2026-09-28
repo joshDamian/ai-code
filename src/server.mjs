@@ -142,7 +142,7 @@ const body = (req) =>
     });
   });
 
-const routeTask = /^\/api\/tasks\/([^/]+)\/(plan|approve|execute|implement|test|review|repair|reject|replan|retry|refine|diff|port|cancel|close|show|activity|link|feedback|decisions)$/;
+const routeTask = /^\/api\/tasks\/([^/]+)\/(plan|approve|execute|implement|test|review|repair|reject|replan|retry|refine|diff|port|cancel|close|show|activity|link|feedback|discuss|resolve|decisions)$/;
 // The one route that always queues rather than blocks. Matched before routeTask,
 // whose pattern has no room for the extra path segment.
 const routeBackground = /^\/api\/tasks\/([^/]+)\/execute\/background$/;
@@ -471,6 +471,19 @@ const ROLE_LABEL = {
 // ids a push needs to open the right screen - a notification that cannot be tapped
 // through to the thing it is about is a notification the user has to go hunting after.
 function runEndPayload(run, task) {
+  // A reviewer that stopped on a question did not fail and did not pass it: the task
+  // is waiting for a person, and a notification that says "reviewer failed" sends
+  // them looking for a fault rather than for the choice they have to make. Read from
+  // the task rather than from the verdict, because the state is what the workflow
+  // acted on and a verification that answered DECIDE lands here the same way.
+  if (task?.state === 'AWAITING_DECISION') {
+    return {
+      title: 'Decision needed',
+      body: `${task.title || 'A task'} — the review needs your choice before it can be repaired.`,
+      runId: run.id,
+      taskId: task.id,
+    };
+  }
   const succeeded = run.status === 'succeeded';
   const role = ROLE_LABEL[run.role] || run.role || 'Run';
   return {
@@ -910,6 +923,28 @@ const server = http.createServer(async (req, res) => {
         // better answer to an empty box than a run that fails after the transition.
         if (!text) return json(res, { error: 'text is required' }, 400);
         return json(res, await svc.feedback(id, text));
+      }
+      // The two halves of the decision gate. `discuss` answers a comment and leaves
+      // the task where it is, so it is blocking in the small sense: one reviewer run
+      // is what the caller is waiting for. `resolve` is blocking in feedback's sense -
+      // the repair, its tests and the verification review all run before it answers.
+      if (op === 'discuss') {
+        const b = await body(req);
+        const text = String(b.text || '').trim();
+        if (!text) return json(res, { error: 'text is required' }, 400);
+        return json(res, await svc.discussReview(id, text));
+      }
+      if (op === 'resolve') {
+        const b = await body(req);
+        const text = String(b.text || '').trim();
+        // An absent option is a resolve by instruction alone, which is allowed. A
+        // malformed one is refused here rather than read as NaN by the service, where
+        // the error would name an option number nobody wrote.
+        const raw = b.option;
+        const option = raw === undefined || raw === null || raw === '' ? null : Number(raw);
+        if (option !== null && !Number.isInteger(option)) return json(res, { error: 'option must be an integer index' }, 400);
+        if (option === null && !text) return json(res, { error: 'option or text is required' }, 400);
+        return json(res, await svc.resolveReview(id, { option, text }));
       }
       // Read-only, so its one option rides in the query string: the dashboard asks
       // this with a GET, unlike every other op here.

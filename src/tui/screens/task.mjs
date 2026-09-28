@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { StatusBadge } from '../components/status.mjs';
-import { describeEvent, formatDuration, formatTokens, formatCost } from '../../format.mjs';
+import { describeEvent, decisionView, formatDuration, formatTokens, formatCost } from '../../format.mjs';
 
 const e = React.createElement;
 
@@ -80,6 +80,12 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
   // edits a plan that has not been approved, the other re-opens work that has.
   const [sendingFeedback, setSendingFeedback] = useState(false);
   const [noteDraft, setNoteDraft] = useState('');
+  // The decision gate: the option picked so far, the comment prompt, and what is
+  // typed into it. The comment and the choice travel together - the repair is
+  // handed whichever of the two the person gave.
+  const [choosing, setChoosing] = useState(null);
+  const [discussing, setDiscussing] = useState(false);
+  const [commentDraft, setCommentDraft] = useState('');
   // Bumped to reopen the event stream. The server ends it when a task reaches
   // COMPLETE, and feedback is what takes a task back out of COMPLETE - so without
   // this the repair that follows would run with nothing watching it.
@@ -154,8 +160,8 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
   }, [taskId, streamGen]);
 
   useEffect(() => {
-    setTyping?.(refining || editing || pickingModel || linking || sendingFeedback);
-  }, [refining, editing, pickingModel, linking, sendingFeedback]);
+    setTyping?.(refining || editing || pickingModel || linking || sendingFeedback || discussing);
+  }, [refining, editing, pickingModel, linking, sendingFeedback, discussing]);
 
   // Ink refcounts raw mode across every active useInput, and the App-level
   // handler never deactivates, so the count only drops to zero if this screen
@@ -288,6 +294,28 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
     setStreamGen((n) => n + 1);
   };
 
+  // A comment runs the reviewer once more without moving the task, so the state
+  // and the repair budget both survive it. The draft outlives the send: the answer
+  // typed for the reviewer is often the instruction the approval carries, and the
+  // two are the same box.
+  const submitComment = async (value) => {
+    setDiscussing(false);
+    const text = value.trim();
+    if (!text) return;
+    await run('Comment', () => api.discuss(taskId, text));
+  };
+
+  // The approval is what leaves AWAITING_DECISION. Either half is enough on its
+  // own: an option with no comment, or an instruction with no option.
+  const approveRepair = async () => {
+    const text = commentDraft.trim();
+    if (choosing === null && !text) return onError?.('Choose an option or write an instruction first.');
+    await run('Approve repair', () => api.resolve(taskId, choosing, text));
+    setChoosing(null);
+    setCommentDraft('');
+    setStreamGen((n) => n + 1);
+  };
+
   // The models a planner could run on, read when the picker opens rather than at
   // mount: the registry changes when somebody edits it on another screen, and a
   // stale list is the one thing that would offer a model the server now refuses.
@@ -333,6 +361,9 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
       }
       if (task.state === 'APPROVED') binds.push(['e', 'execute']);
       if (tab === 'review' && task.state === 'REPAIRING') binds.push(['r', 'repair']);
+      // The digits are listed as the range the options are numbered in rather than
+      // as the count: the list is the reviewer's, and it changes between rounds.
+      if (tab === 'review' && task.state === 'AWAITING_DECISION') binds.push(['1-9', 'choose option'], ['c', 'comment'], ['a', 'approve repair']);
     }
     setFooter?.(binds);
   }, [tab, task?.state, activeRun?.id]);
@@ -350,9 +381,9 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
         if (key.escape) setPickingModel(false);
         return;
       }
-      // The two text prompts own the keyboard the same way the refine prompt does,
-      // and for the same reason: TextInput reads stdin itself, so this screen's keys
-      // - Esc included, which is otherwise "back" - must not also fire.
+      // The text prompts own the keyboard the same way the refine prompt does, and
+      // for the same reason: TextInput reads stdin itself, so this screen's keys -
+      // Esc included, which is otherwise "back" - must not also fire.
       if (linking) {
         if (key.escape) setLinking(false);
         return;
@@ -361,7 +392,26 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
         if (key.escape) setSendingFeedback(false);
         return;
       }
+      if (discussing) {
+        if (key.escape) setDiscussing(false);
+        return;
+      }
       if (key.escape || key.backspace) return onBack();
+      // The decision's options are numbered, so a digit here is an answer rather
+      // than the tab it names on every other screen - they collide on 1 to 4, and
+      // there is one state where that has to resolve in favour of the answer. A
+      // digit past the last option still switches tabs, and Esc then reopening the
+      // task lands on PLAN, so the other tabs stay reachable while the choice waits.
+      if (task && !busy && !activeRun && tab === 'review' && task.state === 'AWAITING_DECISION') {
+        const open = decisionView(task.decision);
+        const n = Number(input);
+        if (open && input.length === 1 && n >= 1 && n <= Math.min(open.options.length, 9)) return setChoosing(n - 1);
+        if (input === 'c') {
+          setDiscussing(true);
+          return;
+        }
+        if (input === 'a') return approveRepair();
+      }
       const tabMatch = TABS.find((t) => t.key === input);
       if (tabMatch) return setTab(tabMatch.id);
       if (!task || busy) return;
@@ -453,7 +503,8 @@ export function TaskDetailScreen({ api, taskId, isActive, onBack, setTyping, onE
     e(Box, { height: 1 }),
     tab === 'plan' && renderPlan(task, runs, refining, editing, feedback, setFeedback, submitFeedback),
     tab === 'execute' && renderExecute(task, runs, selected),
-    tab === 'review' && renderReview(task, sendingFeedback, noteDraft, setNoteDraft, submitNote),
+    tab === 'review' &&
+      renderReview(task, { sendingFeedback, noteDraft, setNoteDraft, submitNote, choosing, discussing, commentDraft, setCommentDraft, submitComment }),
     tab === 'activity' && renderActivity(events),
     // Under the tab body, like the model picker: linking is available from every
     // tab, so it cannot belong to any one of them. An empty id clears the link,
@@ -579,7 +630,14 @@ function renderExecute(task, runs, selected) {
   );
 }
 
-function renderReview(task, sendingFeedback, noteDraft, setNoteDraft, submitNote) {
+function renderReview(task, { sendingFeedback, noteDraft, setNoteDraft, submitNote, choosing, discussing, commentDraft, setCommentDraft, submitComment }) {
+  if (task.state === 'AWAITING_DECISION') {
+    const open = decisionView(task.decision);
+    // A DECIDE verdict whose question did not survive the trip is not a card: the
+    // findings below are all there is to read, and the keys that would answer it
+    // are not offered by the footer either.
+    if (open) return renderDecision(task, open, { choosing, discussing, commentDraft, setCommentDraft, submitComment });
+  }
   if (sendingFeedback) {
     return e(
       Box,
@@ -613,6 +671,69 @@ function renderReview(task, sendingFeedback, noteDraft, setNoteDraft, submitNote
     );
   }
   return e(Box, { flexDirection: 'column' }, ...body);
+}
+
+// The decision card: the open question, its options, the findings it came out of
+// and everything said about it so far. The options are numbered from one because
+// the keys that pick them are, and the picked one is marked where it sits rather
+// than moved to the top - a list that reorders under the selection is a list the
+// reader has to find their place in again after every keystroke.
+function renderDecision(task, open, { choosing, discussing, commentDraft, setCommentDraft, submitComment }) {
+  return e(
+    Box,
+    { flexDirection: 'column' },
+    e(Text, { color: 'yellow', bold: true }, 'Decision needed — the review needs your choice.'),
+    e(Box, { height: 1 }),
+    ...wrap(open.question).map((line, i) => e(Text, { key: i, bold: true }, line)),
+    ...open.options.map((o, i) =>
+      e(
+        Box,
+        { key: i, flexDirection: 'column' },
+        e(Text, { color: choosing === i ? 'blue' : undefined, bold: choosing === i }, `${choosing === i ? '›' : ' '} [${i + 1}] ${o.label}`),
+        ...(o.detail ? wrap(o.detail).map((line, j) => e(Text, { key: j, color: 'gray' }, `      ${line}`)) : []),
+      ),
+    ),
+    open.recommendation ? e(Box, { marginTop: 1 }, e(Text, { color: 'gray' }, `Recommendation: ${open.recommendation}`)) : null,
+    task.review
+      ? e(
+          Box,
+          { flexDirection: 'column', marginTop: 1 },
+          e(Text, { color: 'gray', bold: true }, 'Review'),
+          ...wrap(task.review).map((line, i) => e(Text, { key: i }, line)),
+        )
+      : null,
+    open.thread.length
+      ? e(
+          Box,
+          { flexDirection: 'column', marginTop: 1 },
+          e(Text, { color: 'gray', bold: true }, `Discussion (${open.thread.length})`),
+          ...open.thread.map((m, i) =>
+            e(
+              Box,
+              { key: i, flexDirection: 'column' },
+              e(Text, { color: m.from === 'reviewer' ? 'cyan' : 'magenta' }, `${m.from === 'reviewer' ? 'REVIEWER' : 'YOU'}${m.verdict ? ` — ${m.verdict}` : ''}`),
+              ...wrap(m.text).map((line, j) => e(Text, { key: j }, line)),
+            ),
+          ),
+        )
+      : null,
+    e(Box, { height: 1 }),
+    discussing
+      ? e(
+          Box,
+          { flexDirection: 'column', borderStyle: 'round', borderColor: 'blue', paddingX: 1 },
+          e(Text, { bold: true }, 'Comment — what should the reviewer settle?'),
+          e(TextInput, { value: commentDraft, onChange: setCommentDraft, onSubmit: submitComment }),
+          e(Text, { color: 'gray' }, 'Enter to send to the reviewer, Esc to cancel'),
+        )
+      : e(
+          Text,
+          { color: 'gray' },
+          choosing === null
+            ? 'Press a number to choose an option, c to comment, a to approve the repair.'
+            : `Option ${choosing + 1} chosen. Press c to comment, a to approve the repair.`,
+        ),
+  );
 }
 
 // Ink's colour names, by the kind `describeEvent` reports. The quiet kinds are the

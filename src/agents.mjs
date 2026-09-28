@@ -58,6 +58,12 @@ const sleep = (ms, signal) =>
 // at module-init time. A test asserts the prompt still opens with it.
 export const VERIFICATION_OPENS = 'Verify a repair, not the implementation.';
 
+// The line a discussion prompt opens with, and the only thing that tells a
+// discussion apart from the two reviews the mock also answers. Spelled here for
+// the reason VERIFICATION_OPENS is: the service imports this module, so a
+// constant read back the other way is a cycle at module-init time.
+export const DISCUSSION_OPENS = 'Answer the person deciding this review.';
+
 // A provider that never leaves the machine. Used by the test suite and by any
 // install that has not configured a real provider yet.
 export async function* runMock(input) {
@@ -199,18 +205,33 @@ export async function* runMock(input) {
     // wrong reason.
     // Matched anywhere, not at the start: the prompt this sees is the assembled one,
     // the role's own text sitting under TASK and INSTRUCTIONS rather than opening it.
-    const verifying = String(input.prompt || '').includes(VERIFICATION_OPENS);
-    const text = (verifying ? input.mockVerifyText : input.mockReviewText) || 'Review complete: compare implementation against the approved plan and test results.';
+    //
+    // The discussion is answered first, because its prompt carries the review the
+    // person is asking about: a discussion of a failed repair's review quotes that
+    // review in full, and testing for the verification's line first would read it as
+    // one.
+    const prompt = String(input.prompt || '');
+    const discussing = prompt.includes(DISCUSSION_OPENS);
+    const verifying = prompt.includes(VERIFICATION_OPENS);
+    const text = (discussing ? input.mockDiscussText : verifying ? input.mockVerifyText : input.mockReviewText) || 'Review complete: compare implementation against the approved plan and test results.';
     yield { type: 'message', data: text };
     // The verdict rides on a result frame, which is where --json-schema puts it
     // for a real provider. A test therefore drives the decision through the same
     // field a run does, and can hand the reviewer prose that contradicts it to
     // prove the prose is not what decides. `result` is deliberately left unset so
     // finalText still resolves to the prose rather than to this frame.
-    yield {
-      type: 'result',
-      data: { structured_output: { verdict: (verifying ? input.mockVerifyVerdict : input.mockReviewVerdict) || 'PASS', review: text } },
-    };
+    //
+    // A discussion's verdict is PASS by default, which says the options are
+    // unchanged rather than that the review passed: no discussion moves a task.
+    const verdict = (discussing ? input.mockDiscussVerdict : verifying ? input.mockVerifyVerdict : input.mockReviewVerdict) || 'PASS';
+    const decision = discussing ? input.mockDiscussDecision : verifying ? input.mockVerifyDecision : input.mockReviewDecision;
+    const structured = { verdict, review: text };
+    // Only on DECIDE, which is the only verdict the field has a meaning on. The
+    // decision is carried through as the provider returned it, malformed or not, so
+    // a test can hand the harness a question with one option and prove the
+    // downgrade to FAIL rather than a decision nothing can answer.
+    if (verdict === 'DECIDE' && decision) structured.decision = decision;
+    yield { type: 'result', data: { structured_output: structured } };
   } else {
     yield { type: 'message', data: `${input.role} completed.` };
   }
@@ -246,19 +267,49 @@ const READ_ONLY_NOTICE =
 // that task and it went to repair twice.
 //
 // The verdict is an enum, so a provider that ignores the schema cannot
-// introduce a third answer, and the review body is a field rather than the
+// introduce a fourth answer, and the review body is a field rather than the
 // reply, so it is stored exactly as written.
+//
+// DECIDE is the third answer, and it is not a softer FAIL. A FAIL names a fault a
+// repair can act on; a DECIDE names a fault whose fix depends on a choice the
+// approved plan does not settle, and the repair agent is the wrong party to make
+// that choice. The `decision` field carries what the person needs to answer, and
+// `structuredOutput` rejects a DECIDE that does not carry it.
 export const REVIEWER_SCHEMA = {
   type: 'object',
   properties: {
     verdict: {
       type: 'string',
-      enum: ['PASS', 'FAIL'],
-      description: 'PASS only if the implementation satisfies the approved plan and no finding is left open. FAIL if any finding remains.',
+      enum: ['PASS', 'FAIL', 'DECIDE'],
+      description:
+        'PASS only if the implementation satisfies the approved plan and no finding is left open. FAIL if any finding remains and one reasonable fix closes it. DECIDE if a finding cannot be closed without a choice the approved plan does not settle, and the options change behaviour a user would notice.',
     },
     review: {
       type: 'string',
       description: 'The full review for a human reader: findings mapped to the approved plan, each with the test evidence for it.',
+    },
+    decision: {
+      type: 'object',
+      description: 'Required when the verdict is DECIDE, and omitted otherwise. The question the person has to answer, the options they are choosing between, and which one you would take.',
+      properties: {
+        question: { type: 'string', description: 'The choice, as one question the person can answer.' },
+        options: {
+          type: 'array',
+          minItems: 2,
+          items: {
+            type: 'object',
+            properties: {
+              label: { type: 'string', description: 'The option in a few words.' },
+              detail: { type: 'string', description: 'What choosing it does, and what it costs.' },
+            },
+            required: ['label', 'detail'],
+            additionalProperties: false,
+          },
+        },
+        recommendation: { type: 'string', description: 'The option you would take, and why.' },
+      },
+      required: ['question', 'options', 'recommendation'],
+      additionalProperties: false,
     },
   },
   required: ['verdict', 'review'],
@@ -765,8 +816,15 @@ export async function* runAgent(provider, model, input) {
         mockUsage: provider.config.usage || null,
         mockReviewText: provider.config.reviewText || null,
         mockReviewVerdict: provider.config.reviewVerdict || null,
+        // The question a DECIDE verdict carries. Passed through unvalidated, so a
+        // test can hand the harness one that no person could answer.
+        mockReviewDecision: provider.config.reviewDecision || null,
         mockVerifyText: provider.config.verifyText || null,
         mockVerifyVerdict: provider.config.verifyVerdict || null,
+        mockVerifyDecision: provider.config.verifyDecision || null,
+        mockDiscussText: provider.config.discussText || null,
+        mockDiscussVerdict: provider.config.discussVerdict || null,
+        mockDiscussDecision: provider.config.discussDecision || null,
         mockPlanText: provider.config.planText || null,
         mockChatText: provider.config.chatText || null,
         mockFailure: provider.config.failRoles?.includes(input.role) ? 'SIMULATED_FAILURE' : null,

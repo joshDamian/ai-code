@@ -160,6 +160,10 @@ export function createApi(baseUrl) {
     // Re-opens a COMPLETE task with a human's instruction. Blocking: the repair, its
     // tests and the verification review all run before this answers.
     feedback: (id, text) => post(`/api/tasks/${id}/feedback`, { text }),
+    // The decision gate: a comment answered by the reviewer, and the instruction that
+    // approves the repair. The second blocks for the whole repair cycle.
+    discuss: (id, text) => post(`/api/tasks/${id}/discuss`, { text }),
+    resolve: (id, option, text) => post(`/api/tasks/${id}/resolve`, { option, text }),
     cancel: (id) => post(`/api/tasks/${id}/cancel`),
     close: (id) => post(`/api/tasks/${id}/close`),
     updatePlan: (id, plan) => patch(`/api/tasks/${id}/plan`, { plan }),

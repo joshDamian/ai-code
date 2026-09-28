@@ -15,6 +15,17 @@ AI Code is the workflow/control plane. Agent runtimes and model providers are re
 - Project context bootstrap is deterministic and does not require an LLM. `context init` is the whole of it. `context enrich` is opt-in, additive, and writes only the two generated documents.
 - Provider secrets are not stored in SQLite.
 
+## Workflow states
+`PLANNING -> AWAITING_APPROVAL -> APPROVED -> IMPLEMENTING -> TESTING -> REVIEWING -> COMPLETE`, with `REPAIRING` beside `REVIEWING` and `FAILED` reachable from either.
+
+Two states wait on a person, and the questions differ. `AWAITING_APPROVAL` holds a plan nobody has approved. `AWAITING_DECISION` holds a review that needs a choice.
+
+The reviewer returns PASS, FAIL or DECIDE. PASS completes the task. FAIL enters `REPAIRING`. DECIDE enters `AWAITING_DECISION` and stores the question, the options and the recommendation in `tasks.decision`. Every allowed move is listed in `transitions` in `src/service.mjs`, and a move that is not listed is refused.
+
+While a decision waits, `discussReview` runs the reviewer again with the question and everything said about it. The task stays in `AWAITING_DECISION` and the repair budget is not spent. `resolveReview` takes an option, an instruction or both, writes them to `tasks.feedback`, and enters `REPAIRING`. That is the repair chain a FAIL uses, so the choice reaches the implementer through the feedback the repair prompt already carries.
+
+A verification that answers DECIDE returns the task to `AWAITING_DECISION` with a fresh question. `REPAIRING` returns to `REVIEWING`, and the repair budget bounds the loop: a task that spends it lands in `FAILED`.
+
 ## Runtime layers
 CLI / HTTP UI -> Service -> Workflow + Context + Git + Agent Router -> Claude Code adapter -> provider environment -> Anthropic or DeepSeek.
 

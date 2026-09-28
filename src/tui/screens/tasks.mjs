@@ -8,8 +8,8 @@ const e = React.createElement;
 
 const FILTERS = [
   { key: '1', id: 'all', label: 'All', states: null },
-  { key: '2', id: 'active', label: 'Active', states: 'CREATED,CONTEXT_READY,PLANNING,APPROVED,IMPLEMENTING,TESTING,REVIEWING,REPAIRING' },
-  { key: '3', id: 'awaiting', label: 'Awaiting', states: 'AWAITING_APPROVAL' },
+  { key: '2', id: 'active', label: 'Active', states: 'CREATED,CONTEXT_READY,PLANNING,APPROVED,IMPLEMENTING,TESTING,REVIEWING,REPAIRING,AWAITING_DECISION' },
+  { key: '3', id: 'awaiting', label: 'Awaiting', states: 'AWAITING_APPROVAL,AWAITING_DECISION' },
   { key: '4', id: 'complete', label: 'Complete', states: 'COMPLETE' },
   { key: '5', id: 'failed', label: 'Failed', states: 'FAILED' },
   { key: '6', id: 'cancelled', label: 'Cancelled', states: 'CANCELLED' },

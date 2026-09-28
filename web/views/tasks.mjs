@@ -9,8 +9,11 @@ import { TaskPicker } from '../components/task-picker.mjs';
 
 const TABS = [
   { id: 'all', label: 'All', states: null },
-  { id: 'active', label: 'Active', states: ['PLANNING', 'AWAITING_APPROVAL', 'APPROVED', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING'] },
-  { id: 'awaiting', label: 'Awaiting', states: ['AWAITING_APPROVAL'] },
+  { id: 'active', label: 'Active', states: ['PLANNING', 'AWAITING_APPROVAL', 'APPROVED', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING', 'AWAITING_DECISION'] },
+  // A task waiting on a person, whichever question it is waiting on. Two states
+  // rather than one, because the answers differ: a plan needs approving, a review
+  // needs a choice.
+  { id: 'awaiting', label: 'Awaiting', states: ['AWAITING_APPROVAL', 'AWAITING_DECISION'] },
   { id: 'complete', label: 'Complete', states: ['COMPLETE'] },
   { id: 'failed', label: 'Failed', states: ['FAILED'] },
   { id: 'cancelled', label: 'Cancelled', states: ['CANCELLED'] },

@@ -2,7 +2,7 @@ import { html } from '../lib.mjs';
 
 const GOOD = new Set(['COMPLETE', 'succeeded', 'ok', 'Enabled', 'good', 'APPROVED']);
 const BAD = new Set(['FAILED', 'failed', 'Disabled', 'bad', 'error']);
-const WARN = new Set(['AWAITING_APPROVAL', 'REPAIRING', 'PLANNING', 'REVIEWING', 'IMPLEMENTING', 'TESTING', 'warn', 'running']);
+const WARN = new Set(['AWAITING_APPROVAL', 'REPAIRING', 'PLANNING', 'REVIEWING', 'IMPLEMENTING', 'TESTING', 'AWAITING_DECISION', 'warn', 'running']);
 
 export function StatusBadge({ status }) {
   let cls = 'neutral';

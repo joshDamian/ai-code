@@ -11,7 +11,7 @@ export * from 'preact/hooks';
 // The CLI, the TUI and the dashboard render the same events, so they render them
 // with the same functions. `ai-code/format` is mapped to src/format.mjs by the
 // import map in index.html and served from there by src/server.mjs.
-export { describeEvent, formatEvent, formatDuration, formatTokens, formatCost, formatState, bodyKind, diffLines, diffSides, unifiedDiff } from 'ai-code/format';
+export { describeEvent, formatEvent, formatDuration, formatTokens, formatCost, formatState, bodyKind, diffLines, diffSides, unifiedDiff, decisionView } from 'ai-code/format';
 
 // Fuzzy match, scored. Every query character must appear in order, so "ovw"
 // finds Overview and "rt" finds Routing; a character that starts a word, or that

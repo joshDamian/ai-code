@@ -1,5 +1,5 @@
 // Full-page task view (not a modal). URL hash: #/tasks/:id
-import { html, useState, useEffect, useRef, useCallback, useMemo, bodyKind, describeEvent, formatDuration, formatTokens, formatCost } from '../lib.mjs';
+import { html, useState, useEffect, useRef, useCallback, useMemo, bodyKind, decisionView, describeEvent, formatDuration, formatTokens, formatCost } from '../lib.mjs';
 import { api, taskStreamUrl } from '../api.mjs';
 import { onLocalhost } from '../auth.mjs';
 import { showToast } from '../components/toast.mjs';
@@ -739,6 +739,10 @@ function nextStep(task, live, ported) {
       return { tab: 'review', text: 'Execution finished.', cta: 'Start review' };
     case 'REPAIRING':
       return { tab: 'review', text: 'Review requested changes.', cta: 'Repair' };
+    // The one step in this list that no agent can take. The nudge goes to the tab
+    // where the question and its options are, because that is where the answer is.
+    case 'AWAITING_DECISION':
+      return { tab: 'review', text: 'The review needs your decision.', cta: 'Choose an option' };
     case 'COMPLETE':
       return ported ? null : { tab: 'port', text: 'Review passed.', cta: 'Port this change' };
     case 'FAILED':
@@ -1336,6 +1340,11 @@ function TerminalTab({ task, live, terminal }) {
 function ReviewTab({ task, busy, run, live, navigate, onReopen }) {
   const [note, setNote] = useState('');
   const [asking, setAsking] = useState(false);
+  // The decision gate's own state: which option is picked and what has been typed.
+  // Both survive the loads that follow a comment, because the tab is re-rendered
+  // rather than remounted and the person is mid-answer.
+  const [picked, setPicked] = useState(null);
+  const [answer, setAnswer] = useState('');
   // REPAIRING is set by a FAIL verdict and stays set while the repair agent runs,
   // so the live run's role is what tells "repair needed" from "repair running".
   // `live` is the server's lease-backed answer, so a reload mid-repair sees it too.
@@ -1359,6 +1368,12 @@ function ReviewTab({ task, busy, run, live, navigate, onReopen }) {
   }
   const review = task.review || '';
   const kind = bodyKind(review);
+
+  // The decision the review stopped on. A task can be in AWAITING_DECISION without a
+  // readable one - the column is JSON, and a hand-edited database or a downgraded
+  // verdict can leave it empty - so the text box below is offered either way, and a
+  // repair by instruction alone is still possible.
+  const open = task.state === 'AWAITING_DECISION' ? decisionView(task.decision) : null;
 
   // The two things a person has to say about a task that has passed its review and
   // has not been ported yet. One re-opens the loop - the text becomes the repair's
@@ -1387,6 +1402,88 @@ function ReviewTab({ task, busy, run, live, navigate, onReopen }) {
           : kind === 'diff'
             ? html`<${DiffViewer} diff=${review} />`
             : html`<${Markdown} text=${review} />`
+      }
+      ${
+        open
+          ? html`
+              <div class="card">
+                <div class="field-label">The reviewer needs a decision</div>
+                <p>${open.question}</p>
+                <div class="stack">
+                  ${open.options.map(
+                    (o, i) => html`
+                      <button
+                        class=${picked === i ? 'btn' : 'btn secondary'}
+                        disabled=${busy}
+                        onClick=${() => setPicked(picked === i ? null : i)}
+                      >
+                        <strong>${o.label}</strong>${o.detail ? ` — ${o.detail}` : ''}
+                      </button>
+                    `
+                  )}
+                </div>
+                ${open.recommendation ? html`<p class="muted">The reviewer recommends: ${open.recommendation}</p>` : null}
+                <${TextArea}
+                  label="Your answer"
+                  value=${answer}
+                  onInput=${setAnswer}
+                  rows=${4}
+                  placeholder="Add anything the reviewer should weigh, or write the instruction yourself."
+                  loading=${busy}
+                />
+                <div class="row">
+                  <button
+                    class="btn secondary"
+                    disabled=${busy || !answer.trim()}
+                    onClick=${() =>
+                      run(async () => {
+                        const r = await api.taskDiscuss(task.id, answer.trim());
+                        setAnswer('');
+                        return r;
+                      }, 'Comment sent — the reviewer will answer.')}
+                  >
+                    Ask reviewer
+                  </button>
+                  <button
+                    class="btn"
+                    disabled=${busy || (picked === null && !answer.trim())}
+                    onClick=${() =>
+                      run(async () => {
+                        const r = await api.taskResolve(task.id, { option: picked, text: answer.trim() });
+                        setPicked(null);
+                        setAnswer('');
+                        onReopen();
+                        return r;
+                      }, 'Repair approved — running now.')}
+                  >
+                    Approve repair
+                  </button>
+                </div>
+              </div>
+            `
+          : null
+      }
+      ${
+        // The exchange that settles the question. Read-only, oldest first, with the
+        // reviewer's verdict on each answer so a revised set of options is visible as
+        // one - the cards above are always the current set.
+        open && open.thread.length
+          ? html`
+              <div class="card">
+                <div class="field-label">Discussion</div>
+                <div class="stack">
+                  ${open.thread.map(
+                    (m) => html`
+                      <div>
+                        <div class="muted">${m.from === 'user' ? 'You' : 'Reviewer'}${m.verdict ? ` — ${m.verdict}` : ''}</div>
+                        <${Markdown} text=${m.text} />
+                      </div>
+                    `
+                  )}
+                </div>
+              </div>
+            `
+          : null
       }
       ${
         // Set for the length of the repair it started, and cleared when that cycle

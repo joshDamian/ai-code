@@ -8,7 +8,7 @@ import { Sparkline } from '../components/chart.mjs';
 
 // The in-flight half of the workflow in src/service.mjs. IMPLEMENTING is the
 // real name for the state this set used to call EXECUTING, which does not exist.
-const ACTIVE_STATES = new Set(['PLANNING', 'AWAITING_APPROVAL', 'APPROVED', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING']);
+const ACTIVE_STATES = new Set(['PLANNING', 'AWAITING_APPROVAL', 'APPROVED', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING', 'AWAITING_DECISION']);
 
 const DAY_MS = 86400000;
 

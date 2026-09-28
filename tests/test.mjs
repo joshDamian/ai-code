@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,bodyKind,diffLines,diffSides,unifiedDiff} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -164,6 +164,178 @@ test('execute at the ceiling lands the task FAILED with the refusal row in the l
   assert.match(last.error, /^REPAIR_LIMIT: /);
 });
 
+// A task stopped in AWAITING_DECISION by a two-option question, driven through one
+// execute(). Shared by the tests about what answering a decision costs and what
+// ends the loop when the answers keep coming. `verify` is the mock's config for
+// the run that follows the repair, which is where a second question comes from.
+async function awaitingDecision(verify){
+  const root=repo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  s.updateProvider('mock',{config:{writes:['app.mjs'],
+    reviewText:'The retry path could go in the runner or in the client.',
+    reviewVerdict:'DECIDE',
+    reviewDecision:{question:'Where should the retry live?',options:[{label:'In the runner',detail:'Once per run.'},{label:'In the client',detail:'Every call.'}],recommendation:'In the runner'},
+    ...verify}});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'build the queue');
+  s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  await s.execute(t.id);
+  assert.equal(s.task(t.id).state,'AWAITING_DECISION','the DECIDE verdict stops the task');
+  return {s,t};
+}
+
+// A review that needs a choice stops the task instead of starting a repair: the
+// person settles what the fix should do before anyone is asked to make it. The
+// question is stored with the findings, and no repair was run at all.
+test('a DECIDE verdict stops the task for a decision rather than sending it to repair',async()=>{
+  const {s,t}=await awaitingDecision({});
+  const done=s.task(t.id);
+  assert.equal(done.review,'The retry path could go in the runner or in the client.');
+  const d=JSON.parse(done.decision);
+  assert.equal(d.question,'Where should the retry live?');
+  assert.deepEqual(d.options.map(o=>o.label),['In the runner','In the client']);
+  assert.equal(d.recommendation,'In the runner');
+  assert.deepEqual(d.thread,[],'nobody has said anything about the question yet');
+  assert.equal(s.store.listRuns(t.id).filter(r=>r.role==='repair').length,0);
+});
+
+// The downgrade. A question nobody can answer is not a decision, and the reviewer
+// that has one fix to offer has a FAIL - so a DECIDE whose options do not survive
+// validation is read as exactly that, and the repair runs.
+test('a DECIDE without an answerable question is a FAIL',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  s.updateProvider('mock',{config:{writes:['app.mjs'],reviewText:'Item 3 is not implemented.',reviewVerdict:'DECIDE',reviewDecision:{question:'   ',options:[{label:'Only one'}],recommendation:'x'}}});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);s.approve(t.id);
+  await s.implement(t.id);await s.runTests(t.id);
+  const done=await s.review(t.id);
+  assert.equal(done.state,'REPAIRING');
+  assert.equal(done.decision,null,'a decision that cannot be answered is not stored');
+  assert.equal(done.review,'Item 3 is not implemented.','and the findings are what the repair reads');
+});
+
+// A comment runs the reviewer again without moving the task. Nothing is spent: the
+// state, the findings and the repair budget all survive it, so the exchange can run
+// as long as the question takes to settle.
+test('a comment is answered by the reviewer without moving the task or spending a repair',async()=>{
+  const {s,t}=await awaitingDecision({discussText:'The runner retries once per run; the client would retry inside a loop.',discussVerdict:'DECIDE',discussDecision:{question:'Retry in the runner, or in the transport under it?',options:[{label:'In the runner',detail:'Once per run.'},{label:'In the transport',detail:'Every request.'},{label:'In neither',detail:'Let the caller decide.'}],recommendation:'In the transport'}});
+  const prompts=[];const real=s.runRole.bind(s);
+  s.runRole=(task,role,prompt,...rest)=>{if(role==='reviewer')prompts.push(prompt);return real(task,role,prompt,...rest)};
+  const back=await s.discussReview(t.id,'Which one survives a failed flush?');
+  assert.equal(back.state,'AWAITING_DECISION','a discussion is not a step of the workflow');
+  assert.equal(s.store.listRuns(t.id).filter(r=>r.role==='repair').length,0,'no repair was spent on it');
+  const d=JSON.parse(back.decision);
+  assert.equal(d.thread.length,2);
+  assert.equal(d.thread[0].from,'user');
+  assert.equal(d.thread[0].text,'Which one survives a failed flush?');
+  assert.equal(d.thread[1].from,'reviewer');
+  assert.equal(d.thread[1].verdict,'DECIDE');
+  assert.equal(d.thread[1].text,'The runner retries once per run; the client would retry inside a loop.');
+  // A DECIDE answer replaces the options: two sets on one column leave the person
+  // choosing from a list the repair would never read.
+  assert.equal(d.question,'Retry in the runner, or in the transport under it?');
+  assert.deepEqual(d.options.map(o=>o.label),['In the runner','In the transport','In neither']);
+  assert.equal(d.recommendation,'In the transport');
+  assert.equal(prompts.length,1,'one reviewer turn, and it is the discussion');
+  assert.ok(prompts[0].startsWith(DISCUSSION_OPENS),'the reviewer is told this is a discussion, not a review');
+  assert.match(prompts[0],/Which one survives a failed flush\?/,'and handed what the person wrote');
+});
+
+test('discuss and resolve refuse a task that is not waiting on a decision, and refuse empty input',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  s.updateProvider('mock',{config:{writes:['app.mjs'],reviewText:'The retry path could go in the runner or in the client.',reviewVerdict:'DECIDE',reviewDecision:{question:'Where should the retry live?',options:[{label:'In the runner'},{label:'In the client'}],recommendation:'In the runner'}}});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  await assert.rejects(()=>s.discussReview(t.id,'hello'),/AWAITING_DECISION/);
+  await assert.rejects(()=>s.resolveReview(t.id,{text:'do it'}),/AWAITING_DECISION/);
+  await s.plan(t.id);s.approve(t.id);await s.execute(t.id);
+  assert.equal(s.task(t.id).state,'AWAITING_DECISION');
+  await assert.rejects(()=>s.discussReview(t.id,'   '),/comment is required/);
+  await assert.rejects(()=>s.resolveReview(t.id,{}),/option or write an instruction/);
+  await assert.rejects(()=>s.resolveReview(t.id,{option:7}),/No option 7/,'an option the reviewer never wrote is refused by number');
+  assert.equal(s.task(t.id).state,'AWAITING_DECISION','a refused call leaves the task where it was');
+  assert.equal(JSON.parse(s.task(t.id).decision).thread.length,0,'and leaves nothing in the thread');
+});
+
+// The approval. The choice reaches the repair through the same `feedback` column a
+// human's note on a completed task uses, so the repair chain is the one a FAIL
+// already runs - and the verification after it is what signs the work off.
+test('resolving a decision hands the choice to the repair, which runs the chain a FAIL runs',async()=>{
+  const {s,t}=await awaitingDecision({verifyText:'The retry lives in the runner.',verifyVerdict:'PASS'});
+  const prompts=[];const real=s.runRole.bind(s);
+  s.runRole=(task,role,prompt,...rest)=>{if(role==='repair')prompts.push(prompt);return real(task,role,prompt,...rest)};
+  const done=await s.resolveReview(t.id,{option:0});
+  assert.equal(done.state,'COMPLETE');
+  assert.match(prompts[0],/Human feedback:/,'the repair reads the choice as feedback');
+  assert.match(prompts[0],/Decision: Where should the retry live\?/,'with the question it answers');
+  assert.match(prompts[0],/Chosen: In the runner - Once per run\./,'and the option that was picked');
+  const row=s.task(t.id);
+  assert.equal(row.decision,null,'the question is spent on the repair it answered');
+  assert.equal(row.feedback,null,'and so is the text');
+  const roles=s.store.listRuns(t.id).map(r=>r.role);
+  assert.equal(roles.filter(r=>r==='repair').length,1);
+  assert.equal(roles.filter(r=>r==='reviewer').length,2,'the repair is verified, not reviewed again');
+});
+
+// A verification that answers DECIDE is asking a new question, and the task goes
+// back to waiting on a person with that question rather than FAILING. The thread
+// starts empty: it is a question nobody has discussed yet, whatever was said about
+// the one before it.
+test('a verification that answers DECIDE asks its own question',async()=>{
+  const {s,t}=await awaitingDecision({verifyText:'The retry moved, and the flush path is now ambiguous.',verifyVerdict:'DECIDE',verifyDecision:{question:'Which flush path should the retry use?',options:[{label:'The buffered one',detail:'Loses a run on a crash.'},{label:'The direct one',detail:'Blocks the caller.'}],recommendation:'The buffered one'}});
+  const back=await s.resolveReview(t.id,{option:0});
+  assert.equal(back.state,'AWAITING_DECISION');
+  const d=JSON.parse(s.task(t.id).decision);
+  assert.equal(d.question,'Which flush path should the retry use?');
+  assert.deepEqual(d.options.map(o=>o.label),['The buffered one','The direct one']);
+  assert.deepEqual(d.thread,[],'a new question starts a new thread');
+  assert.equal(s.task(t.id).feedback,null,'the first instruction was spent on the repair it was written for');
+  assert.equal(s.store.listRuns(t.id).filter(r=>r.role==='repair').length,1);
+});
+
+// The ceiling bounds the exchange: every answered decision spends a repair, so a
+// verification that keeps asking until the budget is gone lands the task in FAILED
+// with the refusal in the ledger, exactly as a repair loop that never converges.
+test('the repair ceiling ends the decision loop',async()=>{
+  const {s,t}=await awaitingDecision({verifyText:'The retry moved, and the flush path is now ambiguous.',verifyVerdict:'DECIDE',verifyDecision:{question:'Which flush path should the retry use?',options:[{label:'The buffered one'},{label:'The direct one'}],recommendation:'The buffered one'}});
+  s.saveRouting({...s.getRouting(),repair:{...s.getRouting().repair,maxRepairs:1}});
+  assert.equal((await s.resolveReview(t.id,{option:0})).state,'AWAITING_DECISION','the one repair the budget allows was spent');
+  const err=await s.resolveReview(t.id,{option:1}).then(()=>null,e=>e);
+  assert.equal(err.code,'REPAIR_LIMIT');
+  assert.equal(s.task(t.id).state,'FAILED');
+  const runs=s.store.listRuns(t.id);
+  assert.equal(runs.filter(r=>r.role==='repair'&&r.provider_id).length,1,'one turn spent before the refusal');
+  assert.equal(runs[runs.length-1].provider_id,null,'the refusal row: nothing was asked of a provider');
+});
+
+// The clause that produces a DECIDE, pinned in both prompts: a prompt that lost it
+// would turn every choice into a FAIL, and every test of the gate would still pass
+// because the mock answers what it is told to.
+test('the reviewer and the verification are both told the third verdict exists',()=>{
+  assert.match(reviewerPrompt('--- a.mjs'),/Return a clear verdict: PASS, FAIL or DECIDE/,'the review is where a DECIDE comes from');
+  for(const prompt of [reviewerPrompt('--- a.mjs'),verificationPrompt({findings:'Item 3 is not implemented.',changed:['a.mjs'],test:null,diff:''})]){
+    assert.match(prompt,/Answer DECIDE instead of FAIL only when closing a finding needs a choice the approved plan does not settle/);
+    assert.match(prompt,/A finding with one reasonable fix is FAIL\./,'and a finding that is not a choice is still a FAIL');
+  }
+  // The discussion is the third prompt a reviewer answers, and its opening line is
+  // the whole of what tells it from the other two - the mock reads it to decide
+  // which answer to give.
+  const d=discussionPrompt({review:'Item 3 is not implemented.',decision:{question:'Where should the retry live?',options:[{label:'In the runner',detail:'Once per run.'},{label:'In the client',detail:''}],recommendation:'In the runner'},thread:[{from:'user',text:'Which one survives a failed flush?',verdict:null}],diff:'--- a.mjs'});
+  assert.ok(d.startsWith(DISCUSSION_OPENS));
+  assert.match(d,/PERSON: Which one survives a failed flush\?/);
+  assert.match(d,/1\. In the runner - Once per run\./);
+  assert.match(d,/2\. In the client\n/);
+  assert.doesNotMatch(d,/Review this implementation independently/);
+  assert.doesNotMatch(d,/Verify a repair/);
+});
+
+test('only a review moves a task into AWAITING_DECISION, and only a repair leaves it',()=>{
+  assert.deepEqual(transitions.AWAITING_DECISION,['REPAIRING','CANCELLED']);
+  const from=Object.entries(transitions).filter(([,to])=>to.includes('AWAITING_DECISION')).map(([state])=>state);
+  assert.deepEqual(from,['REVIEWING'],'a question is asked by a review and by nothing else');
+  assert.ok(transitions.REVIEWING.includes('COMPLETE'),'and the other two verdicts still leave REVIEWING');
+});
+
 test('the verification prompt carries what the reviewer has to check',()=>{
   // The clauses the exchange rests on, pinned the way the planner's and the chat's
   // are: the findings and the delta are in the prompt rather than in a section the
@@ -190,7 +362,12 @@ test('only the reviewer is asked for a structured verdict',()=>{
   const reviewer=claudeArgs({role:'reviewer',prompt:'x'});
   const i=reviewer.indexOf('--json-schema');
   assert.ok(i>=0,'the reviewer must be told the shape of its verdict');
-  assert.deepEqual(JSON.parse(reviewer[i+1]).properties.verdict.enum,['PASS','FAIL']);
+  const schema=JSON.parse(reviewer[i+1]);
+  assert.deepEqual(schema.properties.verdict.enum,['PASS','FAIL','DECIDE'],'DECIDE is the choice the workflow cannot make for the person');
+  // The schema is what forces a question a person can answer: a DECIDE with no
+  // options is downgraded to a FAIL, so the shape is the gate's other half.
+  assert.deepEqual(schema.properties.decision.required,['question','options','recommendation']);
+  assert.equal(schema.properties.decision.properties.options.minItems,2);
   for(const role of ['planner','implementer','repair'])
     assert.equal(claudeArgs({role,prompt:'x'}).includes('--json-schema'),false,`${role} still answers in prose`);
 });
@@ -2829,7 +3006,7 @@ test('the reviewer is told the same thing, and still gets the diff',()=>{
   // either way, since it is the whole input to the verdict.
   const p=reviewerPrompt('diff --git a/x b/x\n+1');
   assert.match(p,/No tool that writes a file exists/i);
-  assert.match(p,/PASS or FAIL/);
+  assert.match(p,/Return a clear verdict: PASS, FAIL or DECIDE/);
   assert.ok(p.includes('diff --git a/x b/x'));
 });
 

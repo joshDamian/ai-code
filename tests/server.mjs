@@ -1306,6 +1306,52 @@ test('POST /api/tasks/:id/feedback re-opens a completed task, and refuses an emp
   }finally{srv.stop()}
 });
 
+// The decision gate over HTTP. `discuss` is the comment that leaves the task where
+// it is, `resolve` is the approval that starts the repair, and both refuse an empty
+// body with a reason before any of it runs.
+test('POST /api/tasks/:id/discuss and /resolve carry the decision gate',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-decision-'));
+  git(root,['init','-q']);
+  fs.writeFileSync(path.join(root,'README.md'),'x');
+  git(root,['add','.']);
+  git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{config:{writes:['app.mjs'],reviewText:'The retry path could go in the runner or in the client.',reviewVerdict:'DECIDE',reviewDecision:{question:'Where should the retry live?',options:[{label:'In the runner',detail:'Once per run.'},{label:'In the client',detail:'Every call.'}],recommendation:'In the runner'},discussText:'The runner retries once per run.',verifyText:'The retry lives in the runner.',verifyVerdict:'PASS'}});
+  const t=s.createTask(p.id,'build the queue');
+  s.prepare(t.id);
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    assert.equal((await post(`${srv.base}/api/tasks/${t.id}/plan`)).status,200);
+    assert.equal((await post(`${srv.base}/api/tasks/${t.id}/approve`)).status,200);
+    assert.equal(JSON.parse((await post(`${srv.base}/api/tasks/${t.id}/execute`,{})).body).state,'AWAITING_DECISION');
+    const emptyTalk=await post(`${srv.base}/api/tasks/${t.id}/discuss`,{text:'   '});
+    assert.equal(emptyTalk.status,400);
+    assert.match(JSON.parse(emptyTalk.body).error,/text is required/);
+    const emptyResolve=await post(`${srv.base}/api/tasks/${t.id}/resolve`,{});
+    assert.equal(emptyResolve.status,400);
+    assert.match(JSON.parse(emptyResolve.body).error,/option or text is required/);
+    // A body that says `later` is refused here rather than read as NaN by the
+    // service, where the error would name an option number nobody wrote.
+    const badOption=await post(`${srv.base}/api/tasks/${t.id}/resolve`,{option:'later'});
+    assert.equal(badOption.status,400);
+    assert.match(JSON.parse(badOption.body).error,/integer index/);
+    assert.equal(s.task(t.id).state,'AWAITING_DECISION','every refusal left the task where it was');
+    const talk=await post(`${srv.base}/api/tasks/${t.id}/discuss`,{text:'Which one survives a failed flush?'});
+    assert.equal(talk.status,200);
+    const afterTalk=JSON.parse(talk.body);
+    assert.equal(afterTalk.state,'AWAITING_DECISION','a comment moves nothing');
+    const thread=JSON.parse(afterTalk.decision).thread;
+    assert.equal(thread.length,2,'the comment, and the answer under it');
+    assert.equal(thread[0].text,'Which one survives a failed flush?');
+    assert.equal(thread[1].text,'The runner retries once per run.');
+    const done=await post(`${srv.base}/api/tasks/${t.id}/resolve`,{option:0,text:'Keep it in the runner.'});
+    assert.equal(done.status,200);
+    assert.equal(JSON.parse(done.body).state,'COMPLETE','the repair and its verification ran inside the request');
+    assert.equal(s.task(t.id).decision,null,'the question is spent on the repair it answered');
+  }finally{srv.stop()}
+});
+
 // A conversation scoped to a task: how a question about a finished one is asked
 // with that task's plan and review in hand, rather than against the tree alone.
 test('POST /api/chat/sessions accepts a task to scope the conversation to',async()=>{

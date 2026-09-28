@@ -215,6 +215,12 @@ export class Store {
         // findings - and the review after it has the same text through the same
         // argument.
         ['feedback', 'TEXT'],
+        // The question a review left open, set when a DECIDE verdict stops the task
+        // in AWAITING_DECISION and cleared once a repair has been approved to answer
+        // it. JSON rather than columns, because the options and the discussion thread
+        // are one value: a question is read with the comments about it or not at all,
+        // and nothing queries an individual option.
+        ['decision', 'TEXT'],
       ],
       models: [
         ['provider_model_id', 'TEXT'],
@@ -544,8 +550,8 @@ export class Store {
     const task = this.getTask(id);
     const n = { ...task, ...patch, updated_at: new Date().toISOString() };
     this.db
-      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=?,plan_prev=?,plan_at=?,plan_model=?,parent_id=?,feedback=? WHERE id=?')
-      .run(n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, n.plan_prev ?? null, n.plan_at ?? null, n.plan_model ?? null, n.parent_id ?? null, n.feedback ?? null, id);
+      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=?,plan_prev=?,plan_at=?,plan_model=?,parent_id=?,feedback=?,decision=? WHERE id=?')
+      .run(n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, n.plan_prev ?? null, n.plan_at ?? null, n.plan_model ?? null, n.parent_id ?? null, n.feedback ?? null, n.decision ?? null, id);
     return this.getTask(id);
   }
 

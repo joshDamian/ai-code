@@ -285,7 +285,8 @@ export function formatState(s) {
     CREATED: 'Created', CONTEXT_READY: 'Context Ready', PLANNING: 'Planning',
     AWAITING_APPROVAL: 'Awaiting Approval', APPROVED: 'Approved',
     IMPLEMENTING: 'Implementing', TESTING: 'Testing', REVIEWING: 'Reviewing',
-    REPAIRING: 'Repairing', COMPLETE: 'Complete', FAILED: 'Failed', CANCELLED: 'Cancelled'
+    REPAIRING: 'Repairing', AWAITING_DECISION: 'Awaiting Decision',
+    COMPLETE: 'Complete', FAILED: 'Failed', CANCELLED: 'Cancelled'
   };
   return map[s] || s;
 }
@@ -293,8 +294,43 @@ export function formatState(s) {
 export function stateColor(s) {
   if (s === 'COMPLETE' || s === 'succeeded' || s === 'ok') return 'good';
   if (s === 'FAILED' || s === 'failed') return 'bad';
-  if (s === 'AWAITING_APPROVAL' || s === 'REPAIRING' || s === 'interrupted') return 'warn';
+  if (s === 'AWAITING_APPROVAL' || s === 'REPAIRING' || s === 'AWAITING_DECISION' || s === 'interrupted') return 'warn';
   return '';
+}
+
+// The question a review left open, read for a screen.
+//
+// The column is JSON that `review()` wrote after validating it, so this parses
+// rather than validates a second time. It still refuses rather than throws: a column
+// is a string that can be half-written, a decision that cannot be read is a decision
+// that is not there, and a screen is not the place to find that out.
+//
+// Every field is defaulted, because the two shapes that reach here are a decision a
+// reviewer returned and one a person has since commented on - the first has an empty
+// thread, and a view that rendered `undefined` under a question would be a view
+// nobody could act on.
+export function decisionView(text) {
+  if (!text) return null;
+  try {
+    const d = typeof text === 'string' ? JSON.parse(text) : text;
+    if (!d || typeof d !== 'object' || typeof d.question !== 'string' || !d.question.trim()) return null;
+    return {
+      question: d.question,
+      options: (Array.isArray(d.options) ? d.options : []).map((o) => ({
+        label: typeof o?.label === 'string' ? o.label : '',
+        detail: typeof o?.detail === 'string' ? o.detail : '',
+      })),
+      recommendation: typeof d.recommendation === 'string' ? d.recommendation : '',
+      thread: (Array.isArray(d.thread) ? d.thread : []).map((m) => ({
+        from: m?.from === 'reviewer' ? 'reviewer' : 'user',
+        text: typeof m?.text === 'string' ? m.text : '',
+        verdict: typeof m?.verdict === 'string' ? m.verdict : null,
+        at: typeof m?.at === 'string' ? m.at : null,
+      })),
+    };
+  } catch {
+    return null;
+  }
 }
 
 // One unified diff, classified and numbered, line by line.

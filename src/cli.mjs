@@ -34,6 +34,8 @@ Task
   task close <id>
   task link <id> [<parent-id>]
   task feedback <id> <text>
+  task discuss <id> <text>
+  task resolve <id> [--option <n>] [text]
 Providers
   provider list
   provider add-claude
@@ -126,7 +128,7 @@ const CATALOGS = {
 
 // Commands the task namespace accepts. `execute` and the planning verbs are async;
 // the state-machine verbs are not.
-const TASK_OPS = ['plan', 'approve', 'execute', 'implement', 'test', 'review', 'repair', 'reject', 'replan', 'retry', 'refine', 'diff', 'port', 'cancel', 'close', 'link', 'feedback'];
+const TASK_OPS = ['plan', 'approve', 'execute', 'implement', 'test', 'review', 'repair', 'reject', 'replan', 'retry', 'refine', 'diff', 'port', 'cancel', 'close', 'link', 'feedback', 'discuss', 'resolve'];
 // The steps the server will run as a background job. `port` is not one: a job
 // carries no options, so a target branch would need a column on `jobs` and a step
 // in the runner, and a merge is a decision rather than a long agent run.
@@ -209,6 +211,14 @@ async function taskCommand(sub, rest) {
   if (at >= 0 && !['diff', 'port'].includes(sub)) throw new Error(`--to is not supported for task ${sub}`);
   if (dryRun && sub !== 'port') throw new Error(`--dry-run is not supported for task ${sub}`);
   if (clean && sub !== 'port') throw new Error(`--clean is not supported for task ${sub}`);
+  // `resolve`'s option, numbered from 0 as the stored decision numbers them. The
+  // words around the flag are the instruction, so the flag and its value come out of
+  // the same array the text is read from rather than out of the task id's slot.
+  const oi = rest.indexOf('--option');
+  const option = oi >= 0 ? Number(rest[oi + 1]) : null;
+  if (oi >= 0 && !Number.isInteger(option)) throw new Error('--option needs an option number');
+  if (oi >= 0 && sub !== 'resolve') throw new Error(`--option is not supported for task ${sub}`);
+  const words = rest.slice(1).filter((_, i) => !(oi >= 0 && (i === oi - 1 || i === oi)));
   if (rest.includes('--background')) {
     if (!QUEUEABLE.has(sub)) throw new Error(`--background is not supported for task ${sub}`);
     // A job carries no options: enqueue takes a task and a kind, the runner's step
@@ -235,6 +245,11 @@ async function taskCommand(sub, rest) {
     // No second argument is the clear, which is how a link nobody meant is removed.
     : sub === 'link' ? s.linkTask(id, rest[1] || null)
     : sub === 'feedback' ? await s.feedback(id, rest.slice(1).join(' '))
+    // The decision gate's two verbs. A discussion answers a comment without moving
+    // the task; a resolve is the instruction that starts the repair, and it is
+    // blocking for the length of that cycle.
+    : sub === 'discuss' ? await s.discussReview(id, rest.slice(1).join(' '))
+    : sub === 'resolve' ? await s.resolveReview(id, { option, text: words.join(' ') })
     // Named rather than left to the last arm. This chain used to end in cancelTask,
     // so any verb added to TASK_OPS without a line here cancelled the task.
     : (() => { throw new Error(`Unhandled task operation: ${sub}`); })();
