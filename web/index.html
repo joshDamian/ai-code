@@ -439,6 +439,21 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 .task-picker-clear:hover{background:var(--panel3);color:var(--text);opacity:1}
 
 /* ---- toolbar / tabs ---- */
+.tasks-head{display:grid;gap:var(--space-3);margin-bottom:var(--space-4)}
+.tasks-actions{display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap}
+.tasks-actions .search-input{flex:1 1 240px;width:auto;max-width:440px}
+.tasks-actions .tasks-new{margin-left:auto}
+.tasks-tabs{display:flex;align-items:center;gap:var(--space-3);border-bottom:1px solid var(--line)}
+.tasks-tabs .tabs{border-bottom:0;flex:1;min-width:0}
+.switch{display:inline-flex;align-items:center;gap:var(--space-2);font-size:12.5px;color:var(--muted);white-space:nowrap;cursor:pointer}
+.switch:hover{color:var(--text)}
+.field.inline{display:inline-flex;align-items:center;gap:var(--space-2)}
+.field.inline .input{width:auto}
+.inline-form-head,.inline-form-foot{display:flex;align-items:center;gap:var(--space-2)}
+.inline-form-head h3{margin:0;margin-right:auto}
+.inline-form-foot{justify-content:flex-end}
+.inline-form-foot .muted{margin-right:auto;font-size:12px}
+.inline-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-3)}
 .view-toolbar{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);margin-bottom:var(--space-4);flex-wrap:wrap}
 /* A toolbar holding a single action has nothing to sit opposite, and space-between
    would strand it against the left edge. Two toolbars hold a single child today:
@@ -816,6 +831,9 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   .list-row-main b,.list-row-main span{overflow-wrap:anywhere}
   .list-row-side{flex-wrap:wrap}
   .view-toolbar{gap:var(--space-2)}
+  .tasks-actions .search-input{flex-basis:100%;max-width:none}
+  .inline-form-grid{grid-template-columns:1fr}
+  .tasks-tabs{flex-wrap:wrap}
   .kbd-overlay{padding:var(--space-6) var(--space-3)}
   /* Toasts are fixed, so an oversized one is clipped rather than scrolled -
      pin them to the viewport edges instead. */
@@ -844,7 +862,7 @@ textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
    fingertip actually covers, and the tabs - which are the main navigation on a task
    page and were the tightest targets in the app - get a little more room than that. */
 @media(pointer:coarse){
-  .btn,.seg-btn,.tab,.nav-item,.input{min-height:44px}
+  .btn,.seg-btn,.tab,.nav-item,.input,.switch{min-height:44px}
   .tab{padding:var(--space-3) var(--space-4)}
   /* Every field in the app carries `.input`, selects and textareas included. */
   /* A tap leaves a hover style stuck until the next tap lands elsewhere. */

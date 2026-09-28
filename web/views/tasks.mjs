@@ -115,17 +115,16 @@ export function Tasks({ navigate }) {
 
   return html`
     <div class="view-tasks">
-      <div class="view-toolbar">
-        <div class="tabs">
-          ${TABS.map(
-            (t) => html`
-              <button key=${t.id} class="tab ${tab === t.id ? 'active' : ''}" onClick=${() => setTab(t.id)}>
-                ${t.label} <span class="tab-count">${counts[t.id] || 0}</span>
-              </button>
-            `
-          )}
-        </div>
-        <div class="row">
+      <div class="tasks-head">
+        <div class="tasks-actions">
+          <input
+            class="input search-input"
+            type="search"
+            data-search
+            placeholder="Search tasks…"
+            value=${query}
+            onInput=${(e) => setQuery(e.target.value)}
+          />
           ${
             // A single project leaves the control nothing to filter, so it is not
             // rendered at all rather than shown with one option.
@@ -136,42 +135,63 @@ export function Tasks({ navigate }) {
                     value=${projectFilter}
                     onChange=${setProjectFilter}
                     options=${[{ value: '', label: 'All projects' }, ...projects.map((p) => ({ value: p.id, label: p.name }))]}
+                    inline
                   />
                 `
               : null
           }
-          <input
-            class="input search-input"
-            type="search"
-            data-search
-            placeholder="Search tasks…"
-            value=${query}
-            onInput=${(e) => setQuery(e.target.value)}
-          />
+          <button class="btn tasks-new" onClick=${() => setShowForm(true)} aria-expanded=${showForm}>+ New task</button>
+        </div>
+        <div class="tasks-tabs">
+          <div class="tabs">
+            ${TABS.map(
+              (t) => html`
+                <button key=${t.id} class="tab ${tab === t.id ? 'active' : ''}" onClick=${() => setTab(t.id)}>
+                  ${t.label} <span class="tab-count">${counts[t.id] || 0}</span>
+                </button>
+              `
+            )}
+          </div>
           ${
             // Only the All tab mixes cancelled tasks in, so this is the only tab the
-            // toggle has anything to do on. Wrapped with the New Task button so the
-            // toolbar's space-between keeps the actions paired on the right rather
-            // than centring the toggle in the gap.
+            // toggle has anything to do on.
             tab === 'all'
-              ? html`<button class="btn secondary chart-toggle" onClick=${() => setShowCancelled((v) => !v)}>${showCancelled ? 'Hide cancelled' : 'Show cancelled'}</button>`
+              ? html`<label class="switch"><input type="checkbox" checked=${showCancelled} onChange=${(e) => setShowCancelled(e.target.checked)} /> Show cancelled</label>`
               : null
           }
-          <button class="btn" onClick=${() => setShowForm((s) => !s)}>${showForm ? 'Cancel' : '+ New Task'}</button>
         </div>
       </div>
 
       ${
         showForm
           ? html`
-              <form class="card inline-form" onSubmit=${submit}>
-                <${Select}
-                  label="Project"
-                  value=${projectId}
-                  onChange=${setProjectId}
-                  options=${projects.map((p) => ({ value: p.id, label: p.name }))}
-                  loading=${saving}
-                />
+              <form class="card inline-form" onSubmit=${submit} onKeyDown=${(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setShowForm(false);
+                }
+              }}>
+                <div class="inline-form-head">
+                  <h3>New task</h3>
+                  <button type="button" class="link-btn" aria-label="Close" onClick=${() => setShowForm(false)}>✕</button>
+                </div>
+                <div class="inline-form-grid">
+                  <${Select}
+                    label="Project"
+                    value=${projectId}
+                    onChange=${setProjectId}
+                    options=${projects.map((p) => ({ value: p.id, label: p.name }))}
+                    loading=${saving}
+                  />
+                  <${TaskPicker}
+                    label="Parent task (optional)"
+                    tasks=${parentCandidates}
+                    value=${parentId}
+                    onInput=${setParentId}
+                    placeholder="Search tasks by title — the task this one builds on"
+                    loading=${saving}
+                  />
+                </div>
                 <${TextArea}
                   label="Description"
                   value=${title}
@@ -179,6 +199,7 @@ export function Tasks({ navigate }) {
                   placeholder="Describe what the task should accomplish"
                   rows=${4}
                   loading=${saving}
+                  autofocus
                   onKeyDown=${(e) => {
                     // Enter inserts a newline in a textarea, so submission needs a modifier.
                     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -187,15 +208,11 @@ export function Tasks({ navigate }) {
                     }
                   }}
                 />
-                <${TaskPicker}
-                  label="Parent task (optional)"
-                  tasks=${parentCandidates}
-                  value=${parentId}
-                  onInput=${setParentId}
-                  placeholder="Search tasks by title — the task this one builds on"
-                  loading=${saving}
-                />
-                <button class="btn" type="submit" disabled=${saving || !projects.length}>${saving ? 'Creating…' : 'Create task'}</button>
+                <div class="inline-form-foot">
+                  <span class="muted">⌘↵ to create</span>
+                  <button class="btn secondary" type="button" onClick=${() => setShowForm(false)}>Cancel</button>
+                  <button class="btn" type="submit" disabled=${saving || !projects.length}>${saving ? 'Creating…' : 'Create task'}</button>
+                </div>
                 ${!projects.length ? html`<div class="muted">Add a project first.</div>` : null}
               </form>
             `

@@ -19,9 +19,9 @@ export function TextInput({ label, value, onInput, placeholder, disabled, loadin
   `;
 }
 
-export function Select({ label, value, onChange, options, disabled, loading }) {
+export function Select({ label, value, onChange, options, disabled, loading, inline }) {
   return html`
-    <label class="field">
+    <label class="field ${inline ? 'inline' : ''}">
       ${label ? html`<span class="field-label">${label}</span>` : null}
       <select class="input" value=${value} disabled=${disabled || loading} onChange=${(e) => onChange(e.target.value)}>
         ${options.map((o) => html`<option value=${o.value} key=${o.value}>${o.label}</option>`)}
@@ -30,7 +30,7 @@ export function Select({ label, value, onChange, options, disabled, loading }) {
   `;
 }
 
-export function TextArea({ label, value, onInput, onKeyDown, placeholder, disabled, loading, rows = 6 }) {
+export function TextArea({ label, value, onInput, onKeyDown, placeholder, disabled, loading, rows = 6, autofocus }) {
   return html`
     <label class="field">
       ${label ? html`<span class="field-label">${label}</span>` : null}
@@ -42,6 +42,7 @@ export function TextArea({ label, value, onInput, onKeyDown, placeholder, disabl
         disabled=${disabled || loading}
         onInput=${(e) => onInput(e.target.value)}
         onKeyDown=${onKeyDown}
+        autofocus=${autofocus}
       ></textarea>
     </label>
   `;
