@@ -178,7 +178,11 @@ export async function* runMock(input) {
   // workflow now reads as a repair that did nothing, and a mock that could not tell
   // the two apart could not drive either answer.
   const wrote = input.mockWriteText || (input.role === 'repair' ? '// repaired by the mock\n' : '// written by the mock implementer\n');
-  for (const file of ((input.role === 'implementer' || input.role === 'repair') && input.mockWrites) || []) {
+  // A planner with a sandbox is the third writer: its scratch files land in its
+  // planning copy, which is what lets a test show they are not a violation and
+  // never reach the checkout.
+  const writes = input.role === 'implementer' || input.role === 'repair' || (input.role === 'planner' && input.sandbox);
+  for (const file of (writes && input.mockWrites) || []) {
     const dest = path.join(agentCwd(input), file);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, wrote);
@@ -259,6 +263,17 @@ export async function* runMock(input) {
 const READ_ONLY_NOTICE =
   'No tool that writes a file exists in this session. Do not attempt Write, Edit, or any other file-creating tool, and do not search for one. Do not attempt to write a plan file. The deliverable is the text of your reply.';
 
+// What a sandboxed planner is told about where it is. A system prompt for the same
+// reason READ_ONLY_NOTICE is one: it has to reach a refine, whose task prompt is a
+// revision request that says nothing about the tree it runs in.
+//
+// The checkout is named because the data worth reading is there and not in the
+// copy: a gitignored database or environment file is never checked out into a
+// worktree. What stops the planner writing to it is this paragraph and the
+// after-run check on tracked files; nothing stops a write to an ignored file.
+export const planSandboxNotice = (checkout) =>
+  `You are planning in a disposable copy of the repository: a git worktree at HEAD with the project's uncommitted changes copied in, and your working directory is that copy. You may run commands here - run the tests, query databases, write and run scratch scripts - to ground the plan in evidence. Nothing in this copy is kept, and nothing you change here is the implementation. The project's own checkout is ${checkout}. Gitignored data such as local databases and environment files lives there and not in this copy. Read it only: open databases read-only, run no migrations or writing queries, and do not create, edit or delete anything in that checkout or anywhere else outside this copy. Do not commit, push, or change git state. Name files in the plan by their repository-relative path. The deliverable is the text of your reply; do not write a plan file.`;
+
 // The reviewer's verdict as a shape the harness validates, rather than a word
 // found in prose. Reading prose for it failed in both directions on one task:
 // the word "failures" in the sentence "no test failures" was read as a finding,
@@ -316,9 +331,9 @@ export const REVIEWER_SCHEMA = {
   additionalProperties: false,
 };
 
-// The permission flags are the whole safety story: a planner, a chat or a
-// reviewer may not write, and only an implementation role may run commands
-// without prompting.
+// The permission flags are the whole safety story: a chat, a reviewer, or a
+// planner in the real checkout may not write, and only an implementation role or
+// a planner in its own disposable copy may run commands without prompting.
 // Built here rather than inside runClaude so the argv is a value a test can read
 // without spawning an agent.
 export function claudeArgs(input) {
@@ -331,7 +346,19 @@ export function claudeArgs(input) {
   // named here, which is the wrong default for the one that is only allowed to
   // answer questions. A chat answers from the repository it may not change, so it
   // is denied exactly what the planner is denied.
-  if (input.role === 'planner' || input.role === 'chat') {
+  //
+  // A planner handed a sandbox is the exception, and only then. It runs in its own
+  // disposable worktree (createPlanWorktree), where a command or a scratch file
+  // costs nothing, so it gets the shell it needs to query a database or run the
+  // suite before it commits to a plan. `sandbox` is set by plan() and refine() and
+  // by nothing else: the context-enrich job also runs as `planner`, in the real
+  // checkout, and a planner that could not get its copy falls back to the branch
+  // below. The checkout itself is still guarded after the run by the service's
+  // PLANNING_VIOLATION check.
+  if (input.role === 'planner' && input.sandbox?.checkout) {
+    args.push('--dangerously-skip-permissions');
+    args.push('--append-system-prompt', planSandboxNotice(input.sandbox.checkout));
+  } else if (input.role === 'planner' || input.role === 'chat') {
     args.push('--permission-mode', 'plan', '--disallowedTools', 'Edit', 'Write', 'Bash');
     args.push('--append-system-prompt', READ_ONLY_NOTICE);
   } else if (input.role === 'reviewer') {

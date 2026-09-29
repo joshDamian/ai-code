@@ -6471,3 +6471,106 @@ test('the reaper clears a session whose process died', () => {
   assert.equal(after.status, 'idle');
   assert.equal(after.pending_run_id, null);
 });
+
+// -- the planner's disposable copy ------------------------------------------
+import {planSandboxNotice} from '../src/agents.mjs';
+import {PLANNER_SANDBOX_PROMPT} from '../src/service.mjs';
+import {planWorktreeDir,createPlanWorktree,planWorktreeIds} from '../src/git.mjs';
+
+test('a planner with a sandbox runs unprompted and is told where the checkout is',()=>{
+  const a=claudeArgs({role:'planner',model:'m',prompt:'p',sandbox:{checkout:'/repo/here'}});
+  assert.ok(a.includes('--dangerously-skip-permissions'));
+  assert.equal(a.indexOf('--permission-mode'),-1);
+  const notice=a[a.indexOf('--append-system-prompt')+1];
+  assert.equal(notice,planSandboxNotice('/repo/here'));
+  assert.match(notice,/\/repo\/here/);
+  assert.match(notice,/read it only/i);
+  // The sandbox is the planner's and nobody else's: a chat handed one is still a chat.
+  assert.ok(!claudeArgs({role:'chat',model:'m',prompt:'p',sandbox:{checkout:'/r'}}).includes('--dangerously-skip-permissions'));
+  assert.ok(!claudeArgs({role:'reviewer',model:'m',prompt:'p',sandbox:{checkout:'/r'}}).includes('--dangerously-skip-permissions'));
+  // The prompt keeps the spiral's way out, and drops the clause that would now be false.
+  assert.match(PLANNER_SANDBOX_PROMPT,/already fully implemented/i);
+  assert.match(PLANNER_SANDBOX_PROMPT,/Do not invent work/);
+  assert.doesNotMatch(PLANNER_SANDBOX_PROMPT,/No tool that writes a file exists/i);
+});
+
+test('the planning copy is HEAD plus the checkout\'s uncommitted work',()=>{
+  const root=repo();
+  fs.writeFileSync(path.join(root,'README.md'),'edited');
+  fs.mkdirSync(path.join(root,'wip'));fs.writeFileSync(path.join(root,'wip','new.txt'),'new');
+  fs.writeFileSync(path.join(root,'gone.txt'),'x');execFileSync('git',['add','gone.txt'],{cwd:root});
+  execFileSync('git',['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','gone'],{cwd:root});
+  fs.rmSync(path.join(root,'gone.txt'));
+  const {dir}=createPlanWorktree(root,'t1');
+  assert.equal(dir,planWorktreeDir(root,'t1'));
+  assert.equal(fs.readFileSync(path.join(dir,'README.md'),'utf8'),'edited');
+  assert.equal(fs.readFileSync(path.join(dir,'wip','new.txt'),'utf8'),'new');
+  assert.ok(!fs.existsSync(path.join(dir,'gone.txt')));
+  // Reused on the next call, scratch kept and tracked files brought back to the checkout.
+  fs.writeFileSync(path.join(dir,'scratch.sql'),'select 1');
+  fs.writeFileSync(path.join(dir,'package.json'),'clobbered');
+  createPlanWorktree(root,'t1');
+  assert.ok(fs.existsSync(path.join(dir,'scratch.sql')));
+  assert.equal(fs.readFileSync(path.join(dir,'package.json'),'utf8'),fs.readFileSync(path.join(root,'package.json'),'utf8'));
+  assert.deepEqual(planWorktreeIds(root),['t1']);
+});
+
+test('the planner plans in its copy, may write there, and the copy lives until the plan is decided',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  s.updateProvider('mock',{config:{writes:['scratch/analysis.sql']}});
+  const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);
+  const done=await s.plan(t.id);
+  assert.equal(done.state,'AWAITING_APPROVAL');
+  const dir=planWorktreeDir(root,t.id);
+  assert.ok(fs.existsSync(path.join(dir,'scratch','analysis.sql')),'the planner ran in its copy');
+  assert.ok(!fs.existsSync(path.join(root,'scratch')),'and the checkout never saw it');
+  // A refine plans again in the same copy.
+  s.updateProvider('mock',{config:{writes:['scratch/second.sql'],planText:'revised'}});
+  await s.refine(t.id,'tighter');
+  assert.ok(fs.existsSync(path.join(dir,'scratch','analysis.sql')));
+  assert.ok(fs.existsSync(path.join(dir,'scratch','second.sql')));
+  // A reject goes back to PLANNING, which still needs it.
+  s.reject(t.id);
+  assert.ok(fs.existsSync(dir));
+  await s.plan(t.id);
+  s.approve(t.id);
+  assert.ok(!fs.existsSync(dir),'approval ends planning');
+});
+
+test('a closed task and a failed plan leave no planning copy',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const a=s.createTask(p.id,'a');s.prepare(a.id);await s.plan(a.id);
+  assert.ok(fs.existsSync(planWorktreeDir(root,a.id)));
+  s.closeTask(a.id);
+  assert.ok(!fs.existsSync(planWorktreeDir(root,a.id)));
+  // A violation marks the task FAILED without transition(), so plan() releases it itself.
+  const b=s.createTask(p.id,'b');s.prepare(b.id);
+  const planning=s.plan(b.id);
+  fs.writeFileSync(path.join(root,'sneaky.mjs'),'x');
+  await assert.rejects(()=>planning,/PLANNING_VIOLATION/);
+  assert.ok(!fs.existsSync(planWorktreeDir(root,b.id)));
+});
+
+test('a planning copy whose task moved on is swept when the service opens',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const t=s.createTask(p.id,'x');s.prepare(t.id);await s.plan(t.id);
+  // Leaves planning behind transition()'s back, which is the case the sweep is for.
+  s.store.updateTask(t.id,{state:'APPROVED'});
+  const orphan=createPlanWorktree(root,'no-such-task').dir;
+  const kept=s.createTask(p.id,'y');s.prepare(kept.id);await s.plan(kept.id);
+  new Service(root,{allowMock:true,silent:true});
+  assert.ok(!fs.existsSync(planWorktreeDir(root,t.id)));
+  assert.ok(!fs.existsSync(orphan));
+  assert.ok(fs.existsSync(planWorktreeDir(root,kept.id)),'a task still awaiting approval keeps its copy');
+});
+
+test('a read in the planning copy counts as a read of the checkout\'s file',()=>{
+  const events=[
+    {data:{message:{content:[{type:'tool_use',name:'Read',input:{file_path:'/wt/plan-1/src/a.mjs'}}]}}},
+    {data:{message:{content:[{type:'tool_use',name:'Read',input:{file_path:'/repo/src/b.mjs'}}]}}},
+    {data:{message:{content:[{type:'tool_use',name:'Grep',input:{path:'lib'}}]}}},
+  ];
+  assert.deepEqual([...readPaths(events,[],['/wt/plan-1','/repo'])].sort(),['lib','src/a.mjs','src/b.mjs']);
+});

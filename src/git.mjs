@@ -14,7 +14,59 @@ export function hasCommits(root){try{return !!head(root)}catch{return false}}
 export function status(root){return git(root,['status','--porcelain']).split('\n').filter(x=>x && !x.trimEnd().endsWith('.ai-code')).join('\n')}
 export function protectAiCode(root){const f=path.join(root,'.git','info','exclude');fs.mkdirSync(path.dirname(f),{recursive:true});let s=fs.existsSync(f)?fs.readFileSync(f,'utf8'):'';if(!s.split('\n').some(x=>x.trim()==='.ai-code/'))fs.appendFileSync(f,(s.endsWith('\n')||!s?'':'\n')+'.ai-code/\n')}
 export function head(root){return git(root,['rev-parse','HEAD'])}
-export function createWorktree(root,id){ensureGit(root);const base=head(root);const baseRoot=process.env.AI_CODE_WORKTREE_ROOT||path.join(path.dirname(root),`.ai-code-worktrees-${path.basename(root)}`);const dir=path.join(baseRoot,id);const branch=`ai-code/${id}`;fs.mkdirSync(path.dirname(dir),{recursive:true});if(!fs.existsSync(dir))git(root,['worktree','add','-b',branch,dir,base]);linkDeps(root,dir);return {dir,branch,base}}
+// Where every worktree cut from this repository lives, a task's and a plan's alike.
+export function worktreeRoot(root){return process.env.AI_CODE_WORKTREE_ROOT||path.join(path.dirname(root),`.ai-code-worktrees-${path.basename(root)}`)}
+export function createWorktree(root,id){ensureGit(root);const base=head(root);const dir=path.join(worktreeRoot(root),id);const branch=`ai-code/${id}`;fs.mkdirSync(path.dirname(dir),{recursive:true});if(!fs.existsSync(dir))git(root,['worktree','add','-b',branch,dir,base]);linkDeps(root,dir);return {dir,branch,base}}
+// The planner's disposable copy of the repository. It sits beside the task's own
+// worktree under a `plan-` name, detached rather than on a branch: nothing made in
+// it is ever kept, so a branch would be one more ref to clean up for no reader.
+//
+// It has to show the planner what the planner used to see, which is the live tree
+// with its uncommitted work - the plan-base gate and the read set both assume that.
+// So HEAD is checked out and the checkout's dirty and untracked files are copied
+// over it. A path that is dirty because it was deleted is deleted here too. A
+// collapsed `?? dir/` entry is skipped, because the untracked enumeration names
+// every file inside it.
+//
+// Reused rather than recreated when it already exists: a refine plans again in the
+// copy the first plan left, scratch files included. The forced checkout is what
+// brings its tracked files back to today's HEAD, so a refine still plans against
+// the tree as it is now.
+export const PLAN_WORKTREE_PREFIX='plan-';
+export function planWorktreeDir(root,id){return path.join(worktreeRoot(root),`${PLAN_WORKTREE_PREFIX}${id}`)}
+export function createPlanWorktree(root,id){
+  ensureGit(root);
+  const base=head(root);
+  const dir=planWorktreeDir(root,id);
+  fs.mkdirSync(path.dirname(dir),{recursive:true});
+  if(fs.existsSync(dir))git(dir,['checkout','--force','--quiet','--detach',base]);
+  else git(root,['worktree','add','--quiet','--detach',dir,base]);
+  for(const p of dirtyAndUntracked(root)){
+    const from=path.join(root,p);const to=path.join(dir,p);
+    let st=null;try{st=fs.lstatSync(from)}catch{}
+    if(!st){fs.rmSync(to,{recursive:true,force:true});continue}
+    if(st.isDirectory())continue;
+    fs.mkdirSync(path.dirname(to),{recursive:true});
+    fs.rmSync(to,{force:true});
+    fs.cpSync(from,to,{verbatimSymlinks:true});
+  }
+  linkDeps(root,dir);
+  return {dir,base};
+}
+// Safe to call for a task that never had one. A directory git no longer tracks is
+// removed by hand and the registration pruned, so a half-deleted copy cannot make
+// the next `worktree add` for the same task fail.
+export function removePlanWorktree(root,id){
+  const dir=planWorktreeDir(root,id);
+  if(!fs.existsSync(dir))return false;
+  try{git(root,['worktree','remove','--force',dir])}
+  catch{fs.rmSync(dir,{recursive:true,force:true});try{git(root,['worktree','prune'])}catch{}}
+  return true;
+}
+// The task ids that have a planning copy on disk, for the startup sweep.
+export function planWorktreeIds(root){
+  try{return fs.readdirSync(worktreeRoot(root)).filter((n)=>n.startsWith(PLAN_WORKTREE_PREFIX)).map((n)=>n.slice(PLAN_WORKTREE_PREFIX.length))}catch{return []}
+}
 // A worktree shares the repo's package.json but not its node_modules (gitignored).
 // Without this, every test step and every implementer that imports a dependency
 // fails on ERR_MODULE_NOT_FOUND. A symlink is instant and always in sync.

@@ -7,7 +7,7 @@ import { inspect, writeContext, readDependencies, relevantFiles, buildTaskContex
 import {
   ensureGit, gitInit, hasCommits, commitInitial, status, createWorktree, diffAgainst, diffBetween, diffPaths, statusPaths, untracked, dirtyPaths, dirtyAndUntracked, worktreeHashes, changedPaths, head, changedBetween, protectAiCode,
   currentBranch, revParse, isAncestor, mergeBase, findCommit, branches, checkedOut, mergeTree, commitTree, setBranch, commitAll, removeWorktree, commitDiff,
-  landingCommit, commitRef, git,
+  landingCommit, commitRef, git, createPlanWorktree, removePlanWorktree, planWorktreeIds, planWorktreeDir,
 } from './git.mjs';
 import { runAgent, classify, permissionMcpConfig, removeMcpConfig, DISCUSSION_OPENS } from './agents.mjs';
 import { loadPolicies, savePolicies } from './policy.mjs';
@@ -77,15 +77,27 @@ const READ_TOOLS = /^(Read|NotebookRead|Grep|Glob)$/;
 // both can carry an uncommitted change the plan silently depends on. A file the
 // planner only reasoned about from the tree listing is not caught this way, which
 // is why this is the narrowing term of the check rather than the whole of it.
+//
+// `root` may be several directories. A planner in its planning copy reports paths
+// under the copy, and one that reads the checkout by absolute path reports paths
+// under that - both are the same repository-relative file. A relative path is
+// resolved against the first root, which is the one the run's cwd was.
 export function readPaths(events, contextFiles, root) {
+  const roots = [].concat(root);
   const out = new Set();
   for (const p of [...contextFiles, ...toolPaths(events)]) {
     // Read reports an absolute path, and Grep reports both forms inside a single
     // run. The dirty set is repo-relative, so an unnormalised absolute path
     // matches nothing and the whole tool-derived half of this goes inert - which
     // is exactly what it did until a real run was replayed against it.
-    const rel = path.relative(root, path.resolve(root, p));
-    if (rel && !rel.startsWith('..')) out.add(rel);
+    const abs = path.resolve(roots[0], p);
+    for (const r of roots) {
+      const rel = path.relative(r, abs);
+      if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+        out.add(rel);
+        break;
+      }
+    }
   }
   return out;
 }
@@ -197,11 +209,14 @@ function storedDecision(task) {
 // `branch`: the task row already has a `branch` column holding the worktree's own
 // ai-code/<id>, and a UI reading the wrong one would offer the task's own branch as
 // its destination. It is null under a detached HEAD, which is a real answer.
-function recordPlanBase(store, root, task, runId, dirty) {
+//
+// `cwd` is where the run's relative paths resolve: the planning copy when there
+// was one. The head and branch are always the checkout's own.
+function recordPlanBase(store, root, task, runId, dirty, cwd = root) {
   return JSON.stringify({
     head: head(root),
     dirty,
-    seen: [...readPaths(store.listEvents(runId), contextPaths(task), root)],
+    seen: [...readPaths(store.listEvents(runId), contextPaths(task), cwd === root ? root : [cwd, root])],
     target_branch: currentBranch(root),
   });
 }
@@ -522,6 +537,23 @@ export const verificationPrompt = ({ findings, changed, test, diff }) =>
 // that the stop happens before any edit.
 export const discussionPrompt = ({ review, decision, thread, diff }) =>
   `${DISCUSSION_OPENS} A review left a finding that cannot be closed without a choice the approved plan does not settle, and the person who has to make that choice has written below. Answer their latest comment and nothing else: say what each option would do to the work and what it costs, and say which one you would take and why. Ground every claim in the diff or in the review. Do not modify files. No tool that writes a file exists in this session. Your answer is the \`review\` field of your structured output. Answer DECIDE again, with the revised question, options and recommendation in \`decision\`, only if their comment changes the options - then they are choosing between the new ones. Answer PASS if their comment settles the question, and they approve the repair that follows. Nothing you say here moves the task, and no repair starts until the person approves one.\n\nREVIEW:\n${review}\n\nOPEN QUESTION:\n${decision.question}\n\nOPTIONS:\n${(decision.options || []).map((o, i) => `${i + 1}. ${o.label}${o.detail ? ` - ${o.detail}` : ''}`).join('\n') || 'None recorded.'}\n\nDISCUSSION SO FAR, oldest first:\n${(thread || []).map((m) => `${m.from === 'user' ? 'PERSON' : 'REVIEWER'}${m.verdict ? ` (${m.verdict})` : ''}: ${m.text}`).join('\n\n') || 'Nothing yet.'}\n\nDIFF:\n${diff}`;
+
+// The states in which a task's planning copy is still worth having. PLANNING is
+// the run itself, and a reject or a failed run that has not been marked FAILED
+// plans again from here; AWAITING_APPROVAL is where a refine plans again. Every
+// other state is past planning, or FAILED - whose only way back, replan(), makes a
+// new plan in a fresh copy - so the copy is removed on the way into it.
+const PLAN_TREE_STATES = new Set(['CONTEXT_READY', 'PLANNING', 'AWAITING_APPROVAL']);
+
+// The planner prompt when the run has its own disposable copy. PLANNER_PROMPT's
+// file-writing clause would be false here, since writing a scratch file is
+// allowed, so this is a second prompt rather than a clause toggled inside one.
+// What it keeps is everything that is about the plan: the "already implemented"
+// way out and the refusal to invent work are there for the spiral, which a
+// shell makes no less likely. Where the copy is and what may be touched outside it
+// is the system prompt's job (planSandboxNotice), because a refine needs it too.
+export const PLANNER_SANDBOX_PROMPT =
+  'Produce ONLY a concrete implementation plan. Do not implement the task: commands, queries and scratch files are for gathering evidence, and none of them is kept. The plan is the text of your reply. Identify exact files, intended changes, tests, and verification commands, and where something you ran or queried settled a question, say what it showed. Do not spend the run exploring what the plan does not depend on. If the task is already fully implemented in the current codebase, say so instead of planning work: name the files that already satisfy each requirement and say why no further changes are needed. Do not invent work that does not exist.';
 
 export const PLANNER_PROMPT =
   'Produce ONLY a concrete implementation plan. Do not modify source files, create files, run mutating commands, commit, or execute implementation. No tool that writes a file exists in this session - not to the repository, not to a scratch directory, not to a plans folder - and searching for one wastes a turn. The plan is the text of your reply. Identify exact files, intended changes, tests, and verification commands. The harness will reject source changes. If the task is already fully implemented in the current codebase, say so instead of planning work: name the files that already satisfy each requirement and say why no further changes are needed. Do not invent work that does not exist.';
@@ -1090,6 +1122,11 @@ export class Service {
     // command does this, which is what makes the recovery reachable at all - and
     // is why the store's own reap is lease-aware rather than unconditional.
     this.recoverPlans();
+    // A planning copy outlives its process if the process dies mid-plan, or if the
+    // task left planning some way that is not transition() - so the copies whose
+    // task no longer needs one are removed here, after the recovery above has
+    // moved every plan it can.
+    this.sweepPlanTrees();
     // And the same repair for the new thing that can be abandoned. A permission
     // request left pending by a process that died is a session the dashboard will
     // say is blocked on a question nobody can answer, so it is swept to `timeout`
@@ -1108,7 +1145,51 @@ export class Service {
     // REVIEWING, REPAIRING - deliberately do not, or a cancel issued while the
     // test command was running would be swallowed by the step that follows it.
     if (to === 'APPROVED' || to === 'PLANNING' || to === 'IMPLEMENTING') this.store.setTaskCancel(id, false);
-    return this.store.updateTask(id, { state: to });
+    const updated = this.store.updateTask(id, { state: to });
+    if (!PLAN_TREE_STATES.has(to)) this.#releasePlanTree(updated);
+    return updated;
+  }
+
+  // The planning copy for this task, or the checkout itself when one cannot be
+  // made - a repository with no commit has no HEAD to cut it from. The fallback is
+  // the planner as it always was: in the checkout, read-only, with no shell.
+  #planTree(t, p) {
+    try {
+      const { dir } = createPlanWorktree(p.path, t.id);
+      return { cwd: dir, sandbox: { checkout: p.path } };
+    } catch (e) {
+      if (!this.options.silent) process.stderr.write(`  [planner] no planning copy (${e.message.split('\n')[0]}); planning read-only in the checkout\n`);
+      return { cwd: p.path, sandbox: null };
+    }
+  }
+
+  // Removes the task's planning copy unless its state still has a use for it.
+  // Never throws: a copy that will not go is litter the next sweep retries, and a
+  // transition that failed over it would be a task stuck for a directory.
+  #releasePlanTree(t) {
+    if (!t || PLAN_TREE_STATES.has(t.state)) return;
+    try {
+      removePlanWorktree(this.project(t.project_id).path, t.id);
+    } catch {
+      // Left for sweepPlanTrees.
+    }
+  }
+
+  // Every project's leftover planning copies whose task is gone or past planning.
+  sweepPlanTrees() {
+    const removed = [];
+    for (const p of this.store.listProjects()) {
+      for (const id of planWorktreeIds(p.path)) {
+        const t = this.store.getTask(id);
+        if (t && PLAN_TREE_STATES.has(t.state)) continue;
+        try {
+          if (removePlanWorktree(p.path, id)) removed.push(id);
+        } catch {
+          // Retried on the next open.
+        }
+      }
+    }
+    return removed;
   }
 
   project(id) {
@@ -1728,23 +1809,34 @@ export class Service {
     // The measurement is widened with the per-file untracked enumeration, because
     // porcelain collapses an untracked directory to one entry: a file added inside
     // one reads as no change at all.
+    //
+    // The planner runs in its own copy of the repository (#planTree), with a shell,
+    // so this check is now about the checkout it was told to leave alone: a planner
+    // that reaches out of its copy is caught the same way one that wrote in place
+    // was. The copy is released in the `finally` once the task's state says it has
+    // no further use - FAILED here; AWAITING_APPROVAL keeps it for a refine.
     const before = new Set(dirtyAndUntracked(p.path));
+    const tree = this.#planTree(t, p);
     let result;
     try {
-      result = await this.runRole(t, 'planner', PLANNER_PROMPT, p.path);
-    } catch (e) {
-      // A budget failure is a property of the task rather than of the weather:
-      // planning it again unchanged would spiral identically. FAILED is the state
-      // that says the task needs re-scoping, and the only one replan() accepts.
-      if (BUDGET_CODES.has(e.code)) this.store.updateTask(id, { state: 'FAILED' });
-      throw e;
-    }
-    const written = dirtyAndUntracked(p.path).filter((f) => !before.has(f));
-    if (written.length) {
-      this.store.updateTask(id, { state: 'FAILED' });
-      // The paths, because "planner changed repository state" with no file named
-      // sends the reader to the run log to find out what it is being accused of.
-      throw new Error(`PLANNING_VIOLATION: planner changed repository state (${written.join(', ')})`);
+      try {
+        result = await this.runRole(t, 'planner', tree.sandbox ? PLANNER_SANDBOX_PROMPT : PLANNER_PROMPT, tree.cwd, [], { sandbox: tree.sandbox });
+      } catch (e) {
+        // A budget failure is a property of the task rather than of the weather:
+        // planning it again unchanged would spiral identically. FAILED is the state
+        // that says the task needs re-scoping, and the only one replan() accepts.
+        if (BUDGET_CODES.has(e.code)) this.store.updateTask(id, { state: 'FAILED' });
+        throw e;
+      }
+      const written = dirtyAndUntracked(p.path).filter((f) => !before.has(f));
+      if (written.length) {
+        this.store.updateTask(id, { state: 'FAILED' });
+        // The paths, because "planner changed repository state" with no file named
+        // sends the reader to the run log to find out what it is being accused of.
+        throw new Error(`PLANNING_VIOLATION: planner changed repository state (${written.join(', ')})`);
+      }
+    } finally {
+      this.#releasePlanTree(this.store.getTask(id));
     }
     // The baseline execution is gated on, recorded while it is still true. `before`
     // is the dirty set as the planner found it; the read set comes from the run
@@ -1755,7 +1847,7 @@ export class Service {
     // recordPlanBase owns the fourth - and the baseline is computed from `t`, read
     // before the plan was written, so the order between them does not matter.
     this.#writePlan(id, this.planFromRun(result.runId), null);
-    this.store.updateTask(id, { plan_base: recordPlanBase(this.store, p.path, t, result.runId, [...before]) });
+    this.store.updateTask(id, { plan_base: recordPlanBase(this.store, p.path, t, result.runId, [...before], tree.cwd) });
     return this.transition(id, 'AWAITING_APPROVAL');
   }
 
@@ -1850,7 +1942,7 @@ export class Service {
         // diff is most worth having, since the run that produced it left no record of
         // what it was changing.
         this.#writePlan(task_id, this.planFromRun(run_id), task.plan);
-        this.store.updateTask(task_id, { plan_base: recordPlanBase(this.store, project.path, task, run_id, dirtyAndUntracked(project.path)) });
+        this.store.updateTask(task_id, { plan_base: recordPlanBase(this.store, project.path, task, run_id, dirtyAndUntracked(project.path), planWorktreeDir(project.path, task_id)) });
         this.transition(task_id, 'AWAITING_APPROVAL');
         recovered.push({ taskId: task_id, runId: run_id });
       } catch {
@@ -1936,18 +2028,28 @@ export class Service {
     // Recorded before the run for the same reason plan() records its own before
     // its run: this is what the tree looked like to the planner.
     const before = dirtyAndUntracked(p.path);
+    // The copy the plan was made in, brought up to today's HEAD - or a new one, if
+    // it was swept. The task stays in AWAITING_APPROVAL either way, so it is kept.
+    const tree = this.#planTree(t, p);
     const result = await this.runRole(
       t,
       'planner',
       `Revise this plan based on feedback. Keep what works, change what the user asked for.\n\nFEEDBACK:\n${feedback}\n\nCURRENT PLAN:\n${t.plan || '(no plan)'}`,
-      p.path
+      tree.cwd,
+      [],
+      { sandbox: tree.sandbox }
     );
+    // Held to the same rule as plan(): the checkout is not the planner's to change.
+    // The task stays where it is, because the plan it holds is the one the person
+    // was already reviewing and nothing in it came from this run.
+    const written = dirtyAndUntracked(p.path).filter((f) => !before.includes(f));
+    if (written.length) throw new Error(`PLANNING_VIOLATION: planner changed repository state (${written.join(', ')})`);
     // A revised plan is a different plan, read against the tree as it is now, so
     // it gets its own baseline. Left at the previous one, the dashboard's Refine
     // button would quietly re-gate the new plan against the old plan's files.
     const plan = this.finalText(result.runId) || t.plan;
     this.#writePlan(id, plan, t.plan);
-    this.store.updateTask(id, { plan_base: recordPlanBase(this.store, p.path, t, result.runId, before) });
+    this.store.updateTask(id, { plan_base: recordPlanBase(this.store, p.path, t, result.runId, before, tree.cwd) });
     return this.task(id);
   }
 
@@ -4475,6 +4577,7 @@ export class Service {
             effort: policy.effort || p.config?.effort || undefined,
             signal: controller.signal,
             resumeSession,
+            ...(role === 'planner' && options.sandbox ? { sandbox: options.sandbox } : {}),
             ...(gate ? { permissionTool: gate.permissionTool, mcpConfig: gate.configPath, env: gateEnv } : {}),
           })) {
             this.store.addEvent({ runId: run.id, type: e.type, data: e.data });
