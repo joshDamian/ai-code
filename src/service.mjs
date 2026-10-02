@@ -919,6 +919,33 @@ const CHAT_HISTORY_CHARS = 24000;
 // matters most.
 const SESSION_HISTORY_CHARS = 24000;
 
+// Files a person attaches to a session message. Held in this server's own data
+// directory rather than the checkout, so an attachment is never a changed path in
+// the tree the nudge reads, never something a commit can sweep up, and never in the
+// way of a `git status`. The agent is handed the directory with `--add-dir`, which
+// is what lets it read them without a permission prompt for each one.
+//
+// The limits are a request body's, not a policy: the whole message arrives as one
+// JSON body with the files inlined, and a body that size is already a slow phone.
+export const ATTACHMENT_LIMITS = { files: 10, bytes: 10 * 1024 * 1024, total: 25 * 1024 * 1024 };
+
+// A name that is safe as a single path segment and still reads as what was attached.
+// Basename first, so a name carrying a directory cannot climb out of the folder.
+export function attachmentName(name, index = 0) {
+  const base = path.basename(String(name || '')).replace(/[^\w.\- ]+/g, '_').replace(/^\.+/, '').trim().slice(0, 120);
+  return base || `attachment-${index + 1}`;
+}
+
+// The instruction as the agent reads it: the person's words, then where each file
+// is. Absolute paths, because the agent's working directory is the checkout and the
+// files are not in it.
+export function withAttachments(text, attachments = []) {
+  if (!attachments?.length) return text;
+  const list = attachments.map((a) => `- ${a.path} (${a.type || 'file'}, ${a.name})`).join('\n');
+  const head = text ? `${text}\n\n` : '';
+  return `${head}ATTACHED FILES - the person attached these to this message. Read each one with the Read tool (it shows images too) before answering:\n${list}`;
+}
+
 // Midnight today, as an instant. The session daily cap is spent against it, and it
 // is local rather than UTC because "today" is what a person means when they set a
 // daily budget - a cap that reset at 5pm would be a cap nobody could reason about.
@@ -2368,16 +2395,70 @@ export class Service {
     if (!s?.pending_run_id) return null;
     const event = this.store.listEvents(s.pending_run_id).filter((e) => e.type === 'instruction').pop();
     const text = event?.data?.text || '';
-    return text ? { runId: s.pending_run_id, text } : null;
+    return text ? { runId: s.pending_run_id, text, attachments: event?.data?.attachments || [] } : null;
+  }
+
+  // Where a session's attachments live, one folder per turn inside it.
+  sessionAttachmentsDir(sessionId) {
+    return path.join(this.store.dir, 'attachments', attachmentName(sessionId));
+  }
+
+  // The bytes of one attachment, for the transcript to show. Resolved against the
+  // turn's folder and checked to still be inside it, so a crafted name cannot read
+  // anything else this server can.
+  sessionAttachment(sessionId, runId, name) {
+    this.sessionById(sessionId);
+    const dir = path.join(this.sessionAttachmentsDir(sessionId), attachmentName(runId));
+    const file = path.join(dir, attachmentName(name));
+    if (path.dirname(file) !== dir || !fs.existsSync(file)) throw Object.assign(new Error('Attachment not found'), { code: 'NOT_FOUND' });
+    const event = this.store.listEvents(runId).filter((e) => e.type === 'instruction').pop();
+    const meta = (event?.data?.attachments || []).find((a) => a.name === path.basename(file));
+    return { path: file, type: meta?.type || 'application/octet-stream', name: path.basename(file) };
+  }
+
+  // Writes the files of one message to disk and returns what the instruction event
+  // records about them. Validated in full before the first write, so a message that
+  // is refused leaves nothing behind.
+  #saveAttachments(sessionId, runId, attachments) {
+    if (!attachments?.length) return [];
+    if (!Array.isArray(attachments)) throw new Error('attachments must be a list');
+    if (attachments.length > ATTACHMENT_LIMITS.files) throw new Error(`At most ${ATTACHMENT_LIMITS.files} files can be attached to one message`);
+    const used = new Set();
+    let total = 0;
+    const files = attachments.map((a, i) => {
+      const data = Buffer.from(String(a?.data || '').replace(/^data:[^,]*,/, ''), 'base64');
+      if (!data.length) throw new Error(`Attachment ${a?.name || i + 1} is empty`);
+      if (data.length > ATTACHMENT_LIMITS.bytes) throw new Error(`${a?.name || 'An attachment'} is larger than ${ATTACHMENT_LIMITS.bytes / 1024 / 1024} MB`);
+      total += data.length;
+      let name = attachmentName(a?.name, i);
+      // Two files with the same name in one message keep both.
+      for (let n = 2; used.has(name); n++) {
+        const ext = path.extname(name);
+        name = `${path.basename(attachmentName(a?.name, i), ext)}-${n}${ext}`;
+      }
+      used.add(name);
+      return { name, type: String(a?.type || '').slice(0, 100) || 'application/octet-stream', data };
+    });
+    if (total > ATTACHMENT_LIMITS.total) throw new Error(`Attachments total more than ${ATTACHMENT_LIMITS.total / 1024 / 1024} MB`);
+    const dir = path.join(this.sessionAttachmentsDir(sessionId), runId);
+    fs.mkdirSync(dir, { recursive: true });
+    return files.map((f) => {
+      const file = path.join(dir, f.name);
+      fs.writeFileSync(file, f.data);
+      return { name: f.name, type: f.type, size: f.data.length, path: file };
+    });
   }
 
   // Writes the instruction down before anything runs, and marks the session busy in
   // the same call. Cloned from askChat for the one reason that method gives: the
   // instruction carries the id of the run that will answer it, so "still waiting"
   // is answered from the database rather than from one process's memory.
-  askSession(sessionId, text) {
+  askSession(sessionId, text, attachments = []) {
     const s = this.sessionById(sessionId);
-    const instruction = String(text || '').trim();
+    const hasFiles = Array.isArray(attachments) && attachments.length > 0;
+    // Files alone are an instruction too: "what is wrong here" is often a screenshot
+    // and nothing else. The text stands in so the turn still has words to show.
+    const instruction = String(text || '').trim() || (hasFiles ? 'Take a look at the attached files.' : '');
     if (!instruction) throw new Error('A session needs an instruction');
     if (s.status === 'archived') throw new Error('This session is archived; restore it before sending an instruction');
     if (s.status === 'stopped') throw new Error('This session is stopped; resume it before sending an instruction');
@@ -2385,9 +2466,10 @@ export class Service {
     // history and both appending to it is a duplicated action against the user's
     // checkout, which is worse here than a duplicated answer.
     if (s.pending_run_id) throw new Error('This session is already working on an instruction');
-    if (s.name === DEFAULT_SESSION_NAME) this.store.updateSession(sessionId, { name: generateTitle(instruction) });
     const runId = this.store.id();
-    this.store.addEvent({ runId, type: 'instruction', data: { text: instruction } });
+    const saved = this.#saveAttachments(sessionId, runId, hasFiles ? attachments : []);
+    this.store.addEvent({ runId, type: 'instruction', data: saved.length ? { text: instruction, attachments: saved } : { text: instruction } });
+    if (s.name === DEFAULT_SESSION_NAME) this.store.updateSession(sessionId, { name: generateTitle(instruction) });
     // The cancel of a previous turn is spent by the time a new instruction is
     // accepted; left set it would abort this one the moment it started.
     this.store.setSessionCancel(sessionId, false);
@@ -2458,7 +2540,7 @@ export class Service {
             id: null,
             project_id: s.project_id,
             title: s.name,
-            description: pending.text,
+            description: withAttachments(pending.text, pending.attachments),
             plan: editing ? SESSION_NO_PLAN : 'No plan: this is a read-only turn of a conversation, not a task. Nothing here has been approved for implementation.',
           },
           editing ? 'session' : 'chat',
@@ -2476,6 +2558,10 @@ export class Service {
             // a task's planning model: routing still skips it when it is unhealthy.
             preferredModelId: s.model_id || null,
             appTools: true,
+            // Read access to this session's attachments, which sit outside the
+            // checkout. Every turn gets it, so a file attached earlier can still be
+            // read when a later message refers back to it.
+            addDirs: fs.existsSync(this.sessionAttachmentsDir(sessionId)) ? [this.sessionAttachmentsDir(sessionId)] : [],
             permission: {
               endpoint: this.permissionEndpoint,
               timeoutMs: (Number(policy.permissionTimeoutMs) || 120) * 1000,
@@ -2555,7 +2641,7 @@ export class Service {
     const lines = [];
     for (const r of prior) {
       const instruction = this.store.listEvents(r.id).filter((e) => e.type === 'instruction').pop();
-      if (instruction?.data?.text) lines.push(`USER: ${instruction.data.text}`);
+      if (instruction?.data?.text) lines.push(`USER: ${withAttachments(instruction.data.text, instruction.data.attachments)}`);
       const answer = (this.finalText(r.id) || '').trim();
       if (answer) lines.push(`SESSION: ${answer}`);
     }
@@ -2593,6 +2679,9 @@ export class Service {
         // transcript can mark where the conversation changed mode.
         role: run.role || null,
         instruction: instruction?.data?.text || '',
+        // Name, type and size only: the path is this server's, and the transcript
+        // fetches a file by its turn and name.
+        attachments: (instruction?.data?.attachments || []).map(({ name, type, size }) => ({ name, type, size })),
         answer: run.status === 'succeeded' ? (this.finalText(run.id) || '').trim() : '',
         steps: markRefused(
           sessionSteps(events),
@@ -4706,6 +4795,7 @@ export class Service {
             ...(role === 'planner' && options.sandbox ? { sandbox: options.sandbox } : {}),
             ...(gate ? { permissionTool: gate.permissionTool, mcpConfig: gate.configPath, env: gateEnv } : {}),
             ...(app ? { appMcp: app } : {}),
+            ...(options.addDirs?.length ? { addDirs: options.addDirs } : {}),
           })) {
             this.store.addEvent({ runId: run.id, type: e.type, data: e.data });
             noteWait(e);

@@ -210,7 +210,11 @@ export const api = {
   stopSession: (id) => request(`/api/sessions/${id}/cancel`, { method: 'POST' }),
   resumeSession: (id) => request(`/api/sessions/${id}/resume`, { method: 'POST' }),
   dismissSessionNudge: (id) => request(`/api/sessions/${id}/nudge`, { method: 'POST' }),
-  sendSessionMessage: (id, message) => request(`/api/sessions/${id}/messages`, { method: 'POST', body: { message } }),
+  // `attachments` are `{name, type, data}` with `data` a base64 data URL, inlined in
+  // the one request so a message and its files arrive - or are refused - together.
+  sendSessionMessage: (id, message, attachments = []) =>
+    request(`/api/sessions/${id}/messages`, { method: 'POST', body: attachments.length ? { message, attachments } : { message } }),
+  sessionAttachmentUrl: (id, runId, name) => `/api/sessions/${encodeURIComponent(id)}/attachments/${encodeURIComponent(runId)}/${encodeURIComponent(name)}`,
   draftSessionTask: (id) => request(`/api/sessions/${id}/draft-task`, { method: 'POST' }),
   // `allow` is the only action that grants; the server reads every other word as a
   // denial, so this is a verb and not a boolean.

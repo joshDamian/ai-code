@@ -1094,6 +1094,28 @@ const server = http.createServer(async (req, res) => {
       return json(res, svc.createSession(b.projectId, b.name, { providerId: b.providerId, modelId: b.modelId, ...(b.mode ? { mode: b.mode } : {}) }), 201);
     }
 
+    // A turn's attached file, for the transcript to show: the session, the turn and
+    // the file's name. Its own pattern, because it is the one session route with two
+    // segments after the verb.
+    const attachment = u.pathname.match(/^\/api\/sessions\/([^/]+)\/attachments\/([^/]+)\/([^/]+)$/);
+    if (attachment && req.method === 'GET') {
+      let file;
+      try {
+        file = svc.sessionAttachment(attachment[1], decodeURIComponent(attachment[2]), decodeURIComponent(attachment[3]));
+      } catch (e) {
+        return json(res, { error: e.message }, 404);
+      }
+      res.writeHead(200, {
+        'content-type': file.type,
+        'cache-control': 'private, max-age=86400',
+        'x-content-type-options': 'nosniff',
+        // Shown inline only when it is an image; anything else downloads, so an
+        // attached HTML or SVG file is never rendered on this origin.
+        'content-disposition': `${/^image\/(png|jpe?g|gif|webp)$/.test(file.type) ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+      });
+      return fs.createReadStream(file.path).pipe(res);
+    }
+
     const session = u.pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(messages|stream|archive|cancel|resume|permissions|draft-task|drafts|nudge)(?:\/([^/]+))?)?$/);
     if (session) {
       const id = session[1];
@@ -1154,7 +1176,8 @@ const server = http.createServer(async (req, res) => {
       if (what === 'messages' && req.method === 'POST') {
         const b = await body(req);
         const text = String(b.message || '').trim();
-        if (!text) return json(res, { error: 'message is required' }, 400);
+        const attachments = Array.isArray(b.attachments) ? b.attachments : [];
+        if (!text && !attachments.length) return json(res, { error: 'message is required' }, 400);
         // The same two checks the chat route makes, in the same order and for the
         // same reason: the set catches the run this process is driving, the job row
         // catches one another process queued, and both are read before the write.
@@ -1163,7 +1186,7 @@ const server = http.createServer(async (req, res) => {
         }
         let asked;
         try {
-          asked = svc.askSession(id, text);
+          asked = svc.askSession(id, text, attachments);
         } catch (e) {
           return json(res, { error: e.message }, 400);
         }

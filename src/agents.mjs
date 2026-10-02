@@ -354,6 +354,10 @@ export function claudeArgs(input) {
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
   if (input.model) args.push('--model', input.model);
   if (input.effort) args.push('--effort', input.effort);
+  // Extra directories the agent may read without asking - a session's attachments,
+  // which live in this server's data directory rather than the checkout. One flag
+  // per directory, so the variadic option cannot swallow the flag after it.
+  for (const dir of input.addDirs || []) args.push('--add-dir', dir);
   // The role list is an allowlist of read-only roles and the branch below is what
   // makes it one: every role not named here lands on `--dangerously-skip-permissions`.
   // So a new role added to the service is a role with write access until it is

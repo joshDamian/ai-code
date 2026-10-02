@@ -6939,3 +6939,45 @@ test('diffLanguage maps a path to a highlight.js language, and nothing it would 
   assert.equal(diffLanguage('notes/.env'),null);
   assert.equal(diffLanguage('LICENSE'),null);
 });
+
+// Attachments on a session message. The files live in the server's data directory,
+// not the checkout, so they are never changed paths in the tree the nudge reads; the
+// agent is pointed at them by absolute path and given the folder with --add-dir.
+test('a session message carries attached files to the agent without touching the checkout',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const png=Buffer.from('89504e470d0a1a0a0000','hex');
+  const c=s.createSession(p.id,'With files');
+  const asked=s.askSession(c.id,'',[{name:'../../shot.png',type:'image/png',data:`data:image/png;base64,${png.toString('base64')}`},{name:'notes.txt',type:'text/plain',data:Buffer.from('hello').toString('base64')}]);
+  const event=s.store.listEvents(asked.pending_run_id).find((e)=>e.type==='instruction');
+  assert.equal(event.data.text,'Take a look at the attached files.','files alone are an instruction');
+  assert.deepEqual(event.data.attachments.map((a)=>a.name),['shot.png','notes.txt'],'a name cannot climb out of its folder');
+  const dir=s.sessionAttachmentsDir(c.id);
+  for(const a of event.data.attachments){assert.ok(a.path.startsWith(dir+path.sep));assert.ok(fs.existsSync(a.path))}
+  assert.deepEqual(fs.readFileSync(event.data.attachments[0].path),png,'the bytes are the ones sent');
+  assert.equal(execFileSync('git',['status','--porcelain','--untracked-files=all'],{cwd:root}).toString().split('\n').filter((l)=>l&&!l.includes('.ai-code/')).length,0,'the checkout is untouched');
+  await s.sessionTurn(c.id);
+  const [turn]=s.sessionTurns(c.id);
+  assert.deepEqual(turn.attachments,[{name:'shot.png',type:'image/png',size:png.length},{name:'notes.txt',type:'text/plain',size:5}],'the transcript lists them without their server path');
+  assert.equal(s.sessionAttachment(c.id,turn.run_id,'shot.png').type,'image/png');
+  assert.throws(()=>s.sessionAttachment(c.id,turn.run_id,'../../ai-code.db'),/not found/);
+  assert.throws(()=>s.sessionAttachment(c.id,'..','ai-code.db'),/not found/);
+});
+
+test('attachments over the limits are refused before anything is written',()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const c=s.createSession(p.id,'Limits');
+  const many=Array.from({length:11},(_,i)=>({name:`f${i}.txt`,type:'text/plain',data:Buffer.from('x').toString('base64')}));
+  assert.throws(()=>s.askSession(c.id,'look',many),/At most 10/);
+  assert.throws(()=>s.askSession(c.id,'look',[{name:'empty.txt',data:''}]),/empty/);
+  assert.equal(s.store.getSession(c.id).pending_run_id,null,'a refused message starts no turn');
+  assert.equal(fs.existsSync(s.sessionAttachmentsDir(c.id)),false,'and leaves no files behind');
+});
+
+test('claudeArgs grants each extra directory with its own --add-dir',()=>{
+  const a=claudeArgs({role:'session',prompt:'p',permissionTool:'mcp__gate__ask',mcpConfig:'/tmp/c.json',addDirs:['/data/a','/data/b']});
+  assert.deepEqual(a.filter((x,i)=>a[i-1]==='--add-dir'),['/data/a','/data/b']);
+  assert.ok(a.indexOf('--add-dir')<a.indexOf('--'),'before the prompt separator');
+  assert.equal(claudeArgs({role:'chat',prompt:'p'}).includes('--add-dir'),false);
+});

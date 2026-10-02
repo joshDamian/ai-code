@@ -24,6 +24,7 @@
 // for the same reason: it is where the thumb is.
 import { html, useState, useEffect, useRef, useCallback, useMemo, formatCost, formatDuration, diffLines, unifiedDiff, sessionSteps, shortDir, gitImpact, recall, remember } from '../lib.mjs';
 import { api, sessionStreamUrl } from '../api.mjs';
+import { withToken } from '../auth.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { Markdown } from '../components/markdown.mjs';
@@ -61,6 +62,173 @@ const IN_FLIGHT = new Set(['queued', 'running']);
 
 // Where the composer stops growing and starts scrolling instead.
 const COMPOSER_MAX_PX = 200;
+
+// What one message may carry, matching the server's ATTACHMENT_LIMITS so a file
+// that would be refused is refused here, before it is read into memory and sent.
+const ATTACH = { files: 10, bytes: 10 * 1024 * 1024, total: 25 * 1024 * 1024 };
+const isImage = (type) => /^image\/(png|jpe?g|gif|webp)$/.test(type || '');
+const formatBytes = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
+
+const readAsDataUrl = (file) =>
+  new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error || new Error(`Could not read ${file.name}`));
+    r.readAsDataURL(file);
+  });
+
+// The files waiting to go with the next message. Read into data URLs as they are
+// added, so the preview and the request body are the same bytes, and checked against
+// the limits as they arrive rather than when the person presses send.
+function useAttachments() {
+  const [files, setFiles] = useState([]);
+  const filesRef = useRef(files);
+  filesRef.current = files;
+  const add = useCallback(async (list) => {
+    const incoming = [...(list || [])].filter((f) => f && f.size !== undefined);
+    if (!incoming.length) return;
+    const current = filesRef.current;
+    let total = current.reduce((n, f) => n + f.size, 0);
+    const accepted = [];
+    for (const f of incoming) {
+      if (current.length + accepted.length >= ATTACH.files) {
+        showToast(`At most ${ATTACH.files} files per message`, 'error');
+        break;
+      }
+      if (!f.size) {
+        showToast(`${f.name || 'That file'} is empty`, 'error');
+        continue;
+      }
+      if (f.size > ATTACH.bytes) {
+        showToast(`${f.name} is larger than ${formatBytes(ATTACH.bytes)}`, 'error');
+        continue;
+      }
+      if (total + f.size > ATTACH.total) {
+        showToast(`Attachments can total at most ${formatBytes(ATTACH.total)}`, 'error');
+        break;
+      }
+      total += f.size;
+      accepted.push(f);
+    }
+    try {
+      const read = await Promise.all(
+        accepted.map(async (f, i) => ({
+          key: `${Date.now()}-${i}-${f.name}`,
+          // A pasted screenshot arrives as "image.png" every time; the time keeps two apart.
+          name: f.name && f.name !== 'image.png' ? f.name : `pasted-${new Date().toISOString().replace(/[:.]/g, '-')}${i ? `-${i}` : ''}.${(f.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}`,
+          type: f.type || 'application/octet-stream',
+          size: f.size,
+          data: await readAsDataUrl(f),
+        }))
+      );
+      setFiles((prev) => [...prev, ...read].slice(0, ATTACH.files));
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+  }, []);
+  const remove = useCallback((key) => setFiles((prev) => prev.filter((f) => f.key !== key)), []);
+  const clear = useCallback(() => setFiles([]), []);
+  // Images pasted into the box become attachments; text pastes as text.
+  const onPaste = useCallback(
+    (e) => {
+      const pasted = [...(e.clipboardData?.files || [])];
+      if (!pasted.length) return;
+      e.preventDefault();
+      add(pasted);
+    },
+    [add]
+  );
+  return { files, add, remove, clear, onPaste };
+}
+
+// The paperclip and the hidden file input it opens.
+function AttachButton({ onFiles, disabled }) {
+  const ref = useRef(null);
+  return html`
+    <button class="ss-attach" type="button" aria-label="Attach files" title="Attach files or images" disabled=${disabled} onClick=${() => ref.current?.click()}>
+      ${icon(ICONS.clip)}
+    </button>
+    <input
+      ref=${ref}
+      type="file"
+      multiple
+      hidden
+      onChange=${(e) => {
+        onFiles(e.target.files);
+        e.target.value = '';
+      }}
+    />
+  `;
+}
+
+// The files waiting to be sent, above the box, each removable.
+function AttachTray({ files, onRemove, disabled }) {
+  if (!files.length) return null;
+  return html`
+    <div class="ss-attach-tray">
+      ${files.map(
+        (f) => html`
+          <div class="ss-chip" key=${f.key} title=${`${f.name} · ${formatBytes(f.size)}`}>
+            ${isImage(f.type) ? html`<img src=${f.data} alt="" />` : html`<span class="ss-chip-ext">${(f.name.split('.').pop() || 'file').slice(0, 4)}</span>`}
+            <span class="ss-chip-name">${f.name}</span>
+            <button type="button" aria-label=${`Remove ${f.name}`} disabled=${disabled} onClick=${() => onRemove(f.key)}>${icon(ICONS.cross)}</button>
+          </div>
+        `
+      )}
+    </div>
+  `;
+}
+
+// The files a sent message carried, under its text. A stored turn links each one to
+// the server's copy; the turn just sent shows the previews it was sent with.
+function SentFiles({ files, sessionId, runId }) {
+  if (!files?.length) return null;
+  return html`
+    <div class="ss-said-files">
+      ${files.map((f) => {
+        const src = f.data || (sessionId && runId ? withToken(api.sessionAttachmentUrl(sessionId, runId, f.name)) : null);
+        return isImage(f.type) && src
+          ? html`<a key=${f.name} href=${src} target="_blank" rel="noopener" title=${f.name}><img src=${src} alt=${f.name} loading="lazy" /></a>`
+          : html`<a key=${f.name} class="ss-chip" href=${src || undefined} target="_blank" rel="noopener" title=${`${f.name}${f.size ? ` · ${formatBytes(f.size)}` : ''}`}>
+              <span class="ss-chip-ext">${(f.name.split('.').pop() || 'file').slice(0, 4)}</span><span class="ss-chip-name">${f.name}</span>
+            </a>`;
+      })}
+    </div>
+  `;
+}
+
+// The whole composer accepts a dropped file, and says so while one is over it.
+function useDropTarget(add, disabled) {
+  const [over, setOver] = useState(false);
+  const depth = useRef(0);
+  const has = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  return {
+    over,
+    props: {
+      onDragEnter: (e) => {
+        if (disabled || !has(e)) return;
+        e.preventDefault();
+        depth.current++;
+        setOver(true);
+      },
+      onDragOver: (e) => {
+        if (disabled || !has(e)) return;
+        e.preventDefault();
+      },
+      onDragLeave: () => {
+        depth.current = Math.max(0, depth.current - 1);
+        if (!depth.current) setOver(false);
+      },
+      onDrop: (e) => {
+        if (disabled || !has(e)) return;
+        e.preventDefault();
+        depth.current = 0;
+        setOver(false);
+        add(e.dataTransfer.files);
+      },
+    },
+  };
+}
 
 // How much of a file's new contents the approval shows. Enough to see what the edit
 // does, short enough that the Allow button does not move off the screen - which is
@@ -109,6 +277,7 @@ const ICONS = {
   clock: html`<circle cx="8" cy="8" r="5.5" /><path d="M8 5v3l2 1.5" />`,
   task: html`<rect x="2.5" y="2.5" width="11" height="11" rx="2" /><path d="m5.5 8 1.8 1.8L10.5 6" />`,
   panel: html`<rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M10 3v10" />`,
+  clip: html`<path d="M13 7.5 8.2 12.3a3 3 0 0 1-4.3-4.2l5-5a2 2 0 0 1 2.9 2.8l-5 5a1 1 0 0 1-1.4-1.4l4.6-4.6" />`,
 };
 
 // What the person is being asked to approve, in the words they need to decide it.
@@ -443,7 +612,7 @@ function EventLog({ store }) {
   return html`<${EventStream} events=${events} />`;
 }
 
-function Turn({ t, live, root, children }) {
+function Turn({ t, live, root, sessionId, children }) {
   const [open, setOpen] = useState(false);
   // A run row that is still running is not a failure. The stream reports the turn
   // settled a moment before the re-read transcript arrives, and in that gap the last
@@ -458,6 +627,7 @@ function Turn({ t, live, root, children }) {
   return html`
     <div class="ss-turn">
       ${t.instruction ? html`<div class="ss-said">${t.instruction}</div>` : null}
+      <${SentFiles} files=${t.attachments} sessionId=${sessionId} runId=${t.run_id} />
       ${live
         ? children
         : html`
@@ -735,19 +905,22 @@ function NewSession({ projects, projectsLoaded, projectId, onProject, models, on
   const [model, setModel] = useState('');
   const [busy, setBusy] = useState(false);
   const ref = useRef(null);
+  const attach = useAttachments();
+  const drop = useDropTarget(attach.add, busy || !projectId);
   const project = projects.find((p) => p.id === projectId);
   useEffect(() => {
     ref.current?.focus();
   }, []);
   const start = async () => {
     const instruction = text.trim();
-    if (!instruction || !projectId || busy) return;
+    if ((!instruction && !attach.files.length) || !projectId || busy) return;
     setBusy(true);
     try {
       const [providerId, modelId] = model ? model.split('::') : [null, null];
       const s = await api.createSession(projectId, 'New session', { providerId, modelId, mode: 'read' });
-      await api.sendSessionMessage(s.id, instruction);
+      await api.sendSessionMessage(s.id, instruction, attach.files.map(({ name, type, data }) => ({ name, type, data })));
       writeUnsent('new', '');
+      attach.clear();
       onStarted(s.id);
     } catch (e) {
       showToast(e.message, 'error');
@@ -778,14 +951,16 @@ function NewSession({ projects, projectsLoaded, projectId, onProject, models, on
           </span>
           <h2>What do you want to know or change?</h2>
         </div>
-        <div class="ss-new-box">
+        <div class="ss-new-box ${drop.over ? 'dropping' : ''}" ...${drop.props}>
+          <${AttachTray} files=${attach.files} onRemove=${attach.remove} disabled=${busy} />
           <textarea
             ref=${ref}
             rows="4"
             aria-label="First message"
-            placeholder="e.g. Why did the last failed task fail?"
+            placeholder="e.g. Why did the last failed task fail? Paste or drop screenshots and files here."
             value=${text}
             disabled=${busy || !projectId}
+            onPaste=${attach.onPaste}
             onInput=${(e) => setText(e.target.value)}
             onKeyDown=${(e) => {
               if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -806,9 +981,10 @@ function NewSession({ projects, projectsLoaded, projectId, onProject, models, on
                   options=${[{ value: '', label: 'Automatic model' }, ...models.map((m) => ({ value: `${m.provider_id}::${m.id}`, label: m.name || m.id }))]}
                 />`
               : null}
+            <${AttachButton} onFiles=${attach.add} disabled=${busy || !projectId} />
             <span class="ss-new-spacer"></span>
             <span class="ss-mono muted ss-kbd-hint">⌘↵</span>
-            <button class="btn primary" type="button" onClick=${start} disabled=${busy || !text.trim() || !projectId}>${busy ? 'Starting…' : 'Start'}</button>
+            <button class="btn primary" type="button" onClick=${start} disabled=${busy || (!text.trim() && !attach.files.length) || !projectId}>${busy ? 'Starting…' : 'Start'}</button>
           </div>
         </div>
         <div class="ss-facts-grid">
@@ -841,6 +1017,8 @@ export function Sessions({ id, navigate, onTitle }) {
   // The instruction just sent, shown under the transcript until the stored turn that
   // carries it arrives - a queued turn has no run row yet, so it is not in `turns`.
   const [sent, setSent] = useState('');
+  // The files that went with it, as their previews, for the same window.
+  const [sentFiles, setSentFiles] = useState([]);
   const [input, setInput] = useState('');
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
@@ -856,6 +1034,10 @@ export function Sessions({ id, navigate, onTitle }) {
   const composerRef = useRef(null);
   const sawWorking = useRef(false);
   const renameRef = useRef(null);
+  const attach = useAttachments();
+  // Switching conversations leaves the files behind with the box they were added to.
+  const clearAttachments = attach.clear;
+  useEffect(() => clearAttachments(), [sessionId, clearAttachments]);
 
   // The name box opens with the name selected, so typing replaces it and an arrow
   // key keeps it - the two things a person renaming something wants.
@@ -864,6 +1046,7 @@ export function Sessions({ id, navigate, onTitle }) {
   }, [renaming]);
 
   const session = detail?.session || null;
+  const composerDrop = useDropTarget(attach.add, busy || working || !!permission || session?.status === 'stopped' || session?.status === 'archived');
   const events = useMemo(() => createEventBuffer(), [sessionId]);
   const project = projects.find((p) => p.id === (session?.project_id || projectId)) || null;
 
@@ -1085,14 +1268,17 @@ export function Sessions({ id, navigate, onTitle }) {
 
   const send = useCallback(async () => {
     const text = input.trim();
-    if (!text || busy || working) return;
+    const files = attach.files;
+    if ((!text && !files.length) || busy || working) return;
     setBusy(true);
     setError(null);
     try {
-      await api.sendSessionMessage(sessionId, text);
+      await api.sendSessionMessage(sessionId, text, files.map(({ name, type, data }) => ({ name, type, data })));
       setInput('');
       writeUnsent(sessionId, '');
-      setSent(text);
+      attach.clear();
+      setSent(text || 'Take a look at the attached files.');
+      setSentFiles(files);
       setWorking(true);
       sawWorking.current = true;
       openStream();
@@ -1105,7 +1291,7 @@ export function Sessions({ id, navigate, onTitle }) {
     } finally {
       setBusy(false);
     }
-  }, [sessionId, input, busy, working, openStream, load, refreshList]);
+  }, [sessionId, input, attach.files, attach.clear, busy, working, openStream, load, refreshList]);
 
   const answer = useCallback(
     async (action) => {
@@ -1258,6 +1444,9 @@ export function Sessions({ id, navigate, onTitle }) {
   const liveInTurns = working && lastTurn && lastTurn.run_id === pendingRun;
   const settledTurns = liveInTurns ? turns.slice(0, -1) : turns;
   const liveInstruction = liveInTurns ? lastTurn.instruction : sent;
+  // The stored row's files once it exists, the local previews until then.
+  const liveFiles = liveInTurns && lastTurn.attachments?.length ? lastTurn.attachments : sentFiles;
+  const composerLocked = busy || working || closed || !!permission;
   const statusPill = permission
     ? { cls: 'needs', label: 'Waiting on you' }
     : working
@@ -1383,14 +1572,14 @@ export function Sessions({ id, navigate, onTitle }) {
           ${settledTurns.map((t, i) => {
             const prev = settledTurns[i - 1];
             const switched = prev && prev.role && t.role && prev.role !== t.role;
-            return html`${switched ? html`<${ModeDivider} key=${`m${t.run_id}`} role=${t.role} />` : null}<${Turn} key=${t.run_id} t=${t} root=${project?.path} />`;
+            return html`${switched ? html`<${ModeDivider} key=${`m${t.run_id}`} role=${t.role} />` : null}<${Turn} key=${t.run_id} t=${t} root=${project?.path} sessionId=${sessionId} />`;
           })}
           ${working || (permission && pendingRun)
             ? html`
                 ${settledTurns.length && settledTurns[settledTurns.length - 1].role && settledTurns[settledTurns.length - 1].role !== roleOfMode(session?.mode)
                   ? html`<${ModeDivider} role=${roleOfMode(session?.mode)} />`
                   : null}
-                <${Turn} key="live" t=${{ instruction: liveInstruction }} live>
+                <${Turn} key="live" t=${{ instruction: liveInstruction, attachments: liveFiles, run_id: liveInTurns ? lastTurn.run_id : null }} sessionId=${sessionId} live>
                   <${LiveSteps} store=${events} waiting=${!!permission} root=${project?.path} editing=${editing} />
                 </${Turn}>
               `
@@ -1401,14 +1590,17 @@ export function Sessions({ id, navigate, onTitle }) {
 
         <div class="ss-dock">
           ${permission ? html`<div class="ss-scrim" aria-hidden="true"></div><${Approval} permission=${permission} now=${now} busy=${busy} onAnswer=${answer} root=${project?.path} />` : null}
-          <div class="ss-composer ${permission || working || closed ? 'locked' : ''}">
+          <${AttachTray} files=${attach.files} onRemove=${attach.remove} disabled=${composerLocked} />
+          <div class="ss-composer ${permission || working || closed ? 'locked' : ''} ${composerDrop.over ? 'dropping' : ''}" ...${composerDrop.props}>
+            <${AttachButton} onFiles=${attach.add} disabled=${composerLocked} />
             <textarea
               ref=${composerRef}
               rows="1"
               aria-label="Instruction"
               placeholder=${placeholder}
               value=${input}
-              disabled=${busy || working || closed || !!permission}
+              disabled=${composerLocked}
+              onPaste=${attach.onPaste}
               onInput=${(e) => {
                 setInput(e.target.value);
                 writeUnsent(sessionId, e.target.value);
@@ -1420,11 +1612,11 @@ export function Sessions({ id, navigate, onTitle }) {
                 }
               }}
             ></textarea>
-            <button class="ss-send" type="button" aria-label="Send" onClick=${send} disabled=${!input.trim() || busy || working || closed || !!permission}>
+            <button class="ss-send" type="button" aria-label="Send" onClick=${send} disabled=${(!input.trim() && !attach.files.length) || composerLocked}>
               ${icon(ICONS.send)}
             </button>
           </div>
-          <div class="ss-hint">Enter to send · Shift+Enter for a new line</div>
+          <div class="ss-hint">Enter to send · Shift+Enter for a new line · Drop or paste files</div>
         </div>
       </main>
       ${railOpen ? html`<div class="ss-rail-scrim" aria-hidden="true" onClick=${() => setRailOpen(false)}></div>` : null}

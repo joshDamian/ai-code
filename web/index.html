@@ -1388,6 +1388,21 @@ li.ss-git-remote .ss-git-scope{color:var(--bad);border-color:var(--bad-line);bac
 .ss-send{width:36px;height:36px;flex:none;border-radius:10px;border:0;background:var(--accent);color:var(--on-accent);display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
 .ss-send:disabled{background:var(--surface-3);color:var(--muted);cursor:default}
 .ss-hint{font-size:var(--text-xs);color:var(--muted);text-align:center}
+.ss-attach{width:32px;height:32px;flex:none;margin-left:calc(-1 * var(--space-2));border-radius:9px;border:0;background:none;color:var(--muted);display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.ss-attach:hover:not(:disabled){background:var(--surface-2);color:var(--text)}
+.ss-attach:disabled{cursor:default;opacity:.6}
+.ss-composer.dropping,.ss-new-box.dropping{border-color:var(--accent);border-style:dashed;box-shadow:0 0 0 3px var(--info-bg)}
+.ss-attach-tray{display:flex;flex-wrap:wrap;gap:var(--space-2);min-width:0}
+.ss-new-box .ss-attach-tray{padding:var(--space-3) var(--space-4) 0}
+.ss-new-bar .ss-attach{margin-left:0}
+.ss-chip{display:inline-flex;align-items:center;gap:6px;max-width:220px;min-width:0;padding:4px 4px 4px 4px;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;font-size:var(--text-sm);color:var(--text);text-decoration:none}
+.ss-chip img{width:32px;height:32px;object-fit:cover;border-radius:6px;flex:none}
+.ss-chip-ext{width:32px;height:32px;flex:none;border-radius:6px;background:var(--surface-3);color:var(--muted);font-size:10px;font-weight:650;text-transform:uppercase;display:inline-flex;align-items:center;justify-content:center}
+.ss-chip-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:4px}
+.ss-chip button{width:22px;height:22px;flex:none;border:0;border-radius:6px;background:none;color:var(--muted);display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.ss-chip button:hover:not(:disabled){background:var(--surface-3);color:var(--text)}
+.ss-said-files{align-self:flex-end;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:var(--space-2);max-width:min(78%,640px)}
+.ss-said-files img{display:block;max-width:220px;max-height:160px;border-radius:10px;border:1px solid var(--line);object-fit:cover}
 
 /* What the session has cost and changed. */
 .ss-rail{border-left:1px solid var(--line);background:var(--surface-0);padding:var(--space-5) var(--space-4);overflow-y:auto;display:flex;flex-direction:column;gap:var(--space-6);min-height:0;min-width:0}
