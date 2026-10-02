@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Store } from './store.mjs';
@@ -619,8 +620,14 @@ function appToolsNote({ project, task }) {
 // none of. So the instruction is to stop and say so rather than to carry on, and
 // "say what is left" is asked for explicitly because the draft is built from that
 // sentence.
+// Both turns of a conversation can show the person a file. Said in the prompt as
+// well as the tool's description, because the failure it prevents is a reply that
+// names a path on this machine to a person reading it on a phone.
+const SHARE_CLAUSE =
+  'To show the person an image, a screenshot, a chart, media or any other file, share it with the share_file tool: it appears under your reply. A file path written in your reply is not shown to them.';
+
 export const SESSION_PROMPT =
-  'Work in this checkout on the instruction below. You are supervised: every action that writes a file or runs a command is sent to the person watching this session and requires live human approval to proceed. Never bypass this gate - there is no workaround. A denial is final for that action - do not retry it, reword it, or reach the same place another way, whether through a different tool, a shell command, or a file you already had permission to edit. If you are denied, stop and say what you were trying to do and why. Git and the GitHub CLI (gh) are available like any other command, behind the same approval: pull, merge, resolve conflicts, commit, push, review and comment on pull requests when the person asks for it. Do not change git history or anything on GitHub on your own initiative - no commit, merge, rebase, push, or pull request action the person did not ask for - and before a command that rewrites history or leaves this machine, say what it will do. If the work grows task-shaped - more than a small, self-contained change - stop and say so, and describe what is left to do, rather than doing it here. When the person asks for a task, or the work left is task-shaped, propose it with the draft_task tool: it lands in this project\'s approval queue and becomes a task only when the person approves it. The built-in Task tools (TaskCreate, TaskList, TaskUpdate) are a private todo list for this turn, not this project\'s tasks: never report their output as a task.';
+  `Work in this checkout on the instruction below. You are supervised: every action that writes a file or runs a command is sent to the person watching this session and requires live human approval to proceed. Never bypass this gate - there is no workaround. A denial is final for that action - do not retry it, reword it, or reach the same place another way, whether through a different tool, a shell command, or a file you already had permission to edit. If you are denied, stop and say what you were trying to do and why. Git and the GitHub CLI (gh) are available like any other command, behind the same approval: pull, merge, resolve conflicts, commit, push, review and comment on pull requests when the person asks for it. Do not change git history or anything on GitHub on your own initiative - no commit, merge, rebase, push, or pull request action the person did not ask for - and before a command that rewrites history or leaves this machine, say what it will do. If the work grows task-shaped - more than a small, self-contained change - stop and say so, and describe what is left to do, rather than doing it here. When the person asks for a task, or the work left is task-shaped, propose it with the draft_task tool: it lands in this project\'s approval queue and becomes a task only when the person approves it. The built-in Task tools (TaskCreate, TaskList, TaskUpdate) are a private todo list for this turn, not this project\'s tasks: never report their output as a task. ${SHARE_CLAUSE}`;
 
 // A read-only turn of a conversation. It is a chat - the same read-only clauses, the
 // same plan mode - with the two things a conversation adds: the person can switch
@@ -628,7 +635,7 @@ export const SESSION_PROMPT =
 // is the failure that started this: a model asked to change something or to "create
 // a task" that has no honest way to do either, and claims it did.
 export const READ_TURN_PROMPT =
-  `${CHAT_PROMPT} This conversation is read-only right now. If the person asks you to change files or run commands, say what you would change and tell them to switch the conversation to Can edit. When the person asks for a task, or the work you found is task-shaped, propose it with the draft_task tool: it lands in this project's approval queue and becomes a task only when the person approves it. The built-in Task tools (TaskCreate, TaskList, TaskUpdate) are a private todo list for this turn, not this project's tasks: never report their output as a task.`;
+  `${CHAT_PROMPT} This conversation is read-only right now. If the person asks you to change files or run commands, say what you would change and tell them to switch the conversation to Can edit. When the person asks for a task, or the work you found is task-shaped, propose it with the draft_task tool: it lands in this project's approval queue and becomes a task only when the person approves it. The built-in Task tools (TaskCreate, TaskList, TaskUpdate) are a private todo list for this turn, not this project's tasks: never report their output as a task. ${SHARE_CLAUSE}`;
 
 // The instruction is the `TASK` half of the prompt runRole builds, so only what
 // came before it belongs here. `head` is the mode's preamble; `app` names where the
@@ -939,6 +946,31 @@ export function attachmentName(name, index = 0) {
 // The instruction as the agent reads it: the person's words, then where each file
 // is. Absolute paths, because the agent's working directory is the checkout and the
 // files are not in it.
+// What a shared file is, from its extension. The agent names a path, not a type, and
+// the type decides whether the transcript shows it inline or offers it as a download.
+const OUTPUT_TYPES = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+  pdf: 'application/pdf', json: 'application/json', csv: 'text/csv', txt: 'text/plain', log: 'text/plain', md: 'text/markdown', html: 'text/html',
+  zip: 'application/zip',
+};
+export const outputType = (name) => OUTPUT_TYPES[path.extname(String(name || '')).slice(1).toLowerCase()] || 'application/octet-stream';
+
+// How many files one turn may share. A turn that shares more is a turn producing a
+// gallery nobody scrolls, and each one is a copy on disk.
+const OUTPUTS_PER_TURN = 20;
+
+// The real path of a directory, or null when it does not exist. Real because the
+// check below compares real paths: /tmp on macOS is a link to /private/tmp, and a
+// link inside the checkout must not be a way out of it.
+const realDir = (dir) => {
+  try {
+    return fs.realpathSync(dir);
+  } catch {
+    return null;
+  }
+};
+
 export function withAttachments(text, attachments = []) {
   if (!attachments?.length) return text;
   const list = attachments.map((a) => `- ${a.path} (${a.type || 'file'}, ${a.name})`).join('\n');
@@ -2406,14 +2438,66 @@ export class Service {
   // The bytes of one attachment, for the transcript to show. Resolved against the
   // turn's folder and checked to still be inside it, so a crafted name cannot read
   // anything else this server can.
-  sessionAttachment(sessionId, runId, name) {
+  //
+  // `kind` is which side of the turn: `in` for what the person attached, `out` for
+  // what the agent shared back, which is kept in an `out` folder beside them.
+  sessionAttachment(sessionId, runId, name, kind = 'in') {
     this.sessionById(sessionId);
-    const dir = path.join(this.sessionAttachmentsDir(sessionId), attachmentName(runId));
+    const turn = path.join(this.sessionAttachmentsDir(sessionId), attachmentName(runId));
+    const dir = kind === 'out' ? path.join(turn, 'out') : turn;
     const file = path.join(dir, attachmentName(name));
-    if (path.dirname(file) !== dir || !fs.existsSync(file)) throw Object.assign(new Error('Attachment not found'), { code: 'NOT_FOUND' });
-    const event = this.store.listEvents(runId).filter((e) => e.type === 'instruction').pop();
-    const meta = (event?.data?.attachments || []).find((a) => a.name === path.basename(file));
+    if (path.dirname(file) !== dir || !fs.existsSync(file) || !fs.statSync(file).isFile()) throw Object.assign(new Error('Attachment not found'), { code: 'NOT_FOUND' });
+    const events = this.store.listEvents(runId);
+    const listed = kind === 'out' ? events.filter((e) => e.type === 'output').map((e) => e.data) : events.filter((e) => e.type === 'instruction').pop()?.data?.attachments || [];
+    const meta = listed.find((a) => a?.name === path.basename(file));
     return { path: file, type: meta?.type || 'application/octet-stream', name: path.basename(file) };
+  }
+
+  // A file the session's agent shares back through its `share_file` tool, copied
+  // into the turn in progress so it outlives wherever the agent made it - a temp
+  // file is gone by the next reboot, and a file in the checkout may be the next
+  // thing the agent edits.
+  //
+  // Only from the checkout, the temp directory, or this conversation's own
+  // attachments. The tool is pre-allowed rather than asked about, so this check is
+  // the whole of what keeps it from handing a phone ~/.ssh: the agent can already
+  // read the checkout, a temp file is one it made, and anything else is refused.
+  shareFromSession(sessionId, { path: wanted, caption, cwd } = {}) {
+    const s = this.sessionById(sessionId);
+    const runId = s.pending_run_id;
+    if (!runId) throw new Error('This session has no turn in progress to share a file into');
+    const project = this.project(s.project_id);
+    if (!String(wanted || '').trim()) throw new Error('path is required');
+    const base = cwd && path.isAbsolute(cwd) ? cwd : project.path;
+    let real;
+    try {
+      real = fs.realpathSync(path.resolve(base, String(wanted)));
+    } catch {
+      throw new Error(`No file at ${wanted}`);
+    }
+    const roots = [project.path, os.tmpdir(), '/tmp', this.sessionAttachmentsDir(sessionId)].map(realDir).filter(Boolean);
+    if (!roots.some((r) => real === r || real.startsWith(r + path.sep))) {
+      throw new Error('Only files in the project checkout, the temp directory, or this conversation\'s attachments can be shared');
+    }
+    const stat = fs.statSync(real);
+    if (!stat.isFile()) throw new Error(`${wanted} is not a file`);
+    if (!stat.size) throw new Error(`${wanted} is empty`);
+    if (stat.size > ATTACHMENT_LIMITS.bytes) throw new Error(`${wanted} is larger than ${ATTACHMENT_LIMITS.bytes / 1024 / 1024} MB`);
+    const shared = this.store.listEvents(runId).filter((e) => e.type === 'output');
+    if (shared.length >= OUTPUTS_PER_TURN) throw new Error(`At most ${OUTPUTS_PER_TURN} files can be shared in one turn`);
+    const dir = path.join(this.sessionAttachmentsDir(sessionId), runId, 'out');
+    fs.mkdirSync(dir, { recursive: true });
+    // A second share of the same name keeps both, the way a second attachment does.
+    const first = attachmentName(path.basename(real));
+    let name = first;
+    for (let n = 2; fs.existsSync(path.join(dir, name)); n++) {
+      const ext = path.extname(first);
+      name = `${path.basename(first, ext)}-${n}${ext}`;
+    }
+    fs.copyFileSync(real, path.join(dir, name));
+    const output = { name, type: outputType(name), size: stat.size, ...(caption ? { caption: String(caption).slice(0, 300) } : {}) };
+    this.store.addEvent({ runId, type: 'output', data: output });
+    return output;
   }
 
   // Writes the files of one message to disk and returns what the instruction event
@@ -2431,6 +2515,8 @@ export class Service {
       if (data.length > ATTACHMENT_LIMITS.bytes) throw new Error(`${a?.name || 'An attachment'} is larger than ${ATTACHMENT_LIMITS.bytes / 1024 / 1024} MB`);
       total += data.length;
       let name = attachmentName(a?.name, i);
+      // `out` is the folder the agent's shared files go in, beside these.
+      if (name === 'out') name = 'out-file';
       // Two files with the same name in one message keep both.
       for (let n = 2; used.has(name); n++) {
         const ext = path.extname(name);
@@ -2682,6 +2768,8 @@ export class Service {
         // Name, type and size only: the path is this server's, and the transcript
         // fetches a file by its turn and name.
         attachments: (instruction?.data?.attachments || []).map(({ name, type, size }) => ({ name, type, size })),
+        // What the agent shared back with share_file, in the order it shared them.
+        outputs: events.filter((e) => e.type === 'output').map((e) => e.data),
         answer: run.status === 'succeeded' ? (this.finalText(run.id) || '').trim() : '',
         steps: markRefused(
           sessionSteps(events),

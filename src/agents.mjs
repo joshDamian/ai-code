@@ -15,6 +15,8 @@ const PERMISSION_TOOL = 'approve';
 // The server a chat reads AI Code's own records through. Its tool names come from
 // the server module itself, so the allowlist below cannot drift from what it serves.
 const APP_SERVER = 'ai-code-app';
+// The gate server's file-sharing tool, by the name claude sees it.
+export const SHARE_TOOL = `mcp__${PERMISSION_SERVER}__share_file`;
 
 // Ordered failure classification. First match wins, so the order is the design:
 // a 429 has to read as RATE_LIMIT before the broader patterns can claim it, and
@@ -339,10 +341,15 @@ export const REVIEWER_SCHEMA = {
 // the app tools pre-allowed. Those are named one by one rather than by a server
 // wildcard, so a write tool added to that server later is not allowed by this line;
 // without the allowlist, plan mode would hold every call for a person to approve.
+//
+// The gate's `share_file` is pre-allowed beside them. It only copies a file the
+// agent can already read into the turn, from places the server checks, so a prompt
+// for each one would be a prompt that says nothing a person could decide on.
 function mcpFlags(gateConfig, app) {
   const configs = [gateConfig, app?.configPath].filter(Boolean);
   if (!configs.length) return [];
-  return ['--mcp-config', ...configs, ...(app ? ['--allowedTools', ...app.tools] : [])];
+  const allowed = [...(app ? app.tools : []), ...(gateConfig ? [SHARE_TOOL] : [])];
+  return ['--mcp-config', ...configs, ...(allowed.length ? ['--allowedTools', ...allowed] : [])];
 }
 
 // The permission flags are the whole safety story: a chat, a reviewer, or a

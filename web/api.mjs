@@ -214,7 +214,9 @@ export const api = {
   // the one request so a message and its files arrive - or are refused - together.
   sendSessionMessage: (id, message, attachments = []) =>
     request(`/api/sessions/${id}/messages`, { method: 'POST', body: attachments.length ? { message, attachments } : { message } }),
-  sessionAttachmentUrl: (id, runId, name) => `/api/sessions/${encodeURIComponent(id)}/attachments/${encodeURIComponent(runId)}/${encodeURIComponent(name)}`,
+  // `kind` is `attachments` for what the person sent, `outputs` for what the agent shared back.
+  sessionAttachmentUrl: (id, runId, name, kind = 'attachments') =>
+    `/api/sessions/${encodeURIComponent(id)}/${kind}/${encodeURIComponent(runId)}/${encodeURIComponent(name)}`,
   draftSessionTask: (id) => request(`/api/sessions/${id}/draft-task`, { method: 'POST' }),
   // `allow` is the only action that grants; the server reads every other word as a
   // denial, so this is a verb and not a boolean.

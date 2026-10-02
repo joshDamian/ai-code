@@ -2138,3 +2138,35 @@ test('a session message with attachments is stored and served back',async()=>{
     assert.equal((await post(`${srv.base}/api/sessions/${session.id}/messages`,{message:''})).status,400,'an empty message with no files is still refused');
   }finally{srv.stop()}
 });
+
+test('a shared file is served back from the outputs route, and only from this machine',async()=>{
+  const root=gitRepo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  // A slow turn, so there is one in progress to share into: the server clears a
+  // pending turn with no job behind it when it starts.
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'slow',name:'Slow',kind:'mock',enabled:true,config:{routable:true,delayMs:5000}});
+  s.addModel({id:'slow-m',providerId:'slow',name:'slow',capabilities:['coding','planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const session=s.createSession(p.id,'outputs');
+  fs.writeFileSync(path.join(root,'clip.webm'),'webm-bytes');
+  fs.writeFileSync(path.join(root,'page.html'),'<script>1</script>');
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const asked=await post(`${srv.base}/api/sessions/${session.id}/messages`,{message:'show me'});
+    assert.equal(asked.status,202,asked.body);
+    const runId=JSON.parse(asked.body).session.pending_run_id;
+    const shared=await post(`${srv.base}/api/sessions/${session.id}/outputs`,{path:'clip.webm',caption:'Repro'});
+    assert.equal(shared.status,201,shared.body);
+    assert.deepEqual(JSON.parse(shared.body).output,{name:'clip.webm',type:'video/webm',size:10,caption:'Repro'});
+    assert.equal((await post(`${srv.base}/api/sessions/${session.id}/outputs`,{path:'page.html'})).status,201);
+    assert.equal((await post(`${srv.base}/api/sessions/${session.id}/outputs`,{path:'/etc/hosts'})).status,400,'outside the allowed places');
+    const fetch1=(name)=>new Promise((res,rej)=>http.get(`${srv.base}/api/sessions/${session.id}/outputs/${runId}/${encodeURIComponent(name)}`,(x)=>{let b='';x.on('data',(c)=>b+=c);x.on('end',()=>res({status:x.statusCode,headers:x.headers,body:b}))}).on('error',rej));
+    const clip=await fetch1('clip.webm');
+    assert.equal(clip.status,200);
+    assert.equal(clip.headers['content-type'],'video/webm');
+    assert.match(clip.headers['content-disposition'],/^inline/);
+    assert.equal(clip.body,'webm-bytes');
+    assert.match((await fetch1('page.html')).headers['content-disposition'],/^attachment/,'HTML downloads');
+  }finally{srv.stop()}
+});
