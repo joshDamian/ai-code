@@ -283,7 +283,16 @@ export class Store {
       // written before the column existed come back 'read'. They were all editing
       // sessions, but an idle one holding the project's checkout would lock every
       // other conversation out of editing, and a read-only turn only asks first.
-      sessions: [['mode', "TEXT NOT NULL DEFAULT 'read'"]],
+      sessions: [
+        ['mode', "TEXT NOT NULL DEFAULT 'read'"],
+        // Whether an editing conversation's routine actions are approved without a
+        // prompt. Off for every row written before it existed, and off by default:
+        // it is a person's choice for one conversation, never a default.
+        ['auto_allow', 'INTEGER NOT NULL DEFAULT 0'],
+      ],
+      // A request the auto-allow rule answered rather than a person, so the
+      // history can say which approvals nobody looked at.
+      permission_requests: [['auto', 'INTEGER NOT NULL DEFAULT 0']],
     })) {
       for (const [column, type] of columns) {
         const had = this.db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
@@ -1209,7 +1218,7 @@ export class Store {
     if (!s) return null;
     const n = { ...s, ...patch };
     this.db
-      .prepare('UPDATE sessions SET name=?,status=?,provider_id=?,model_id=?,budget_tally=?,cancel_requested=?,pending_run_id=?,task_shaped=?,nudge_dismissed=?,changed_paths=?,mode=?,updated_at=? WHERE id=?')
+      .prepare('UPDATE sessions SET name=?,status=?,provider_id=?,model_id=?,budget_tally=?,cancel_requested=?,pending_run_id=?,task_shaped=?,nudge_dismissed=?,changed_paths=?,mode=?,auto_allow=?,updated_at=? WHERE id=?')
       .run(
         n.name,
         n.status,
@@ -1222,6 +1231,7 @@ export class Store {
         n.nudge_dismissed ? 1 : 0,
         n.changed_paths ?? null,
         n.mode || 'read',
+        n.auto_allow ? 1 : 0,
         // Touched rather than stamped, for the reason `#touch` exists: a session
         // created and first written to inside one millisecond would otherwise
         // sort by creation order in the list it is meant to be moving in.
@@ -1387,8 +1397,8 @@ export class Store {
     if (!p) return null;
     const n = { ...p, ...patch };
     this.db
-      .prepare('UPDATE permission_requests SET status=?,answered_at=? WHERE id=?')
-      .run(n.status, n.answered_at ?? null, id);
+      .prepare('UPDATE permission_requests SET status=?,answered_at=?,auto=? WHERE id=?')
+      .run(n.status, n.answered_at ?? null, n.auto ? 1 : 0, id);
     return this.getPermissionRequest(id);
   }
 

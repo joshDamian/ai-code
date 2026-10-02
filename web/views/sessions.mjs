@@ -419,7 +419,7 @@ function SessionRow({ s, active, now, root, onControl }) {
       <span class="ss-row-main">
         <span class="ss-row-top">
           <span class="ss-row-name">${s.name}</span>
-          ${s.mode === 'edit' && g !== 'closed' ? html`<span class="ss-mode-tag" title="This conversation can edit the checkout">Can edit</span>` : null}
+          ${s.mode === 'edit' && g !== 'closed' ? html`<span class="ss-mode-tag" title=${s.auto_allow ? 'This conversation can edit the checkout, and routine actions run without asking' : 'This conversation can edit the checkout'}>${s.auto_allow ? 'Can edit · auto' : 'Can edit'}</span>` : null}
           ${g === 'needs'
             ? html`<span class="ss-row-clock">${clock(secondsLeft(s.pending.timeout_at, now))}</span>`
             : g === 'working'
@@ -720,7 +720,7 @@ function GitImpact({ impact }) {
   `;
 }
 
-export function Approval({ permission, now, busy, onAnswer, root }) {
+export function Approval({ permission, now, busy, onAnswer, root, onAutoAllow }) {
   const a = approvalOf(permission.tool, permission.input, root);
   const cwd = permission.cwd ? relTo(root, permission.cwd) : '';
   const left = secondsLeft(permission.timeout_at, now);
@@ -758,7 +758,9 @@ export function Approval({ permission, now, busy, onAnswer, root }) {
         : null}
       ${a.raw ? html`<pre class="ss-approval-cmd">${a.raw}</pre>` : null}
       <div class="ss-approval-foot">
-        <span class="muted">Nothing happens until you allow it.</span>
+        ${onAutoAllow
+          ? html`<button class="btn ghost sm ss-auto-btn" type="button" onClick=${onAutoAllow} disabled=${busy} title="Allow this and every routine action after it in this conversation: edits in the checkout and local commands. Pushes, GitHub actions, history rewrites and other risky commands still ask.">Auto-allow routine</button>`
+          : html`<span class="muted">Nothing happens until you allow it.</span>`}
         <button class="btn secondary" type="button" onClick=${() => onAnswer('deny')} disabled=${busy}>Deny</button>
         <button class="btn ss-allow ${a.git?.destructive || a.git?.level === 'remote' ? 'ss-allow-hot' : ''}" type="button" onClick=${() => onAnswer('allow')} disabled=${busy}>${a.allow}</button>
       </div>
@@ -830,6 +832,7 @@ function Rail({ detail, turns, project, events, open, onClose, busy, onDraft, on
   const model = [...turns].reverse().find((t) => t.model_id)?.model_id || detail?.session?.model_id || 'Automatic';
   const tally = {
     allowed: history.filter((h) => h.status === 'allowed').length,
+    auto: history.filter((h) => h.status === 'allowed' && h.auto).length,
     denied: history.filter((h) => h.status === 'denied').length,
     timeout: history.filter((h) => h.status === 'timeout').length,
   };
@@ -903,7 +906,7 @@ function Rail({ detail, turns, project, events, open, onClose, busy, onDraft, on
         ${project ? html`<div><span>Directory</span><span class="ss-mono ss-fact-path" title=${project.path}>${shortDir(project.path)}</span></div>` : null}
         <div>
           <span>Approvals</span>
-          <span>${tally.allowed} allowed · ${tally.denied} denied${tally.timeout ? ` · ${tally.timeout} timed out` : ''}</span>
+          <span>${tally.allowed} allowed${tally.auto ? ` (${tally.auto} auto)` : ''} · ${tally.denied} denied${tally.timeout ? ` · ${tally.timeout} timed out` : ''}</span>
         </div>
       </section>
 
@@ -1370,6 +1373,25 @@ export function Sessions({ id, navigate, onTitle }) {
     [session, project, sessionId, guarded]
   );
 
+  // Auto-allow asks once on the way on, for the reason Can edit does: from then on
+  // routine actions stop waiting for anyone. Off never asks.
+  const setAutoAllow = useCallback(
+    async (on, { confirm = true } = {}) => {
+      if (!session) return;
+      if (on && confirm) {
+        const ok = await confirmAction({
+          title: 'Auto-allow routine actions?',
+          body: 'Edits inside the checkout and commands that stay on this machine - tests, builds, installs, local git - run without asking. Pushes and other GitHub actions, history rewrites, recursive deletes, sudo, writes outside the checkout and web requests still wait for you. Turn it off at any time; switching to read-only turns it off too.',
+          confirmLabel: 'Auto-allow',
+          cancelLabel: 'Keep asking',
+        });
+        if (!ok) return;
+      }
+      await guarded(() => api.updateSession(sessionId, { autoAllow: on }), 'Auto-allow');
+    },
+    [session, sessionId, guarded]
+  );
+
   const decideDraft = useCallback(
     async (draft, approve) => {
       if (!project) return;
@@ -1492,7 +1514,7 @@ export function Sessions({ id, navigate, onTitle }) {
       : closed
         ? 'Resume this conversation to send a message.'
         : editing
-          ? 'Tell it what to change. Each write asks you first.'
+          ? session?.auto_allow ? 'Tell it what to change. Routine actions run without asking.' : 'Tell it what to change. Each write asks you first.'
           : 'Ask about the code, tasks, runs or spend…';
 
   return html`
@@ -1613,7 +1635,7 @@ export function Sessions({ id, navigate, onTitle }) {
         </div>
 
         <div class="ss-dock">
-          ${permission ? html`<div class="ss-scrim" aria-hidden="true"></div><${Approval} permission=${permission} now=${now} busy=${busy} onAnswer=${answer} root=${project?.path} />` : null}
+          ${permission ? html`<div class="ss-scrim" aria-hidden="true"></div><${Approval} permission=${permission} now=${now} busy=${busy} onAnswer=${answer} root=${project?.path} onAutoAllow=${editing && !session?.auto_allow ? () => setAutoAllow(true, { confirm: false }) : null} />` : null}
           <${AttachTray} files=${attach.files} onRemove=${attach.remove} disabled=${composerLocked} />
           <div class="ss-composer ${permission || working || closed ? 'locked' : ''} ${composerDrop.over ? 'dropping' : ''}" ...${composerDrop.props}>
             <${AttachButton} onFiles=${attach.add} disabled=${composerLocked} />
@@ -1640,7 +1662,16 @@ export function Sessions({ id, navigate, onTitle }) {
               ${icon(ICONS.send)}
             </button>
           </div>
-          <div class="ss-hint">Enter to send · Shift+Enter for a new line · Drop or paste files</div>
+          <div class="ss-dock-foot">
+            ${editing && !closed
+              ? html`<label class="ss-auto ${session?.auto_allow ? 'on' : ''}" title="Edits in the checkout and local commands run without asking. Pushes, GitHub actions, history rewrites, recursive deletes, sudo and writes outside the checkout still ask.">
+                  <input type="checkbox" role="switch" checked=${!!session?.auto_allow} disabled=${busy} onChange=${(e) => setAutoAllow(e.target.checked)} />
+                  <span class="ss-auto-track" aria-hidden="true"><span></span></span>
+                  <span>Auto-allow routine actions</span>
+                </label>`
+              : null}
+            <div class="ss-hint">Enter to send · Shift+Enter for a new line · Drop or paste files</div>
+          </div>
         </div>
       </main>
       ${railOpen ? html`<div class="ss-rail-scrim" aria-hidden="true" onClick=${() => setRailOpen(false)}></div>` : null}

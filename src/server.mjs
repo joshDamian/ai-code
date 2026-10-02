@@ -1138,6 +1138,10 @@ const server = http.createServer(async (req, res) => {
           input: b.input ?? null,
           cwd: b.cwd ?? null,
         });
+        // A conversation on auto-allow answers its routine actions here, before
+        // anything is pushed or held: the row is still written, so the history shows
+        // what was approved and that nobody was asked.
+        if (svc.autoAnswer(request.id)) return json(res, permissionDecision(svc.store.getPermissionRequest(request.id)));
         // A prompt is the one thing in a session that stops it until a person acts,
         // so it is pushed like a finished run: a phone in a pocket hears about it
         // before the countdown denies it.
@@ -1287,6 +1291,13 @@ const server = http.createServer(async (req, res) => {
           if ('providerId' in b) patch.provider_id = b.providerId ?? null;
           if ('modelId' in b) patch.model_id = b.modelId ?? null;
           if (Object.keys(patch).length) svc.store.updateSession(id, patch);
+          if ('autoAllow' in b) {
+            try {
+              svc.setSessionAutoAllow(id, !!b.autoAllow);
+            } catch (e) {
+              return json(res, { error: e.message }, 400);
+            }
+          }
           if (b.dismissNudge) svc.dismissNudge(id);
           return json(res, svc.sessionById(id));
         }
