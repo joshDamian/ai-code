@@ -27,6 +27,7 @@
     "dompurify": "https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.es.mjs",
     "@xterm/xterm": "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.mjs",
     "@xterm/addon-fit": "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.mjs",
+    "highlight.js": "https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.11.1/es/highlight.min.js",
     "ai-code/format": "/shared/format.mjs"
   }
 }
@@ -154,6 +155,19 @@
   /* A series past the last categorical slot folds into "Other" and wears this
      neutral instead of a generated hue. It clears 3:1 on --chart-surface. */
   --chart-other:#8e9aaa;
+
+  /* ---- syntax ----
+     The diff viewer's code colours. Kept off the add and delete hues on purpose: a
+     line's green or red tint says what happened to it, and a token painted the same
+     colour would read as part of that. Each clears 4.5:1 on --surface-sunken. */
+  --syn-keyword:#c49bff;
+  --syn-function:#82aaff;
+  --syn-string:#e8c27a;
+  --syn-number:#f5a26f;
+  --syn-type:#7fd8cf;
+  --syn-attr:#9fb9ff;
+  --syn-tag:#f28b82;
+  --syn-comment:#7d8796;
 }
 
 *{box-sizing:border-box}
@@ -862,12 +876,6 @@ a.list-row:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .event-row.kind-out .event-msg,.event-row.kind-think .event-msg,.event-row.kind-note .event-msg{color:var(--muted)}
 .event-row.kind-think .event-msg{font-style:italic}
 
-/* ---- diff viewer ---- */
-/* A diff is read by scrolling down, so a line too wide for the pane wraps rather
-   than scrolling the pane sideways. `pre-wrap` keeps the indentation that makes a
-   diff readable; `anywhere` covers the lines that overflow at all - a minified
-   bundle, a base64 blob, a long path - which `break-word` leaves overflowing. */
-.diff-text{white-space:pre-wrap;overflow-wrap:anywhere;flex:1 1 auto;min-width:0}
 /* Next steps in the port tab: a numbered list where each step may carry the command
    that performs it. The command is a block rather than inline, so it can be selected
    and copied whole instead of by drag. */
@@ -891,26 +899,116 @@ a.list-row:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .ref{display:flex;align-items:baseline;gap:var(--space-2);flex-wrap:wrap;font-size:var(--text-sm)}
 .ref-sha{font-family:var(--font-mono);font-size:var(--text-sm);background:var(--surface-3);border:1px solid var(--line);border-radius:var(--radius-sm);padding:1px var(--space-2);color:var(--accent)}
 .ref-subject{color:var(--text)}
-.diff-modes{display:flex;gap:var(--space-2);justify-content:flex-end;margin-bottom:var(--space-2)}
-.diff-modes .btn{padding:var(--space-1) var(--space-3);font-size:var(--text-xs);font-weight:600}
-.diff-modes .btn.on{color:var(--accent);border-color:var(--accent-dim)}
-.diff-viewer{background:var(--surface-sunken);border:1px solid var(--line);border-radius:var(--radius);overflow:auto;max-height:520px;font-family:var(--font-mono);font-size:var(--text-sm)}
-.diff-line{display:flex;gap:var(--space-3);padding:1px var(--space-3)}
-.diff-lineno{color:var(--muted);width:36px;text-align:right;flex:0 0 auto;user-select:none}
+/* ---- diff viewer ----
+   One box per file (web/components/diff-viewer.mjs). The border and the gap between
+   boxes are the file boundary; the header inside each box stays pinned while its
+   file scrolls past, so the reader always knows which file a line belongs to.
+   The three tone classes below are also read by the session transcript's diff. */
 .diff-add{background:var(--good-bg);color:var(--good)}
 .diff-del{background:var(--bad-bg);color:var(--bad)}
 .diff-hunk{color:var(--accent);background:var(--info-bg)}
-.diff-file,.diff-meta{color:var(--muted)}
-/* Split view. Each row is its own two-column grid rather than one grid for the whole
-   diff, so a span - a file header, a mode change, a hunk header - takes the width
-   without a row being introduced to hold it. `min-width:0` on the cell and the text
-   is what keeps every row's columns at exactly half: without it a long unbroken line
-   widens its own column and the two halves of the diff stop lining up. */
-.diff-row{display:grid;grid-template-columns:1fr 1fr}
-.diff-cell{display:flex;gap:var(--space-3);padding:1px var(--space-3);min-width:0}
-.diff-cell+.diff-cell{border-left:1px solid var(--line)}
-.diff-span{padding:1px var(--space-3)}
-.diff-blank{background:var(--wash)}
+.dv{display:grid;gap:var(--space-3);min-width:0}
+.dv-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap}
+.dv-sum{display:flex;align-items:baseline;gap:var(--space-2);flex-wrap:wrap;font-size:var(--text-sm)}
+.dv-add{color:var(--good);font-family:var(--font-mono);font-size:var(--text-sm)}
+.dv-del{color:var(--bad);font-family:var(--font-mono);font-size:var(--text-sm)}
+.dv-ctrl{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap}
+.dv-ctrl .btn{padding:var(--space-1) var(--space-3);font-size:var(--text-xs);font-weight:600}
+.dv-seg{display:inline-flex}
+.dv-seg .btn:first-child{border-radius:var(--radius-sm) 0 0 var(--radius-sm)}
+.dv-seg .btn:last-child{border-radius:0 var(--radius-sm) var(--radius-sm) 0;margin-left:-1px}
+.dv-seg .btn.on{color:var(--accent);border-color:var(--accent-dim);position:relative}
+.dv-extra{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);font-family:var(--font-mono);font-size:var(--text-sm);background:var(--surface-sunken);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-3)}
+/* The file list is the table of contents, sticky so any file is one click away. */
+.dv-body{display:grid;gap:var(--space-4);align-items:start;min-width:0}
+.dv-body.with-nav{grid-template-columns:240px minmax(0,1fr)}
+.dv-nav{position:sticky;top:var(--space-4);display:grid;gap:2px;background:var(--surface-0);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-2);max-height:calc(100vh - 2 * var(--space-4));overflow-y:auto}
+.dv-nav-item{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:var(--space-2);align-items:center;padding:6px var(--space-2);border:0;border-radius:var(--radius-sm);background:none;text-align:left;cursor:pointer;width:100%}
+.dv-nav-item:hover{background:var(--surface-2)}
+.dv-nav-item:focus-visible{outline:2px solid var(--accent-dim);outline-offset:-2px}
+.dv-nav-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:var(--text-xs)}
+.dv-nav-item.viewed .dv-nav-name{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line-strong)}
+.dv-nav-count{font-family:var(--font-mono);white-space:nowrap}
+.dv-nav-count span{font-size:var(--text-xs)}
+/* What happened to the file, as a letter in that outcome's tone. */
+.dv-st{display:inline-grid;place-items:center;width:16px;height:16px;flex:0 0 auto;border:1px solid;border-radius:4px;font:700 10px/1 var(--font-mono)}
+.dv-st-M{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-line)}
+.dv-st-A{color:var(--good);background:var(--good-bg);border-color:var(--good-line)}
+.dv-st-D{color:var(--bad);background:var(--bad-bg);border-color:var(--bad-line)}
+.dv-st-R{color:var(--info);background:var(--info-bg);border-color:var(--info-line)}
+.dv-st-U{color:var(--good);border-color:var(--good-line);border-style:dashed}
+.dv-files{display:grid;gap:var(--space-4);min-width:0}
+.dv-files>*{min-width:0}
+.dv-file{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface-sunken);scroll-margin-top:var(--space-4)}
+.dv-file.viewed{border-color:var(--surface-3)}
+.dv-fh{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:var(--space-2);min-height:40px;padding:var(--space-2) var(--space-3);background:var(--surface-2);border-bottom:1px solid var(--line);border-radius:var(--radius) var(--radius) 0 0}
+.dv-file.folded .dv-fh{border-bottom-color:transparent;border-radius:var(--radius)}
+.dv-chev,.dv-icon{display:grid;place-items:center;flex:0 0 auto;border:0;background:none;color:var(--muted);cursor:pointer;border-radius:4px}
+.dv-chev{width:20px;height:20px;transition:transform var(--dur-fast) var(--ease)}
+.dv-icon{padding:2px}
+.dv-chev:hover,.dv-icon:hover{background:var(--surface-3);color:var(--text)}
+.dv-file.folded .dv-chev{transform:rotate(-90deg)}
+/* rtl so a path too long for the header loses its start, not its filename. */
+.dv-path{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;font-family:var(--font-mono);font-size:var(--text-sm)}
+.dv-path bdi{direction:ltr}
+.dv-path b{font-weight:600;color:var(--text)}
+.dv-from{color:var(--muted);text-decoration:line-through}
+.dv-meta{margin-left:auto;display:flex;align-items:center;gap:var(--space-3);flex:0 0 auto}
+.dv-sim{font-size:var(--text-xs)}
+.dv-bar{display:inline-flex;gap:1px}
+.dv-bar i{width:7px;height:7px;border-radius:1.5px}
+.dv-bar i.a{background:var(--good)}
+.dv-bar i.d{background:var(--bad)}
+.dv-viewed{display:inline-flex;align-items:center;gap:6px;padding:2px var(--space-2);border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-1);color:var(--muted);font-size:var(--text-xs);cursor:pointer;user-select:none}
+.dv-viewed input{margin:0;accent-color:var(--accent)}
+.dv-file.viewed .dv-viewed{color:var(--accent);border-color:var(--accent-dim)}
+.dv-code{overflow-x:auto;border-radius:0 0 var(--radius) var(--radius);font-family:var(--font-mono);font-size:var(--text-sm)}
+/* A long line wraps rather than scrolling the file sideways. `pre-wrap` keeps the
+   indentation; `anywhere` covers an unbroken run - a minified bundle, a long path. */
+.dv-txt{white-space:pre-wrap;overflow-wrap:anywhere;min-width:0;padding:1px var(--space-3) 1px 0}
+.dv-row{display:grid;grid-template-columns:44px 44px 16px minmax(0,1fr)}
+.dv-ln{padding:1px var(--space-2) 1px 0;text-align:right;color:var(--muted);opacity:.7;user-select:none}
+.dv-sign{padding:1px 0;text-align:center;user-select:none}
+.dv-row.add{background:var(--good-bg);color:var(--good);box-shadow:inset 3px 0 0 var(--good)}
+.dv-row.del{background:var(--bad-bg);color:var(--bad);box-shadow:inset 3px 0 0 var(--bad)}
+/* The hunk header is where the file is cut, so it reads as a seam. */
+.dv-hunk{display:flex;align-items:center;gap:var(--space-2);padding:4px var(--space-3);background:var(--info-bg);color:var(--info);font-size:var(--text-xs);border-block:1px solid var(--line)}
+.dv-hunk:first-child{border-top:0}
+.dv-fn{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.dv-range{margin-left:auto;white-space:nowrap;color:var(--muted);opacity:.8}
+.dv-note{display:flex;gap:var(--space-2);padding:var(--space-3);color:var(--muted);font:var(--text-sm)/1.5 var(--font-ui)}
+.dv-large{display:block;width:100%;padding:var(--space-3);border:0;background:var(--wash);color:var(--accent);font:var(--text-sm)/1.5 var(--font-ui);text-align:left;cursor:pointer}
+.dv-large:hover{background:var(--surface-2)}
+/* Split: each side is a number and a text column. */
+.dv-srow{display:grid;grid-template-columns:44px minmax(0,1fr) 44px minmax(0,1fr)}
+.dv-srow .dv-txt{padding-left:var(--space-2)}
+.dv-srow .dv-txt.add{background:var(--good-bg);color:var(--good)}
+.dv-srow .dv-txt.del{background:var(--bad-bg);color:var(--bad)}
+.dv-srow .blank{background:var(--wash)}
+.dv-srow .dv-ln.r{border-left:1px solid var(--line)}
+/* Highlighted: the tint and the sign say added or deleted, and the text is the code's
+   own colour rather than all green or all red. */
+.dv-code.hl .dv-row.add .dv-txt,.dv-code.hl .dv-row.del .dv-txt,.dv-code.hl .dv-srow .dv-txt{color:var(--text)}
+.dv-code.hl .dv-row.ctx .dv-txt{color:#c9d1dc}
+.dv-code .hljs-keyword,.dv-code .hljs-selector-tag,.dv-code .hljs-literal,.dv-code .hljs-doctag{color:var(--syn-keyword)}
+.dv-code .hljs-title,.dv-code .hljs-title.function_,.dv-code .hljs-section{color:var(--syn-function)}
+.dv-code .hljs-string,.dv-code .hljs-template-tag,.dv-code .hljs-regexp,.dv-code .hljs-symbol{color:var(--syn-string)}
+.dv-code .hljs-number,.dv-code .hljs-bullet{color:var(--syn-number)}
+.dv-code .hljs-type,.dv-code .hljs-built_in,.dv-code .hljs-title.class_,.dv-code .hljs-variable.language_{color:var(--syn-type)}
+.dv-code .hljs-attr,.dv-code .hljs-attribute,.dv-code .hljs-property,.dv-code .hljs-params,.dv-code .hljs-selector-class,.dv-code .hljs-selector-id{color:var(--syn-attr)}
+.dv-code .hljs-name,.dv-code .hljs-tag,.dv-code .hljs-deletion{color:var(--syn-tag)}
+.dv-code .hljs-comment,.dv-code .hljs-quote,.dv-code .hljs-meta{color:var(--syn-comment);font-style:italic}
+.dv-code .hljs-meta .hljs-keyword,.dv-code .hljs-meta .hljs-string{font-style:normal}
+.dv-code .hljs-emphasis{font-style:italic}
+.dv-code .hljs-strong{font-weight:700}
+.dv-wide{display:inline-flex;align-items:center;gap:6px}
+.dv-wide[aria-pressed="true"]{color:var(--accent);border-color:var(--accent-dim)}
+@media(max-width:900px){
+  .dv-body.with-nav{grid-template-columns:minmax(0,1fr)}
+  .dv-nav{position:static;max-height:none}
+  .dv-row{grid-template-columns:36px 36px 14px minmax(0,1fr)}
+  .dv-bar,.dv-sim,.dv-fh .dv-icon{display:none}
+}
 
 /* ---- terminal ----
    The host is what xterm's fit addon measures: it reads that element's computed height
@@ -1269,6 +1367,16 @@ a.list-row:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .ss-approval-foot{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-3) var(--space-4)}
 .ss-approval-foot .muted{flex:1;font-size:var(--text-sm)}
 .ss-allow{background:var(--warn);color:#1a1406}
+.ss-allow.ss-allow-hot{background:var(--bad);color:#1a0606}
+/* What a git or gh command reaches, under the command itself. */
+.ss-git{list-style:none;margin:0 var(--space-4) var(--space-3);padding:var(--space-2) var(--space-3);display:grid;gap:var(--space-1);border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-sunken);font-size:var(--text-sm)}
+.ss-git.ss-git-local{border-color:var(--warn-line)}
+.ss-git.ss-git-remote{border-color:var(--bad-line)}
+.ss-git li{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:var(--space-2);row-gap:2px}
+.ss-git-scope{flex:none;font-size:var(--text-xs);font-weight:650;border-radius:999px;padding:0 7px;border:1px solid var(--line);color:var(--muted)}
+li.ss-git-local .ss-git-scope{color:var(--warn);border-color:var(--warn-line);background:var(--warn-bg)}
+li.ss-git-remote .ss-git-scope{color:var(--bad);border-color:var(--bad-line);background:var(--bad-bg)}
+.ss-git-warn{font-size:var(--text-xs);font-weight:650;color:var(--bad)}
 .ss-ring{flex:none}
 .ss-ring-track{fill:none;stroke:var(--warn-bg);stroke-width:3}
 .ss-ring-fill{fill:none;stroke:var(--warn);stroke-width:3;stroke-linecap:round;transition:stroke-dashoffset 1s linear}
@@ -1306,6 +1414,28 @@ a.list-row:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .ss-nudge-head h3{margin:0;font-size:var(--text-md);color:var(--text);text-transform:none;letter-spacing:normal}
 .ss-nudge p{margin:0;font-size:var(--text-sm);line-height:1.55;color:var(--muted)}
 .ss-nudge-actions{display:flex;gap:var(--space-2)}
+/* Conversation modes. Read-only is the quiet default; Can edit is marked in warn, the
+   colour the approval panel already uses for "this touches your checkout". */
+.ss-mode{flex:none}
+.ss-mode .seg-btn{padding:var(--space-1) var(--space-3);font-size:var(--text-xs)}
+.ss-mode .seg-btn.active.ss-mode-read{color:var(--info);background:var(--info-bg)}
+.ss-mode .seg-btn.active.ss-mode-edit{color:var(--warn);background:var(--warn-bg)}
+.ss-mode-filter{display:flex;margin-top:var(--space-2)}
+.ss-mode-filter .seg-btn{flex:1;padding:var(--space-1) var(--space-2);font-size:var(--text-xs)}
+.ss-mode-tag{flex:none;font-size:10.5px;font-weight:650;color:var(--warn);border:1px solid var(--warn-line);background:var(--warn-bg);border-radius:999px;padding:0 7px;line-height:17px}
+.ss-row-system .ss-row-name{color:var(--muted);font-weight:500}
+.ss-system-toggle{display:block;background:none;border:none;color:var(--muted);font-size:var(--text-xs);padding:var(--space-2);cursor:pointer;text-align:left}
+.ss-system-toggle:hover{color:var(--text)}
+.ss-lock{margin:var(--space-3) var(--space-5) 0;padding:var(--space-2) var(--space-3);border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-1);font-size:var(--text-sm);color:var(--muted)}
+.ss-divider{display:flex;align-items:center;gap:var(--space-3);font-size:var(--text-xs);font-weight:600}
+.ss-divider::before,.ss-divider::after{content:'';flex:1;border-top:1px solid var(--line)}
+.ss-divider-edit{color:var(--warn)}
+.ss-divider-read{color:var(--info)}
+.ss-draft{padding:var(--space-3) var(--space-4);border:1px solid var(--info-line);border-radius:var(--radius);background:var(--surface-1);display:grid;gap:var(--space-2)}
+.ss-draft-head{display:flex;align-items:center;gap:var(--space-2);color:var(--accent);min-width:0}
+.ss-draft-head b{color:var(--text);flex:1;min-width:0;overflow-wrap:anywhere}
+.ss-draft p{margin:0;font-size:var(--text-sm);line-height:1.55;color:var(--muted);white-space:pre-wrap}
+.ss-draft-actions{display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap;font-size:var(--text-xs)}
 .ss-facts{font-size:var(--text-sm)}
 .ss-facts>div{display:flex;justify-content:space-between;gap:var(--space-3);color:var(--muted);min-width:0}
 .ss-facts>div>span:last-child{color:var(--text);text-align:right;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1372,6 +1502,11 @@ a.list-row:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .ss-list-foot{padding:var(--space-3) var(--space-2)}
   .ss-conv{background:none}
   .ss-conv-head{padding:0 0 var(--space-3);min-height:0;border-bottom:1px solid var(--line)}
+  /* The mode switch takes its own row here: beside the title it left the name a word. */
+  .ss-conv-head{flex-wrap:wrap}
+  .ss-mode{order:10;flex:1 1 100%;display:flex}
+  .ss-mode .seg-btn{flex:1}
+  .ss-lock{margin:var(--space-3) 0 0}
   .ss-back-btn{display:inline-flex}
   .ss-transcript{overflow:visible;padding:var(--space-5) 0}
   .ss-said{max-width:88%}
@@ -1390,6 +1525,30 @@ a.list-row:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .ss-new-pane{padding:0;display:block;background:none}
   .ss-back{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:var(--text-sm);text-decoration:none}
   .ss-new-head h2{font-size:var(--text-xl)}
+}
+
+/* ---- app-wide approval card ----
+   A conversation's permission prompt, shown on every screen but its own. Bottom
+   right on a desk, where it covers least; a bottom sheet on a phone, like the
+   conversation's own prompt. Below overlays and toasts, above every view. */
+.approval-dock{position:fixed;right:var(--space-5);bottom:var(--space-5);z-index:880;width:min(460px,calc(100vw - 32px));max-height:calc(100dvh - 2 * var(--space-5));overflow-y:auto;display:grid;gap:var(--space-2);animation:ss-rise .18s var(--ease)}
+.approval-dock-from{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2);padding:var(--space-2) var(--space-3);background:var(--surface-2);border:1px solid var(--warn-line);border-radius:var(--radius);box-shadow:var(--shadow-2);font-size:var(--text-sm);min-width:0}
+.approval-dock-dot{width:8px;height:8px;border-radius:50%;background:var(--warn);flex:none;animation:approval-pulse 1.4s ease-in-out infinite}
+@keyframes approval-pulse{50%{opacity:.35}}
+.approval-dock-name{font-weight:650;overflow-wrap:anywhere}
+.approval-dock-open{margin-left:auto;color:var(--accent);text-decoration:none;white-space:nowrap}
+.approval-dock-later{padding-inline:var(--space-2)}
+.approval-dock-open:hover{text-decoration:underline}
+/* The shrunk form: top centre, where nothing in a view keeps a control. */
+.approval-pill{position:fixed;top:var(--space-4);left:50%;transform:translateX(-50%);z-index:880;display:flex;align-items:center;gap:var(--space-2);max-width:calc(100vw - 32px);padding:var(--space-2) var(--space-3);background:var(--surface-2);color:var(--text);border:1px solid var(--warn-line);border-radius:999px;box-shadow:var(--shadow-2);font:inherit;font-size:var(--text-sm);cursor:pointer;white-space:nowrap}
+.approval-pill .approval-dock-name{overflow:hidden;text-overflow:ellipsis}
+.approval-pill-go{color:var(--warn);font-weight:650}
+.approval-pill:hover{border-color:var(--warn)}
+@media(prefers-reduced-motion:reduce){.approval-dock,.approval-dock-dot{animation:none}}
+@media(max-width:1000px){
+  .approval-dock{left:0;right:0;bottom:0;width:auto;max-height:88dvh;gap:0;background:var(--surface-1);border-top:1px solid var(--warn-line);border-radius:20px 20px 0 0;box-shadow:var(--shadow-3)}
+  .approval-dock-from{border:0;border-bottom:1px solid var(--line);border-radius:0;box-shadow:none;background:none;padding:var(--space-3) var(--space-4)}
+  .approval-dock .ss-approval{position:static;max-height:none;border:0;border-radius:0;box-shadow:none;animation:none}
 }
 
 /* ---- data table ---- */
@@ -1650,6 +1809,12 @@ a.list-row:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .port-verdict p{margin:0}
 .port-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--space-4);align-items:start}
 .port-grid-wide{grid-template-columns:minmax(0,1fr) 320px}
+/* Details and the change each take the full width: the change carries its own file
+   list beside the diff, and a column beside that would leave the code a third of it.
+   Details runs across as a strip of facts instead. */
+.port-details,.port-change{display:grid;gap:var(--space-3);min-width:0}
+.port-details h3,.port-change h3{margin:0}
+.port-details .port-dl{grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:var(--space-3) var(--space-5)}
 .port-grid>:only-child{grid-column:1/-1}
 .port-grid>.card{display:grid;gap:var(--space-3);min-width:0}
 .port-grid h3{margin:0}

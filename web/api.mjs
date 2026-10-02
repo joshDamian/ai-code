@@ -201,8 +201,8 @@ export const api = {
   // rather than its result - the turn is read back through the stream, for the same
   // reason a chat turn is.
   sessions: (projectId) => request(`/api/sessions${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
-  createSession: (projectId, name, { providerId = null, modelId = null } = {}) =>
-    request('/api/sessions', { method: 'POST', body: { projectId, name, providerId, modelId } }),
+  createSession: (projectId, name, { providerId = null, modelId = null, mode } = {}) =>
+    request('/api/sessions', { method: 'POST', body: { projectId, name, providerId, modelId, ...(mode ? { mode } : {}) } }),
   sessionSpend: () => request('/api/session-spend'),
   session: (id) => request(`/api/sessions/${id}`),
   updateSession: (id, body) => request(`/api/sessions/${id}`, { method: 'PATCH', body }),
@@ -214,6 +214,8 @@ export const api = {
   draftSessionTask: (id) => request(`/api/sessions/${id}/draft-task`, { method: 'POST' }),
   // `allow` is the only action that grants; the server reads every other word as a
   // denial, so this is a verb and not a boolean.
+  // Every prompt waiting on the machine, for the app-wide approval card.
+  pendingPermissions: () => request('/api/permissions'),
   answerSessionPermission: (sessionId, reqId, action) =>
     request(`/api/sessions/${sessionId}/permissions/${reqId}`, { method: 'POST', body: { action } }),
 

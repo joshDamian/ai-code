@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conversations Prototype</title>
+<style>
+/* Tokens copied from web/index.html so the prototype reads as the app does. */
+:root{
+  --bg:#0a0c10;--text:#edf2f7;--muted:#8e9aaa;--accent:#9fb9ff;--accent-dim:#4a6fa5;--on-accent:#0b0d10;
+  --radius:10px;--radius-sm:6px;
+  --font-ui:-apple-system,BlinkMacSystemFont,"Inter",ui-sans-serif,system-ui,sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --text-xs:11px;--text-sm:12.5px;--text-md:14px;--text-lg:16px;--text-xl:20px;
+  --surface-sunken:#090b0e;--surface-0:#0b0e12;--surface-1:#11151b;--surface-2:#171c23;--surface-3:#1d232c;--surface-rail:#0d1014;
+  --line:#29313c;--line-strong:#39424f;--scrim:rgba(4,6,9,.62);
+  --shadow-1:0 1px 2px rgba(0,0,0,.30);
+  --good:#6fe0a1;--good-bg:rgba(111,224,161,.10);--good-line:#2c5c46;
+  --warn:#ffd37a;--warn-bg:rgba(255,211,122,.10);--warn-line:#5c4f2c;
+  --bad:#ff8585;--bad-bg:rgba(255,133,133,.10);--bad-line:#5c2c2c;
+  --info:#9fb9ff;--info-bg:rgba(159,185,255,.10);--info-line:#4a6fa5;
+  --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-6:24px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:var(--text-md)/1.5 var(--font-ui);-webkit-font-smoothing:antialiased}
+button,textarea{font:inherit;color:inherit}
+code{font-family:var(--font-mono);font-size:var(--text-sm)}
+.muted{color:var(--muted)}
+.btn{display:inline-flex;align-items:center;gap:var(--space-2);border-radius:var(--radius-sm);cursor:pointer;background:var(--surface-2);border:1px solid var(--line);padding:5px var(--space-3);font-size:var(--text-sm);font-weight:600}
+.btn:hover{border-color:var(--line-strong)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.primary{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.btn.good{color:var(--good);border-color:var(--good-line);background:var(--good-bg)}
+.btn.bad{color:var(--bad);border-color:var(--bad-line);background:var(--bad-bg)}
+.btn.ghost{background:none}
+.badge{display:inline-flex;align-items:center;gap:4px;font-size:var(--text-xs);font-weight:650;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.badge.read{color:var(--info);border-color:var(--info-line);background:var(--info-bg)}
+.badge.edit{color:var(--warn);border-color:var(--warn-line);background:var(--warn-bg)}
+.badge.live{color:var(--good);border-color:var(--good-line);background:var(--good-bg)}
+.dot{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block}
+
+/* ---- prototype chrome ---- */
+.proto{max-width:1240px;margin:0 auto;padding:var(--space-5) var(--space-4) 60px}
+.proto-bar{display:flex;justify-content:space-between;align-items:flex-end;gap:var(--space-4);flex-wrap:wrap;margin-bottom:var(--space-4)}
+.proto-bar h1{font-size:var(--text-xl);margin:0}
+.proto-note{color:var(--muted);font-size:var(--text-sm);margin:2px 0 0;max-width:640px}
+.scenarios{display:flex;gap:var(--space-2);flex-wrap:wrap}
+.scenarios .btn.on{color:var(--accent);border-color:var(--accent-dim)}
+
+/* ---- the app frame ---- */
+.app{display:grid;grid-template-columns:300px 1fr;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;min-height:640px;background:var(--surface-0)}
+.rail{background:var(--surface-rail);border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0}
+.rail-head{display:flex;justify-content:space-between;align-items:center;padding:var(--space-3) var(--space-3) var(--space-2)}
+.rail-head b{font-size:var(--text-md)}
+.project-pick{margin:0 var(--space-3) var(--space-2);font-size:var(--text-sm);color:var(--muted)}
+.filters{display:flex;gap:4px;padding:0 var(--space-3) var(--space-2)}
+.filters .btn{padding:2px 9px;font-size:var(--text-xs)}
+.filters .btn.on{color:var(--accent);border-color:var(--accent-dim)}
+.list{flex:1;overflow:auto;padding:0 var(--space-2) var(--space-2)}
+.row{display:block;width:100%;text-align:left;background:none;border:1px solid transparent;border-radius:var(--radius-sm);padding:var(--space-2) var(--space-2);cursor:pointer;margin-bottom:2px}
+.row:hover{background:var(--surface-1)}
+.row.active{background:var(--surface-2);border-color:var(--line)}
+.row-top{display:flex;justify-content:space-between;gap:var(--space-2);align-items:center}
+.row-title{font-weight:600;font-size:var(--text-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row-sub{font-size:var(--text-xs);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
+.row.system .row-title{color:var(--muted);font-weight:500}
+.system-toggle{margin:var(--space-2) var(--space-3) var(--space-3);font-size:var(--text-xs);color:var(--muted);background:none;border:none;cursor:pointer;text-align:left;padding:0}
+.system-toggle:hover{color:var(--text)}
+
+.main{display:flex;flex-direction:column;min-width:0}
+.head{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.head-title{display:flex;align-items:center;gap:var(--space-2);min-width:0}
+.head-title b{font-size:var(--text-lg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mode{display:flex;align-items:center;gap:var(--space-2)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:var(--radius-sm);overflow:hidden}
+.seg button{background:var(--surface-1);border:none;padding:5px 12px;font-size:var(--text-sm);font-weight:600;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.on.read{color:var(--info);background:var(--info-bg)}
+.seg button.on.edit{color:var(--warn);background:var(--warn-bg)}
+.seg button:disabled{cursor:not-allowed;opacity:.5}
+.meta{display:flex;gap:var(--space-4);padding:var(--space-2) var(--space-4);border-bottom:1px solid var(--line);font-size:var(--text-xs);color:var(--muted);flex-wrap:wrap}
+.meta b{color:var(--text);font-weight:600}
+.lock{margin:var(--space-3) var(--space-4) 0;padding:var(--space-2) var(--space-3);border:1px solid var(--line);border-radius:var(--radius-sm);font-size:var(--text-sm);color:var(--muted);background:var(--surface-1)}
+.lock a{color:var(--accent);cursor:pointer}
+
+.transcript{flex:1;overflow:auto;padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-4)}
+.msg-user{align-self:flex-end;max-width:78%;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius) var(--radius) 2px var(--radius);padding:var(--space-2) var(--space-3)}
+.msg-agent{max-width:92%}
+.msg-agent p{margin:0 0 var(--space-2)}
+.steps{display:flex;flex-direction:column;gap:2px;margin-bottom:var(--space-2)}
+.step{font-family:var(--font-mono);font-size:var(--text-xs);color:var(--muted);display:flex;gap:var(--space-2);align-items:baseline}
+.step .tool{color:var(--text)}
+.step.apptool .tool{color:var(--info)}
+.step.denied .tool{color:var(--bad)}
+.step.write .tool{color:var(--warn)}
+.divider{display:flex;align-items:center;gap:var(--space-3);font-size:var(--text-xs);color:var(--muted)}
+.divider::before,.divider::after{content:"";flex:1;border-top:1px solid var(--line)}
+.divider.edit{color:var(--warn)}
+.divider.read{color:var(--info)}
+
+.card{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface-1);padding:var(--space-3)}
+.draft{border-color:var(--info-line)}
+.draft-head{display:flex;justify-content:space-between;align-items:center;gap:var(--space-2);margin-bottom:4px}
+.draft h4{margin:0;font-size:var(--text-md)}
+.draft p{margin:0 0 var(--space-2);font-size:var(--text-sm);color:var(--muted)}
+.draft-actions{display:flex;gap:var(--space-2)}
+.draft.done{border-color:var(--good-line)}
+
+.perm{margin:0 var(--space-4) var(--space-3);border:1px solid var(--warn-line);background:var(--warn-bg);border-radius:var(--radius);padding:var(--space-3);display:grid;grid-template-columns:1fr auto;gap:var(--space-3);align-items:start}
+.perm h4{margin:0 0 4px;font-size:var(--text-md)}
+.perm pre{margin:0;font-family:var(--font-mono);font-size:var(--text-xs);background:var(--surface-sunken);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-2);white-space:pre-wrap;overflow-wrap:anywhere}
+.perm-side{display:flex;flex-direction:column;gap:var(--space-2);align-items:flex-end}
+.perm-time{font-size:var(--text-xs);color:var(--muted)}
+
+.composer{border-top:1px solid var(--line);padding:var(--space-3) var(--space-4);display:flex;flex-direction:column;gap:var(--space-2)}
+.composer textarea{width:100%;min-height:56px;resize:vertical;background:var(--surface-1);border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--space-2) var(--space-3)}
+.composer textarea:focus{outline:none;border-color:var(--accent-dim)}
+.composer-foot{display:flex;justify-content:space-between;align-items:center;gap:var(--space-2);font-size:var(--text-xs);color:var(--muted)}
+
+/* ---- the confirm sheet for switching to Can edit ---- */
+.scrim{position:fixed;inset:0;background:var(--scrim);display:none;align-items:center;justify-content:center;padding:var(--space-4);z-index:10}
+.scrim.open{display:flex}
+.sheet{max-width:440px;width:100%;background:var(--surface-1);border:1px solid var(--line-strong);border-radius:var(--radius);padding:var(--space-5)}
+.sheet h3{margin:0 0 var(--space-2);font-size:var(--text-lg)}
+.sheet ul{margin:0 0 var(--space-4);padding-left:18px;color:var(--muted);font-size:var(--text-sm)}
+.sheet li{margin-bottom:4px}
+.sheet li b{color:var(--text)}
+.sheet-foot{display:flex;justify-content:flex-end;gap:var(--space-2)}
+
+.notes{margin-top:var(--space-5);display:grid;gap:var(--space-2);font-size:var(--text-sm);color:var(--muted);max-width:820px}
+.notes b{color:var(--text)}
+
+.back{display:none}
+@media (max-width:760px){
+  .app{grid-template-columns:1fr}
+  .app.show-main .rail{display:none}
+  .app:not(.show-main) .main{display:none}
+  .back{display:inline-flex}
+  .perm{grid-template-columns:1fr}
+  .perm-side{align-items:stretch}
+  .msg-user{max-width:92%}
+}
+</style>
+</head>
+<body>
+<div class="proto">
+  <div class="proto-bar">
+    <div>
+      <h1>Conversations: Chat and Sessions as one surface</h1>
+      <p class="proto-note">One list, one view. A conversation is <b>Read-only</b> or <b>Can edit</b>, and you switch it in the header without starting over. Click through the scenarios, or use the controls directly.</p>
+    </div>
+    <div class="scenarios" id="scenarios"></div>
+  </div>
+
+  <div class="app" id="app">
+    <aside class="rail">
+      <div class="rail-head">
+        <b>Conversations</b>
+        <button class="btn primary" id="new">New</button>
+      </div>
+      <div class="project-pick">Project: <b style="color:var(--text)">Novara</b></div>
+      <div class="filters" id="filters"></div>
+      <div class="list" id="list"></div>
+      <button class="system-toggle" id="sysToggle"></button>
+    </aside>
+
+    <section class="main">
+      <div class="head">
+        <div class="head-title">
+          <button class="btn ghost back" id="back" aria-label="Back to conversations">‹</button>
+          <b id="title"></b>
+          <span id="liveBadge"></span>
+        </div>
+        <div class="mode">
+          <div class="seg" role="group" aria-label="Mode">
+            <button id="modeRead" class="read">Read-only</button>
+            <button id="modeEdit" class="edit">Can edit</button>
+          </div>
+        </div>
+      </div>
+      <div class="meta" id="meta"></div>
+      <div id="lock"></div>
+      <div class="transcript" id="transcript"></div>
+      <div id="perm"></div>
+      <div class="composer">
+        <textarea id="input" placeholder=""></textarea>
+        <div class="composer-foot">
+          <span id="hint"></span>
+          <button class="btn primary" id="send">Send</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="notes">
+    <div><b>Mode is per conversation, switched by later turns.</b> History carries over. The switch is a divider in the transcript, so a reader can see which answers were given read-only and which turns could edit.</div>
+    <div><b>Switching to Can edit asks once.</b> The sheet says what changes: writes go through the approval panel, a budget starts, and the checkout is locked to this conversation. Switching back needs no confirm.</div>
+    <div><b>One editing conversation per project.</b> When another conversation holds the checkout, Can edit is disabled with a link to it. Read-only conversations are never blocked.</div>
+    <div><b>Both modes have the same reading tools and draft_task.</b> A read-only conversation that finds a bug drafts the task itself; the card shows it landed in the approval queue, and Approve here is the same action as in the project's queue.</div>
+    <div><b>System conversations are hidden by default.</b> Proposals, intake, infer-spec and Draft as task still create rows; they sit behind "Show system conversations".</div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+  <div class="sheet">
+    <h3 id="sheetTitle">Allow this conversation to edit?</h3>
+    <ul>
+      <li><b>Writes and commands need your approval</b>, one at a time, in a panel above the composer.</li>
+      <li><b>It works in the Novara checkout itself</b>, not a copy. No other conversation can edit Novara until this one goes back to Read-only.</li>
+      <li><b>A budget starts</b>: $2.00 per conversation today.</li>
+      <li><b>It still cannot commit, merge or push.</b> Work that grows task-shaped becomes a drafted task.</li>
+    </ul>
+    <div class="sheet-foot">
+      <button class="btn" id="cancelEdit">Stay read-only</button>
+      <button class="btn primary" id="confirmEdit">Allow edits</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Sample data: the email-dedupe conversation from the transcript that started this,
+// replayed the way the merged surface would show it.
+const DRAFT = {
+  title: 'Fix email dedupe across signup paths',
+  body: 'Add a case-insensitive collation to the users.email unique index, lowercase emails in a Pydantic validator on every user model, and audit production for existing case-variant duplicates before deploying.',
+};
+
+const convos = [
+  {
+    id: 'dedupe', title: 'Are emails deduped across case variants?', mode: 'read', when: '4m', spend: 0.02, system: false,
+    turns: [
+      { user: 'Can you verify if emails are properly deduped, accounting for case variants and all?' },
+      { steps: [['Grep', 'create_index("email"'], ['Read', 'backend/database.py'], ['Read', 'routes/auth.py'], ['Read', 'routes/wa_flow_endpoint.py'], ['Read', 'services/wa_onboarding.py']],
+        text: ['No. The unique index on <code>email</code> has no collation, so <code>Josh@Example.com</code> and <code>josh@example.com</code> are both accepted.', 'The PWA signup stores the email as given; both WhatsApp paths lowercase it first. A PWA signup and a WhatsApp signup for the same person both succeed.'] },
+      { user: 'Put all of these in one task brief and create a task on the Novara project.' },
+      { steps: [['draft_task', DRAFT.title, 'apptool']], draft: true,
+        text: ['Drafted it into the Novara approval queue. It becomes a task when you approve it.'] },
+    ],
+  },
+  {
+    id: 'readme', title: 'Fix the setup steps in the README', mode: 'edit', when: '1h', spend: 0.41, system: false,
+    turns: [
+      { user: 'The README still says to run pip install -r requirements.txt. We moved to uv. Fix the setup section.' },
+      { divider: 'edit' },
+      { steps: [['Read', 'README.md'], ['Edit', 'README.md', 'write']], text: ['Updated the setup section to <code>uv sync</code> and removed the virtualenv steps it replaces.'] },
+    ],
+  },
+  {
+    id: 'cost', title: 'What did Novara cost this week?', mode: 'read', when: 'yesterday', spend: 0.03, system: false,
+    turns: [
+      { user: 'What did Novara cost this week, and which task was the most expensive?' },
+      { steps: [['usage', 'period: 7d', 'apptool'], ['list_runs', 'project: Novara, since: 7d', 'apptool']], text: ['$14.80 across 31 runs. The most expensive task was <code>a1f09c2e</code> "Move push notifications to the queue" at $4.12, mostly two repair rounds after a failing test.'] },
+    ],
+  },
+  { id: 'sys1', title: 'Task proposals', mode: 'read', when: '2d', spend: 0.18, system: true, turns: [{ user: 'Draft a batch of tasks against the spec.' }, { text: ['Drafted 4 tasks.'] }] },
+  { id: 'sys2', title: 'Infer spec', mode: 'read', when: '5d', spend: 0.09, system: true, turns: [{ user: 'Infer the spec from the code.' }, { text: ['Spec drafted for approval.'] }] },
+];
+
+const state = { active: 'dedupe', filter: 'all', showSystem: false, perm: null, draftDone: false, mobileMain: false };
+const $ = (id) => document.getElementById(id);
+const current = () => convos.find((c) => c.id === state.active);
+
+// Each scenario sets every conversation's mode it depends on, so they can be clicked
+// in any order: the lock in 4 would otherwise block the switch in 2.
+const SCENARIOS = [
+  ['Read-only + draft', () => { Object.assign(state, { active: 'dedupe', perm: null, draftDone: false, mobileMain: true }); setMode('readme', 'read'); setMode('dedupe', 'read'); }],
+  ['Switch to Can edit', () => { Object.assign(state, { active: 'dedupe', perm: null, mobileMain: true }); setMode('readme', 'read'); setMode('dedupe', 'read'); openSheet(); }],
+  ['Approval waiting', () => { Object.assign(state, { active: 'readme', mobileMain: true }); setMode('dedupe', 'read'); setMode('readme', 'edit'); askPermission(); }],
+  ['Checkout locked', () => { Object.assign(state, { active: 'dedupe', perm: null, mobileMain: true }); setMode('dedupe', 'read'); setMode('readme', 'edit'); }],
+];
+
+function setMode(id, mode) { convos.find((c) => c.id === id).mode = mode; return {}; }
+function editingOther() { return convos.find((c) => c.mode === 'edit' && c.id !== state.active && !c.system); }
+
+function renderScenarios() {
+  $('scenarios').innerHTML = '';
+  SCENARIOS.forEach(([label, run], i) => {
+    const b = document.createElement('button');
+    b.className = 'btn';
+    b.textContent = `${i + 1}. ${label}`;
+    b.onclick = () => { run(); render(); };
+    $('scenarios').append(b);
+  });
+}
+
+function badge(mode) {
+  return mode === 'edit' ? '<span class="badge edit"><span class="dot"></span>Can edit</span>' : '<span class="badge read">Read-only</span>';
+}
+
+function renderList() {
+  $('filters').innerHTML = '';
+  for (const [k, label] of [['all', 'All'], ['read', 'Read-only'], ['edit', 'Can edit']]) {
+    const b = document.createElement('button');
+    b.className = `btn ${state.filter === k ? 'on' : ''}`;
+    b.textContent = label;
+    b.onclick = () => { state.filter = k; render(); };
+    $('filters').append(b);
+  }
+  const rows = convos.filter((c) => (state.showSystem || !c.system) && (state.filter === 'all' || c.mode === state.filter));
+  $('list').innerHTML = rows.map((c) => {
+    const last = [...c.turns].reverse().find((t) => t.text)?.text[0].replace(/<[^>]+>/g, '') || '';
+    return `<button class="row ${c.id === state.active ? 'active' : ''} ${c.system ? 'system' : ''}" data-id="${c.id}">
+      <div class="row-top"><span class="row-title">${c.title}</span>${c.system ? '<span class="badge">system</span>' : badge(c.mode)}</div>
+      <div class="row-sub">${c.when} · $${c.spend.toFixed(2)} · ${last}</div></button>`;
+  }).join('') || '<p class="muted" style="padding:8px;font-size:12.5px">Nothing in this filter.</p>';
+  $('list').querySelectorAll('.row').forEach((r) => (r.onclick = () => { state.active = r.dataset.id; state.perm = null; state.mobileMain = true; render(); }));
+  const n = convos.filter((c) => c.system).length;
+  $('sysToggle').textContent = state.showSystem ? 'Hide system conversations' : `Show system conversations (${n})`;
+}
+
+function renderMain() {
+  const c = current();
+  const other = editingOther();
+  $('app').classList.toggle('show-main', state.mobileMain);
+  $('title').textContent = c.title;
+  $('liveBadge').innerHTML = c.mode === 'edit' ? '<span class="badge live"><span class="dot"></span>holds the checkout</span>' : '';
+  $('modeRead').classList.toggle('on', c.mode === 'read');
+  $('modeEdit').classList.toggle('on', c.mode === 'edit');
+  $('modeEdit').disabled = !!other && c.mode !== 'edit';
+  $('modeEdit').title = $('modeEdit').disabled ? `"${other.title}" is editing Novara` : '';
+  $('meta').innerHTML = c.mode === 'edit'
+    ? `<span>Spent <b>$${c.spend.toFixed(2)}</b> of $2.00 today</span><span>Works in <b>~/Code/novara</b></span><span>Every write asks you first</span>`
+    : `<span>Spent <b>$${c.spend.toFixed(2)}</b></span><span>Reads the repo and AI Code's records</span><span>Changes nothing</span>`;
+  $('lock').innerHTML = $('modeEdit').disabled
+    ? `<div class="lock">Can edit is unavailable: <a data-go="${other.id}">${other.title}</a> holds the Novara checkout. Switch it to Read-only to free it.</div>` : '';
+  $('lock').querySelector('a')?.addEventListener('click', (e) => { state.active = e.target.dataset.go; render(); });
+
+  $('transcript').innerHTML = c.turns.map((t) => {
+    if (t.divider) return `<div class="divider ${t.divider}">${t.divider === 'edit' ? 'Switched to Can edit' : 'Switched to Read-only'}</div>`;
+    if (t.user) return `<div class="msg-user">${t.user}</div>`;
+    const steps = (t.steps || []).map(([tool, target, kind]) => `<div class="step ${kind || ''}"><span class="tool">${tool}</span><span>${target}</span>${kind === 'denied' ? '<span>· denied</span>' : ''}</div>`).join('');
+    const draft = t.draft ? `<div class="card draft ${state.draftDone ? 'done' : ''}">
+      <div class="draft-head"><h4>${DRAFT.title}</h4>${state.draftDone ? '<span class="badge live">Task created</span>' : '<span class="badge read">Waiting for approval</span>'}</div>
+      <p>${DRAFT.body}</p>
+      ${state.draftDone ? '<span class="muted" style="font-size:12.5px">Now in Tasks as <code>7c41d0b2</code>, ready to plan.</span>' : '<div class="draft-actions"><button class="btn primary" data-draft="approve">Approve</button><button class="btn" data-draft="drop">Drop</button><span class="muted" style="font-size:11px;align-self:center">Same queue as the project page</span></div>'}
+    </div>` : '';
+    return `<div class="msg-agent">${steps ? `<div class="steps">${steps}</div>` : ''}${(t.text || []).map((p) => `<p>${p}</p>`).join('')}${draft}</div>`;
+  }).join('');
+  $('transcript').querySelectorAll('[data-draft]').forEach((b) => (b.onclick = () => { if (b.dataset.draft === 'approve') state.draftDone = true; else c.turns = c.turns.map((t) => (t.draft ? { ...t, draft: false, text: ['Draft dropped.'] } : t)); render(); }));
+  $('transcript').scrollTop = $('transcript').scrollHeight;
+
+  $('perm').innerHTML = state.perm && c.mode === 'edit' ? `<div class="perm">
+      <div><h4>Allow Edit on README.md?</h4><pre>- pip install -r requirements.txt\n+ uv sync</pre></div>
+      <div class="perm-side"><span class="perm-time">Denies itself in 1:52</span><button class="btn good" id="allow">Allow</button><button class="btn bad" id="deny">Deny</button></div>
+    </div>` : '';
+  $('allow')?.addEventListener('click', () => answer(true));
+  $('deny')?.addEventListener('click', () => answer(false));
+
+  $('input').placeholder = c.mode === 'edit' ? 'Tell it what to change. Each write asks you first.' : 'Ask about the code, tasks, runs or spend.';
+  $('hint').textContent = c.mode === 'edit' ? 'Can edit · writes need approval' : 'Read-only · nothing here changes files';
+}
+
+function render() { renderList(); renderMain(); }
+
+function openSheet() { $('scrim').classList.add('open'); $('confirmEdit').focus(); }
+function closeSheet() { $('scrim').classList.remove('open'); }
+function askPermission() { state.perm = true; }
+function answer(ok) {
+  const c = current();
+  c.turns.push({ steps: [['Edit', 'README.md', ok ? 'write' : 'denied']], text: [ok ? 'Done.' : 'You denied the edit, so README.md is unchanged.'] });
+  state.perm = null;
+  render();
+}
+
+$('modeEdit').onclick = () => { if (current().mode !== 'edit') openSheet(); };
+$('modeRead').onclick = () => {
+  const c = current();
+  if (c.mode === 'read') return;
+  c.mode = 'read';
+  c.turns.push({ divider: 'read' });
+  state.perm = null;
+  render();
+};
+$('confirmEdit').onclick = () => { const c = current(); c.mode = 'edit'; c.turns.push({ divider: 'edit' }); closeSheet(); render(); };
+$('cancelEdit').onclick = closeSheet;
+$('scrim').onclick = (e) => { if (e.target === $('scrim')) closeSheet(); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
+$('sysToggle').onclick = () => { state.showSystem = !state.showSystem; render(); };
+$('back').onclick = () => { state.mobileMain = false; render(); };
+$('new').onclick = () => {
+  const id = `new${Date.now()}`;
+  convos.unshift({ id, title: 'New conversation', mode: 'read', when: 'now', spend: 0, system: false, turns: [] });
+  Object.assign(state, { active: id, perm: null, mobileMain: true });
+  render();
+  $('input').focus();
+};
+$('send').onclick = () => {
+  const c = current();
+  const text = $('input').value.trim();
+  if (!text) return;
+  if (c.title === 'New conversation') c.title = text.slice(0, 48);
+  c.turns.push({ user: text });
+  $('input').value = '';
+  if (c.mode === 'edit') { askPermission(); c.turns.push({ steps: [['Read', 'README.md']], text: ['Reading README.md, then I need to edit it.'] }); }
+  else c.turns.push({ steps: [['list_tasks', 'project: Novara', 'apptool']], text: ['(Prototype) A read-only answer would appear here, grounded in the files and records it read.'] });
+  render();
+};
+
+renderScenarios();
+setMode('readme', 'read');
+render();
+</script>
+</body>
+</html>

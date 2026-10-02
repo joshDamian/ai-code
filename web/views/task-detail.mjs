@@ -305,7 +305,7 @@ export function TaskDetail({ id, navigate, onTitle }) {
   async function confirmCancel(task) {
     const ok = await confirmAction({
       title: 'Cancel this run?',
-      body: 'The agent stops at the next step. Work already written to the worktree stays where it is.',
+      body: 'The agent stops at its next step. Changes made so far are kept.',
       confirmLabel: 'Cancel run',
       cancelLabel: 'Keep running',
       tone: 'danger',
@@ -318,7 +318,7 @@ export function TaskDetail({ id, navigate, onTitle }) {
   async function confirmClose(task) {
     const ok = await confirmAction({
       title: 'Close this task?',
-      body: 'The task is marked closed and its worktree is discarded. Anything not merged is lost, and there is no undo.',
+      body: 'The worktree is deleted. Anything not merged is lost. This can\'t be undone.',
       confirmLabel: 'Close task',
       cancelLabel: 'Keep it',
       tone: 'danger',
@@ -612,7 +612,7 @@ function PlanTab({ task, runs, busy, run, live, revision, revisedAt, readAction,
               options=${options}
               onChange=${(v) => run(() => api.taskSetPlanModel(task.id, v), 'Planning model saved.')}
             />
-            ${open ? html`<span class="muted">provider circuit open — the router will pick another model</span>` : null}
+            ${open ? html`<span class="muted">this provider is failing, so another model will be used</span>` : null}
           </div>
         `;
       })()
@@ -941,7 +941,7 @@ function NextStepBar({ task, runs, live, ported, revision, tab, busy, planMode, 
           tone: 'info',
           icon: 'play',
           title: 'Plan approved',
-          detail: 'Execution creates a worktree on a new branch and carries out the plan there.',
+          detail: 'Execution carries out the plan on a new branch, in its own worktree.',
           actions: [{ label: 'Start execution', kind: 'primary', onClick: () => run(() => api.taskExecute(task.id), 'Execution started.') }],
         };
       case 'IMPLEMENTING':
@@ -949,8 +949,8 @@ function NextStepBar({ task, runs, live, ported, revision, tab, busy, planMode, 
           tone: 'warn',
           icon: 'alert',
           title: 'No implementer running',
-          detail: 'The run that set this state ended before moving the task on. Re-arming returns it to approved; the worktree and its changes are kept.',
-          actions: [{ label: 'Re-arm', kind: 'primary', onClick: () => run(() => api.taskApprove(task.id), 'Re-armed. Start execution when ready.') }],
+          detail: 'The implementer stopped before finishing. Reset the task to start execution again. Changes made so far are kept.',
+          actions: [{ label: 'Reset', kind: 'primary', onClick: () => run(() => api.taskApprove(task.id), 'Reset. Start execution when ready.') }],
         };
       case 'REVIEWING': {
         const reviewer = lastOf('reviewer');
@@ -970,7 +970,7 @@ function NextStepBar({ task, runs, live, ported, revision, tab, busy, planMode, 
           tone: 'warn',
           icon: 'alert',
           title: 'Review requested changes',
-          detail: task.feedback ? html`Feedback waiting to be repaired: “${task.feedback}”` : 'The repair works through the review’s findings, then the change is reviewed again.',
+          detail: task.feedback ? html`Your feedback: “${task.feedback}”` : 'The repair fixes what the review found, then the change is reviewed again.',
           actions: [{ label: 'Repair', kind: 'primary', onClick: () => run(() => api.taskRepair(task.id), 'Repair started.') }],
         };
       case 'AWAITING_DECISION':
@@ -989,7 +989,7 @@ function NextStepBar({ task, runs, live, ported, revision, tab, busy, planMode, 
             tone: 'good',
             icon: 'check',
             title: 'Review passed',
-            detail: html`Porting commits the change onto <span class="mono-sm">${portActions.branch}</span>, then merges it into <b>${portActions.target}</b> — chosen below.`,
+            detail: html`Porting commits the change and merges it into <b>${portActions.target}</b>.`,
             actions: [
               { label: 'Preview', kind: 'secondary', onClick: portActions.preview },
               { label: `Port onto ${portActions.target}`, kind: 'primary', onClick: portActions.port },
@@ -1000,7 +1000,7 @@ function NextStepBar({ task, runs, live, ported, revision, tab, busy, planMode, 
           tone: 'good',
           icon: 'check',
           title: 'Review passed',
-          detail: 'The change is ready to land. Porting commits it and merges it into a branch you pick.',
+          detail: 'Port the change to merge it into a branch.',
           actions: [{ label: 'Port this change', kind: 'primary', onClick: () => onGoTo('port') }],
         };
       }
@@ -1102,7 +1102,7 @@ function ExecuteTab({ task, runs, live, onGoTo, copy }) {
           ? html`<div class="exec-tree-row exec-tree-base">
               <span class="muted">Plan baseline</span>
               <span class="mono-sm">${String(base.head || '').slice(0, 12)}</span>
-              <span class="muted">· ${base.dirty && base.dirty.length ? `${base.dirty.length} file${base.dirty.length === 1 ? '' : 's'} dirty when the plan was written` : 'the tree was clean when the plan was written'}</span>
+              <span class="muted">· ${base.dirty && base.dirty.length ? `${base.dirty.length} uncommitted file${base.dirty.length === 1 ? '' : 's'} when planned` : 'no uncommitted files when planned'}</span>
             </div>`
           : null}
       </section>
@@ -1368,8 +1368,8 @@ function StatsTab({ runs, live }) {
 const BEFORE_REVIEW = {
   CREATED: { step: 0, text: 'Not planned yet', tab: 'plan', cta: 'Go to the plan' },
   PLANNING: { step: 0, text: 'Being planned', tab: 'plan', cta: 'Go to the plan' },
-  AWAITING_APPROVAL: { step: 0, text: 'Waiting for your approval', tab: 'plan', cta: 'Go to the plan', note: 'The next move is yours: approve, refine or edit the plan.' },
-  APPROVED: { step: 1, text: 'Approved, ready to run', tab: 'execute', cta: 'Go to execute', note: 'The plan is approved. Start execution to carry it out.' },
+  AWAITING_APPROVAL: { step: 0, text: 'Waiting for your approval', tab: 'plan', cta: 'Go to the plan', note: 'Approve, refine or edit the plan.' },
+  APPROVED: { step: 1, text: 'Approved, ready to run', tab: 'execute', cta: 'Go to execute', note: 'Start execution to carry out the plan.' },
   IMPLEMENTING: { step: 1, text: 'Running', tab: 'execute', cta: 'Watch it run' },
   TESTING: { step: 1, text: 'Testing', tab: 'execute', cta: 'Watch it run' },
 };
@@ -1516,7 +1516,7 @@ function ReadyForReview({ task, runs, busy, run, onAsk, onGoTo }) {
             <div class="review-alert" role="alert">
               <div>
                 <b>The last review did not finish</b>
-                <span>${failed.model_id || 'The reviewer'} ${failed.status === 'cancelled' ? 'was cancelled' : 'failed'}${failed.error ? html`: ${failed.error}` : ''} · <${Time} at=${failed.ended_at || failed.started_at} />. The change is untouched; running it again starts a fresh review.</span>
+                <span>${failed.model_id || 'The reviewer'} ${failed.status === 'cancelled' ? 'was cancelled' : 'failed'}${failed.error ? html`: ${failed.error}` : ''} · <${Time} at=${failed.ended_at || failed.started_at} />. The change is untouched. Run the review again to retry.</span>
               </div>
               <a class="link" href=${`#/runs/${failed.id}`}>See the run</a>
             </div>
@@ -1637,7 +1637,7 @@ function PortTab({ task, branches, busy, run, onActions }) {
   useEffect(() => () => onActions && onActions(null), []);
 
   if (error) return html`<div class="card"><p class="error-text">${error}</p></div>`;
-  if (!view) return html`<${Spinner} message="Reading the worktree..." />`;
+  if (!view) return html`<${Spinner} message="Checking the changes..." />`;
 
   const conflicts = view.conflicts || [];
   const blocked = view.blockedBy || [];
@@ -1688,16 +1688,15 @@ function PortTab({ task, branches, busy, run, onActions }) {
         <section class="card port-dest" aria-label="Destination">
           <h3>Destination</h3>
           <${Select} label="Merge into" value=${target} disabled=${busy} onChange=${setChosen} options=${options} />
-          ${view.alreadyPorted ? html`<p class="muted">Change this to ask about another branch.</p>` : null}
+          ${view.alreadyPorted ? html`<p class="muted">Pick another branch to check it instead.</p>` : null}
           ${actionable && view.worktree
-            ? html`<${Toggle} checked=${removeWorktree} disabled=${busy} onChange=${setRemoveWorktree} label="Remove the worktree after porting" />`
+            ? html`<${Toggle} checked=${removeWorktree} disabled=${busy} onChange=${setRemoveWorktree} label="Delete the worktree after porting" />`
             : null}
           ${actionable
             ? html`<p class="muted port-tests-note">
-                Tests are not re-run here. They ran in the worktree; the destination is a different tree, and this reports
-                what the merge would do rather than vouching for the result.
+                Tests aren't re-run after the merge. Run them on ${target} if you want to be sure.
               </p>`
-            : html`<p class="muted">Nothing to run. <code class="mono-sm">ai-code task port ${shortId(task.id)}</code> reports this same verdict.</p>`}
+            : html`<p class="muted">Nothing to do.</p>`}
         </section>
 
         ${steps.length
@@ -1720,27 +1719,23 @@ function PortTab({ task, branches, busy, run, onActions }) {
           : null}
       </div>
 
-      <div class="port-grid port-grid-wide">
-        <section class="card port-change" aria-label="The change">
-          <h3>${changeLabel(view)}</h3>
-          ${view.diff?.trim() ? html`<${DiffViewer} diff=${view.diff} />` : html`<div class="muted">No change was found for this task.</div>`}
-        </section>
+      <section class="card port-details" aria-label="Details">
+        <h3>Details</h3>
+        <dl class="port-dl">
+          ${dlRow('Worktree', worktreeText(view))}
+          ${dlRow('Branch', view.branch)}
+          ${dlRow('Destination', `${view.target} at ${String(view.targetTip || '').slice(0, 7)}`)}
+          ${dlRow('Merge', conflicts.length ? `${conflicts.length} conflict(s)` : view.clean === null ? 'Unknown' : 'Clean')}
+          ${blocked.length ? dlRow('Blocked by', blocked.join(', ')) : null}
+          ${conflicts.length ? dlRow('Conflicts', conflicts.join(', ')) : null}
+          ${view.premisesMoved?.length ? dlRow('Changed since planning', view.premisesMoved.join(', ')) : null}
+        </dl>
+      </section>
 
-        <section class="card port-details" aria-label="Details">
-          <h3>Details</h3>
-          <dl class="port-dl">
-            ${dlRow('Worktree', worktreeText(view))}
-            ${dlRow('Branch', view.branch)}
-            ${dlRow('Destination', `${view.target} at ${String(view.targetTip || '').slice(0, 7)}`)}
-            ${dlRow('Merge', conflicts.length ? `${conflicts.length} conflict(s)` : view.clean === null ? 'Unknown' : 'Clean')}
-            ${dlRow('Touches', `${(view.files || []).length} file(s)`)}
-            ${view.untracked?.length ? dlRow('Untracked', view.untracked.map((u) => `${u.path} (${u.bytes} B)`).join(', ')) : null}
-            ${blocked.length ? dlRow('Blocked by', blocked.join(', ')) : null}
-            ${conflicts.length ? dlRow('Conflicts', conflicts.join(', ')) : null}
-            ${view.premisesMoved?.length ? dlRow('Plan premises moved', view.premisesMoved.join(', ')) : null}
-          </dl>
-        </section>
-      </div>
+      <section class="card port-change" aria-label="The change">
+        <h3>${changeLabel(view)}</h3>
+        ${view.diff?.trim() ? html`<${DiffViewer} diff=${view.diff} nav=${true} storageKey=${`task:${task.id}`} untracked=${view.untracked} />` : html`<div class="muted">No change was found for this task.</div>`}
+      </section>
     </div>
   `;
 }
@@ -1759,8 +1754,8 @@ function dlRow(label, value) {
 // work arrived in one commit a port wrote or in the several an agent wrote, which is not a
 // distinction the person reading the pane has any use for.
 function changeLabel(view) {
-  if (view.state?.key === 'landed') return `The change, as it landed in ${view.target}`;
-  if (view.from === 'worktree') return 'The change, uncommitted in the worktree';
+  if (view.state?.key === 'landed') return `The change, as merged into ${view.target}`;
+  if (view.from === 'worktree') return 'The change (not committed yet)';
   if (view.from === 'commit' || view.from === 'branch') return `The change on ${view.branch}`;
   return 'The change';
 }
@@ -1769,8 +1764,8 @@ function changeLabel(view) {
 // is not. A directory that has been removed is not the same as work that has been lost,
 // and the difference is the one this screen exists to make.
 function worktreeText(view) {
-  if (view.worktree) return view.pending ? 'Live, with uncommitted changes' : 'Live, and clean';
-  return view.committed ? 'Removed - the work is on the branch' : 'Gone, and the branch holds no commit';
+  if (view.worktree) return view.pending ? 'Has uncommitted changes' : 'Up to date';
+  return view.committed ? 'Deleted (changes are on the branch)' : 'Deleted';
 }
 
 // What a port did, said from what it returned rather than from which button was
@@ -1779,10 +1774,10 @@ function worktreeText(view) {
 // so it is named here rather than left to a payload the toast does not show.
 function portReport(r) {
   if (r.dryRun) return 'Preview only. Nothing was written.';
-  if (r.empty) return 'Nothing to port: the worktree holds nothing the branch lacks.';
-  if (r.alreadyPorted) return `${r.target} already contains this work. Nothing was moved.`;
-  if (r.landed) return `Ported onto ${r.target}${r.cleaned ? '; the worktree was removed' : ''}.`;
-  return `Committed to ${r.branch}${r.cleaned ? ' and removed its worktree' : ''}. ${r.target} was left alone - see Next steps.`;
+  if (r.empty) return 'Nothing to port.';
+  if (r.alreadyPorted) return `${r.target} already has these changes.`;
+  if (r.landed) return `Merged into ${r.target}${r.cleaned ? ' and deleted the worktree' : ''}.`;
+  return `Committed to ${r.branch}${r.cleaned ? ' and deleted the worktree' : ''}. Finish the merge with Next steps.`;
 }
 
 // A shell in one of the task's two directories: its worktree, and the checkout the
@@ -1815,7 +1810,7 @@ function TerminalTab({ task, live, terminal }) {
         live && spec?.id === 'worktree'
           ? html`
               <div class="terminal-warn">
-                <span>A ${live.role} run is writing this worktree — commands here may corrupt it.</span>
+                <span>The ${live.role} is editing this worktree. Commands you run here may clash with it.</span>
               </div>
             `
           : null
@@ -2031,7 +2026,7 @@ function ReviewTab({ task, runs, busy, run, live, navigate, onReopen, onGoTo }) 
                       value=${note}
                       onInput=${setNote}
                       rows=${3}
-                      placeholder="This re-opens the repair → review loop before the work is ported."
+                      placeholder="What should change? The task goes back through repair and review."
                       loading=${busy}
                     />
                     <div class="row review-feedback-actions">

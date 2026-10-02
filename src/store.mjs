@@ -273,9 +273,27 @@ export class Store {
         // from "write up what already happened in the checkout" without reading the
         // question's text, where the two would look alike.
         ['focus', 'TEXT'],
+        // A conversation a drafting pass opened (intake, proposals, infer-spec, Draft
+        // as task) rather than one a person started. The conversations list hides
+        // these by default: they are the passes' working, not questions anybody asked.
+        ['system', 'INTEGER NOT NULL DEFAULT 0'],
       ],
+      // What a conversation may do: 'read' answers from the repo and AI Code's
+      // records, 'edit' works in the checkout behind the permission gate. Rows
+      // written before the column existed come back 'read'. They were all editing
+      // sessions, but an idle one holding the project's checkout would lock every
+      // other conversation out of editing, and a read-only turn only asks first.
+      sessions: [['mode', "TEXT NOT NULL DEFAULT 'read'"]],
     })) {
-      for (const [column, type] of columns) this.ensureColumn(table, column, type);
+      for (const [column, type] of columns) {
+        const had = this.db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+        this.ensureColumn(table, column, type);
+        // The passes' conversations, marked once, on the start that adds the column.
+        // Later ones are marked as they are created.
+        if (!had && table === 'chat_sessions' && column === 'system') {
+          this.db.exec("UPDATE chat_sessions SET system=1 WHERE title IN ('Intake','Task proposals','Infer spec') OR title LIKE 'Task from session:%'");
+        }
+      }
     }
     if (!this.listProviders().length) this.seed();
     this.migrateLegacyModels();
@@ -1010,9 +1028,9 @@ export class Store {
   // uuid cannot be one. The `*` is expanded first so an explicit column list
   // would shadow nothing - `seq` is the only added name.
 
-  createChatSession({ id, projectId, title, taskId, focus }) {
+  createChatSession({ id, projectId, title, taskId, focus, system = false }) {
     const now = new Date().toISOString();
-    this.db.prepare('INSERT INTO chat_sessions(id,project_id,title,created_at,updated_at,task_id,focus) VALUES(?,?,?,?,?,?,?)').run(id, projectId, title, now, now, taskId ?? null, focus ?? null);
+    this.db.prepare('INSERT INTO chat_sessions(id,project_id,title,created_at,updated_at,task_id,focus,system) VALUES(?,?,?,?,?,?,?,?)').run(id, projectId, title, now, now, taskId ?? null, focus ?? null, system ? 1 : 0);
     return this.getChatSession(id);
   }
 
@@ -1164,11 +1182,11 @@ export class Store {
   // as well - so the differences from `createChatSession` are exactly those three
   // and everything else is the same row shape.
 
-  createSession({ id, projectId, name, providerId, modelId }) {
+  createSession({ id, projectId, name, providerId, modelId, mode = 'edit' }) {
     const now = new Date().toISOString();
     this.db
-      .prepare('INSERT INTO sessions(id,project_id,name,status,provider_id,model_id,budget_tally,cancel_requested,pending_run_id,task_shaped,nudge_dismissed,changed_paths,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(id, projectId, name, 'idle', providerId ?? null, modelId ?? null, 0, 0, null, 0, 0, null, now, now);
+      .prepare('INSERT INTO sessions(id,project_id,name,status,provider_id,model_id,budget_tally,cancel_requested,pending_run_id,task_shaped,nudge_dismissed,changed_paths,created_at,updated_at,mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, projectId, name, 'idle', providerId ?? null, modelId ?? null, 0, 0, null, 0, 0, null, now, now, mode);
     return this.getSession(id);
   }
 
@@ -1191,7 +1209,7 @@ export class Store {
     if (!s) return null;
     const n = { ...s, ...patch };
     this.db
-      .prepare('UPDATE sessions SET name=?,status=?,provider_id=?,model_id=?,budget_tally=?,cancel_requested=?,pending_run_id=?,task_shaped=?,nudge_dismissed=?,changed_paths=?,updated_at=? WHERE id=?')
+      .prepare('UPDATE sessions SET name=?,status=?,provider_id=?,model_id=?,budget_tally=?,cancel_requested=?,pending_run_id=?,task_shaped=?,nudge_dismissed=?,changed_paths=?,mode=?,updated_at=? WHERE id=?')
       .run(
         n.name,
         n.status,
@@ -1203,6 +1221,7 @@ export class Store {
         n.task_shaped ? 1 : 0,
         n.nudge_dismissed ? 1 : 0,
         n.changed_paths ?? null,
+        n.mode || 'read',
         // Touched rather than stamped, for the reason `#touch` exists: a session
         // created and first written to inside one millisecond would otherwise
         // sort by creation order in the list it is meant to be moving in.
@@ -1351,6 +1370,12 @@ export class Store {
         .prepare("SELECT * FROM permission_requests WHERE session_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1")
         .get(sessionId) || null
     );
+  }
+
+  // Every unanswered request on the machine, oldest first: the order they will time
+  // out in, which is the order a person working through them should take.
+  listPendingPermissions() {
+    return this.db.prepare("SELECT * FROM permission_requests WHERE status='pending' ORDER BY created_at").all();
   }
 
   listPermissionRequests(sessionId) {

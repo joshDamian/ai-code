@@ -80,11 +80,13 @@ function playSound() {
   }
 }
 
-export function notify(title, body, { onClick } = {}) {
+// `tag` collapses notifications about the same thing - a push and this one for the
+// same permission prompt show once, not twice.
+export function notify(title, body, { onClick, tag = title } = {}) {
   playSound();
   if (permissionState !== 'granted') return;
   try {
-    const n = new Notification(title, { body, icon: '/icons/icon-192.png', tag: title });
+    const n = new Notification(title, { body, icon: '/icons/icon-192.png', tag });
     if (onClick) n.onclick = () => { window.focus(); onClick(); n.close(); };
   } catch {
     // Notification blocked or unavailable.

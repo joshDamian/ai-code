@@ -43,8 +43,8 @@ export function TokenGate() {
         <div class="logo-title">AI Code</div>
         <div class="logo-sub muted">Mission control</div>
         <p class="token-hint">
-          This device is not on the server's own machine, so it needs the API token. The server printed one at
-          startup, after the line beginning <code>API token:</code>.
+          Enter the API token to connect from this device. The server prints it at startup, after
+          <code>API token:</code>.
         </p>
         <input
           class="input"
@@ -177,7 +177,7 @@ export function Settings() {
 
   return html`
     <div class="view-settings">
-      <${Section} title="Server" about="The process serving this dashboard, and the jobs it is running.">
+      <${Section} title="Server" about="The server behind this dashboard and its running jobs.">
         ${
           server
             ? html`
@@ -195,8 +195,8 @@ export function Settings() {
                   server.supervisorPort != null && server.port != null && server.supervisorPort !== server.port
                     ? html`
                         <div class="notice notice-warn">
-                          The installed supervisor watches port <code>${server.supervisorPort}</code>, not <code>${server.port}</code>, so it will not restart this
-                          server. Align it with${' '}<code>AI_CODE_SUPERVISOR_PORT=${server.port} ./bin/install-ai-code --supervisor</code>.
+                          Auto-restart won't work: the supervisor watches port <code>${server.supervisorPort}</code>, but the server runs on <code>${server.port}</code>.
+                          Fix it with${' '}<code>AI_CODE_SUPERVISOR_PORT=${server.port} ./bin/install-ai-code --supervisor</code>.
                         </div>`
                     : null
                 }
@@ -223,7 +223,7 @@ export function Settings() {
         }
       </${Section}>
 
-      <${Section} title="Diagnostics" about="Checks the environment: the git binary, provider credentials and the tools each role needs.">
+      <${Section} title="Diagnostics" about="Checks git, provider credentials and the tools each agent needs.">
         <div class="settings-row">
           <span class="muted">${doctor ? `${Object.values(doctor).filter(passed).length} of ${Object.keys(doctor).length} checks passed` : 'Not run in this session.'}</span>
           <button class="btn secondary" disabled=${running} onClick=${runDoctor}>${running ? 'Checking…' : doctor ? 'Run again' : 'Run checks'}</button>
@@ -246,7 +246,7 @@ export function Settings() {
         }
       </${Section}>
 
-      <${Section} title="Automations" about="Actions the server takes by itself when something happens.">
+      <${Section} title="Automations" about="Actions that run automatically.">
         ${
           automations === null
             ? html`<${Spinner} />`

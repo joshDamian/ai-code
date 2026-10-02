@@ -35,7 +35,7 @@ export function Providers() {
           // A model on a disabled provider is one the router cannot reach, however it is set.
           const live = new Set(data.providers.filter((p) => p.enabled).map((p) => p.id));
           const n = data.models.filter((m) => m.enabled && live.has(m.provider_id)).length;
-          return `${n} model${n === 1 ? '' : 's'} the router may pick from.`;
+          return `${n} model${n === 1 ? '' : 's'} available.`;
         })()}</p>
       </div>
       ${data.providers.map(
@@ -85,7 +85,7 @@ function ProviderCard({ provider, models, health, onChange }) {
       const r = await api.testProvider(provider.id, target && target.id);
       // A failed test is a 200 carrying {ok:false}, not a rejection, so the result has
       // to be read rather than caught - which is how this toasted success on failure.
-      setTestResult({ ok: r.ok, detail: r.ok ? (r.cleared ? `Connected. The circuit was ${r.cleared} and is now cleared.` : 'Connected.') : r.error });
+      setTestResult({ ok: r.ok, detail: r.ok ? (r.cleared ? 'Connected. The provider is back in use.' : 'Connected.') : r.error });
       if (!r.ok) return;
       // The health reading renders from the parent's data and nothing here reloads it,
       // so a cleared circuit would otherwise read as open until the next navigation.

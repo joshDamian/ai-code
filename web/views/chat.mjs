@@ -407,7 +407,7 @@ export function Chat({ id: routeId, navigate, onTitle }) {
           ${projectsLoaded && !projects.length
             ? html`<div class="ss-new-inner"><${NoProject} what="A conversation reads a project’s code to answer, so it needs a project to read." /></div>`
             : html`<div class="ss-new-inner">
-            ${isNew ? html`<a class="ss-back" href="#/chat"><svg class="ss-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3-5 5 5 5" /></svg> Conversations</a>` : null}
+            ${isNew ? html`<a class="ss-back" href="#/sessions"><svg class="ss-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3-5 5 5 5" /></svg> Conversations</a>` : null}
             <div class="ss-new-head">
               <span class="muted">A conversation about <strong>${project?.name || '—'}</strong>${project ? html` · <span class="ss-mono" title=${project.path}>${shortDir(project.path)}</span>` : null}</span>
               <h2>What do you want to know?</h2>
@@ -447,7 +447,7 @@ export function Chat({ id: routeId, navigate, onTitle }) {
       ${list}
       <main class="ss-conv" aria-label=${session?.title || 'Chat'}>
         <header class="ss-conv-head">
-          <a class="btn secondary ss-icon-btn ss-back-btn" href="#/chat" aria-label="Back to conversations">
+          <a class="btn secondary ss-icon-btn ss-back-btn" href="#/sessions" aria-label="Back to conversations">
             <svg class="ss-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3-5 5 5 5" /></svg>
           </a>
           <div class="ss-conv-title">

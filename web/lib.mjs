@@ -11,7 +11,38 @@ export * from 'preact/hooks';
 // The CLI, the TUI and the dashboard render the same events, so they render them
 // with the same functions. `ai-code/format` is mapped to src/format.mjs by the
 // import map in index.html and served from there by src/server.mjs.
-export { describeEvent, formatEvent, formatDuration, formatTokens, formatCost, formatState, formatWhen, shortId, bodyKind, diffLines, diffSides, unifiedDiff, decisionView, sessionSteps } from 'ai-code/format';
+export { describeEvent, formatEvent, formatDuration, formatTokens, formatCost, formatState, formatWhen, shortId, bodyKind, diffLines, diffSides, diffFiles, diffLanguage, splitHighlighted, unifiedDiff, decisionView, sessionSteps, gitImpact } from 'ai-code/format';
+
+// Per-browser memory for conveniences: where a person was, what they had filtered,
+// what they had typed and not sent. localStorage throws in some privacy modes and
+// can come back empty at any time, so a failed read is the fallback and a failed
+// write is a no-op - nothing here may be load-bearing.
+export function recall(key, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return v == null ? fallback : JSON.parse(v);
+  } catch {
+    return fallback;
+  }
+}
+
+export function remember(key, value) {
+  try {
+    if (value === undefined || value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* storage unavailable: the page still works, it just will not remember */
+  }
+}
+
+// Where the person last was inside Conversations - a conversation, the new pane, an
+// earlier chat, or the list - so the sidebar and the shortcuts return there rather
+// than to the list. Only a hash this view owns is honoured.
+export const CONVERSATIONS_PLACE = 'ai-code:conversations:place';
+export function conversationsHref() {
+  const h = recall(CONVERSATIONS_PLACE, null);
+  return typeof h === 'string' && /^#\/(sessions|chat)(\/[A-Za-z0-9-]+)?$/.test(h) ? h : '#/sessions';
+}
 
 // The last two folders of a directory, which is how a person names one they did not
 // type: `…/code/demo`, with the rest a hover away on the element's title.

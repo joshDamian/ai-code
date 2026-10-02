@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -154,7 +154,7 @@ test('execute at the ceiling lands the task FAILED with the refusal row in the l
   s.runRole = (task, role, prompt, ...rest) => { if (role === 'repair') fs.writeFileSync(path.join(task.worktree, `fix-${++n}.mjs`), `// attempt ${n}\n`); return real(task, role, prompt, ...rest); };
   const err = await s.execute(t.id).then(() => null, (e) => e);
   assert.equal(err.code, 'REPAIR_LIMIT');
-  assert.match(err.message, /2 repair runs/);
+  assert.match(err.message, /all 2 repairs/);
   assert.equal(s.task(t.id).state, 'FAILED');
   const runs = s.store.listRuns(t.id);
   assert.equal(runs.filter((r) => r.role === 'repair' && r.provider_id).length, 2, 'two turns spent before the refusal');
@@ -856,6 +856,49 @@ test('a message after streaming leaves the stall detector armed',async()=>{
   assert.ok(ms<15000,`cut off at 1s of silence rather than waited out (${ms}ms)`);
   const run=s.store.listRuns(t.id).find(x=>x.role==='planner');
   assert.match(run.error,/STALLED/,'and it is recorded on the run');
+});
+
+test('a conversation waiting on its permission gate is not a stall',async()=>{
+  // The gate's wait is silent: the tool call blocks until the person answers or the
+  // gate times out. Charged as a stall, every unanswered prompt failed the turn over
+  // to another model and counted against the provider's health.
+  const turn=async(asking)=>{
+    const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+    const p=s.initProject('p',root);
+    s.updateProvider('mock',{enabled:false});
+    s.addProvider({id:'gated',name:'Gated',kind:'mock',enabled:true,config:{routable:true,streamEvents:5,streamMs:200,toolCalls:1,stallMs:2500}});
+    s.addModel({id:'gated-m',providerId:'gated',name:'g',capabilities:['coding'],speed:10,quality:10,cost:0,contextLength:100000});
+    const r=s.getRouting();
+    s.saveRouting({...r,session:{...r.session,stall:1,timeout:60}});
+    const c=s.createSession(p.id,'Gated');
+    const runId=s.askSession(c.id,'Write the file.').pending_run_id;
+    if(asking) s.store.addPermissionRequest({id:s.store.id(),sessionId:c.id,runId,tool:'Write',input:'{}',createdAt:new Date().toISOString()});
+    const err=await s.sessionTurn(c.id).then(()=>null,e=>e);
+    return {err,runs:s.store.listSessionRuns(c.id)};
+  };
+  // The control: the same silence with nobody being asked is a stall.
+  const bare=await turn(false);
+  assert.equal(bare.err?.code,'STALLED');
+  const gated=await turn(true);
+  assert.equal(gated.err,null,'the turn finished');
+  assert.deepEqual(gated.runs.map((r)=>[r.status,r.error||null]),[['succeeded',null]],'on its first attempt, with no stall recorded');
+});
+
+test('every waiting prompt on the machine is listed with the conversation it belongs to',()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const a=s.createSession(p.id,'First');const b=s.createSession(p.id,'Second');
+  const ask=(c,tool,at)=>s.store.addPermissionRequest({id:s.store.id(),sessionId:c.id,runId:null,tool,input:'{"command":"ls"}',createdAt:at});
+  const later=ask(b,'Write','2026-10-02T10:00:05.000Z');
+  ask(a,'Bash','2026-10-02T10:00:00.000Z');
+  const answered=ask(a,'Edit','2026-10-02T09:00:00.000Z');
+  s.answerPermission(answered.id,'allow');
+  const list=s.pendingPermissions();
+  assert.deepEqual(list.map((x)=>[x.session_name,x.tool]),[['First','Bash'],['Second','Write']],'oldest first, answered ones left out');
+  assert.equal(list[0].project_name,'p');
+  assert.equal(list[0].project_path,p.path);
+  assert.deepEqual(list[0].input,{command:'ls'},'input parsed back out, as the conversation view reads it');
+  assert.ok(Date.parse(list[1].timeout_at)>Date.parse(later.created_at),'with its deadline');
 });
 
 test('a provider that starts and then says nothing is stopped at the first-frame budget',async()=>{
@@ -3772,7 +3815,7 @@ test('a file that changed after the plan was written also blocks execution',asyn
   fs.writeFileSync(path.join(root,'app.mjs'),'export const version=2;\n');
   const err=await s.implement(t.id).then(()=>null,e=>e);
   assert.equal(err.code,'PLAN_BASE_DIRTY');
-  assert.match(err.message,/changed after the plan was written/,'the message says which of the two situations this is');
+  assert.match(err.message,/changed after planning/,'the message says which of the two situations this is');
 });
 
 test('the baseline and the gate name files inside an untracked directory individually',async()=>{
@@ -3883,7 +3926,7 @@ test('a task branch that does not descend from the target is not treated as a fa
   assert.equal(view.alreadyPorted,false);
   // The other side of the same sentence: checked out nowhere, so the port does land, and
   // the step promising it is describing the command it prints rather than a hope.
-  assert.match(view.next.find((n)=>n.command&&n.command.includes('task port')).text,/land it on moved-target/);
+  assert.match(view.next.find((n)=>n.command&&n.command.includes('task port')).text,/merge them into moved-target/);
   assert.equal(view.next.some((n)=>n.command&&n.command.startsWith('git merge')),false,'and there is no merge left to run');
 
   const r=await s.port(t.id,{to:'moved-target'});
@@ -4053,7 +4096,7 @@ test('the read-only assessment names the steps a port would leave to you',async(
   // stops at the commit and the merge is the next step's job, so this one must not claim
   // the landing it will not perform - the two steps read as a sequence, and a first step
   // that promises what the second one delivers is a contradiction in the same list.
-  assert.ok(!/land it on/.test(published.text),`"${published.text}" promises a landing ${target} being checked out rules out`);
+  assert.ok(!/merge them into/.test(published.text),`"${published.text}" promises a landing ${target} being checked out rules out`);
   assert.ok(d.next.some((n)=>n.command===`git merge --ff-only ${t.branch}`),'and the merge is named before anything runs');
   // Reading it wrote nothing: the worktree is there and the branch is still at its base.
   assert.equal(fs.existsSync(t.worktree),true);
@@ -4170,7 +4213,7 @@ test('a port is refused while the task has a run in flight',async()=>{
   const {s,t}=await worked(root);
   s.store.addRun({id:'live',taskId:t.id,role:'implementer',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
   s.store.heartbeat('live',t.id);
-  await assert.rejects(()=>s.port(t.id,{to:'staging'}),/in flight/);
+  await assert.rejects(()=>s.port(t.id,{to:'staging'}),/still running/);
 });
 
 test('a port is refused while the task has a job queued',async()=>{
@@ -4179,7 +4222,7 @@ test('a port is refused while the task has a job queued',async()=>{
   // Queued but not started: the row alone is the signal, which is the half of the
   // guard that no lease can see, because a job that has not begun has no run.
   s.store.addJob({id:'job-1',taskId:t.id,kind:'execute',state:'queued',createdAt:new Date().toISOString()});
-  await assert.rejects(()=>s.port(t.id,{to:'staging'}),/in flight/);
+  await assert.rejects(()=>s.port(t.id,{to:'staging'}),/still running/);
 });
 
 test('a plan is refused while a planner run is in flight',async()=>{
@@ -4193,7 +4236,7 @@ test('a plan is refused while a planner run is in flight',async()=>{
   s.prepare(t.id);
   s.store.addRun({id:'live',taskId:t.id,role:'planner',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
   s.store.heartbeat('live',t.id);
-  await assert.rejects(()=>s.plan(t.id),/in flight/);
+  await assert.rejects(()=>s.plan(t.id),/still running/);
 });
 
 test('a refine is refused while a planner run is in flight',async()=>{
@@ -4208,7 +4251,7 @@ test('a refine is refused while a planner run is in flight',async()=>{
   assert.equal(s.task(t.id).state,'AWAITING_APPROVAL');
   s.store.addRun({id:'live',taskId:t.id,role:'planner',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
   s.store.heartbeat('live',t.id);
-  await assert.rejects(()=>s.refine(t.id,'make it smaller'),/in flight/);
+  await assert.rejects(()=>s.refine(t.id,'make it smaller'),/still running/);
 });
 
 test('a second review is refused while a review is running',async()=>{
@@ -4221,7 +4264,7 @@ test('a second review is refused while a review is running',async()=>{
   assert.equal(s.task(t.id).state,'REVIEWING');
   s.store.addRun({id:'live',taskId:t.id,role:'reviewer',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
   s.store.heartbeat('live',t.id);
-  await assert.rejects(()=>s.review(t.id),/in flight/);
+  await assert.rejects(()=>s.review(t.id),/still running/);
 });
 
 // ---- the test command as a tracked process --------------------------------------
@@ -4328,7 +4371,7 @@ test('a plan is refused while the task has a job queued',async()=>{
   const t=s.createTask(s.initProject('p',root).id,'x');
   s.prepare(t.id);
   s.store.addJob({id:'job-1',taskId:t.id,kind:'execute',state:'queued',createdAt:new Date().toISOString()});
-  await assert.rejects(()=>s.plan(t.id),/in flight/);
+  await assert.rejects(()=>s.plan(t.id),/still running/);
 });
 
 test('a lease that has gone stale does not refuse a plan',async()=>{
@@ -4473,7 +4516,7 @@ test('a plan written on a detached HEAD records no target rather than the word H
   assert.equal(JSON.parse(s.task(t.id).plan_base).target_branch,null);
   // And the port still resolves, from the live answer, rather than throwing.
   assert.equal(s.portTarget(s.task(t.id),{to:'staging'}),'staging','--to still wins');
-  assert.throws(()=>s.portTarget(s.task(t.id)),/detached/,'and with no way to name one it says why');
+  assert.throws(()=>s.portTarget(s.task(t.id)),/--to <branch>/,'and with no way to name one it says how to pick one');
 });
 
 // -- the verdict a surface leads with -------------------------------------
@@ -4787,9 +4830,9 @@ test('a plan may contain lines that look like diff metadata',()=>{
 });
 test('closeTask succeeds from CREATED',()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');const closed=s.closeTask(t.id);assert.equal(closed.state,'CANCELLED')});
 test('closeTask succeeds from PLANNING with no run',async()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);const closed=s.closeTask(t.id);assert.equal(closed.state,'CANCELLED')});
-test('closeTask throws when a run is live',()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);s.store.addRun({id:'live',taskId:t.id,role:'planner',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});s.store.heartbeat('live',t.id);let threw=false;try{s.closeTask(t.id)}catch(e){threw=true;assert.match(e.message,/task cancel/)}assert.ok(threw,'closeTask should have thrown');
+test('closeTask throws when a run is live',()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.prepare(t.id);s.store.addRun({id:'live',taskId:t.id,role:'planner',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});s.store.heartbeat('live',t.id);let threw=false;try{s.closeTask(t.id)}catch(e){threw=true;assert.match(e.message,/Cancel it first/)}assert.ok(threw,'closeTask should have thrown');
 // A cancel only marks the lease; the process that owns the run releases it on the way out. Until then the run is still driving the task - which is the whole point of gating on liveness rather than on the task's state, so close keeps refusing after the cancel and unblocks when the lease goes.
-s.cancelTask(t.id);let stillThrew=false;try{s.closeTask(t.id)}catch(e){stillThrew=true;assert.match(e.message,/task cancel/)}assert.ok(stillThrew,'a cancelled-but-unreleased run is still live');s.store.releaseLease('live');const closed=s.closeTask(t.id);assert.equal(closed.state,'CANCELLED')});
+s.cancelTask(t.id);let stillThrew=false;try{s.closeTask(t.id)}catch(e){stillThrew=true;assert.match(e.message,/Cancel it first/)}assert.ok(stillThrew,'a cancelled-but-unreleased run is still live');s.store.releaseLease('live');const closed=s.closeTask(t.id);assert.equal(closed.state,'CANCELLED')});
 test('CANCELLED is a terminal state',()=>{const root=repo();const s=new Service(root,{allowMock:true});const p=s.initProject('p',root);const t=s.createTask(p.id,'x');s.closeTask(t.id);assert.throws(()=>s.transition(t.id,'PLANNING'),/Invalid transition/)});
 // The state an implementer leaves behind when its process dies. IMPLEMENTING is set
 // before the run starts and moved on after it ends, so nothing running means nothing
@@ -4947,12 +4990,17 @@ test('SESSION_PROMPT is pinned with its key guidance',()=>{
   assert.match(SESSION_PROMPT,/live human approval/i);
   assert.match(SESSION_PROMPT,/never bypass/i);
   assert.match(SESSION_PROMPT,/denial.*final/i);
-  // Dev actions only: sessions do not commit, merge, port, or publish.
-  assert.match(SESSION_PROMPT,/do not commit/i);
-  assert.match(SESSION_PROMPT,/merge/i);
+  // git and gh run behind the same approval, and only when the person asks.
+  assert.match(SESSION_PROMPT,/GitHub CLI \(gh\)/);
+  assert.match(SESSION_PROMPT,/pull, merge, resolve conflicts, commit, push/);
+  assert.match(SESSION_PROMPT,/on your own initiative/);
+  assert.doesNotMatch(SESSION_PROMPT,/do not commit/i);
   // Stop and draft when work is task-shaped: this is the nudge trigger.
   assert.match(SESSION_PROMPT,/task-shaped/i);
   assert.match(SESSION_PROMPT,/stop/i);
+  // The route into the task list, and the tool that is not one.
+  assert.match(SESSION_PROMPT,/draft_task/);
+  assert.match(SESSION_PROMPT,/TaskCreate.*not this project's tasks/i);
 });
 
 test('a chat turn stores its answer and leaves no task behind it',async()=>{
@@ -5251,7 +5299,7 @@ test('feedback is refused unless the task is COMPLETE, idle, and the note says s
   // repair started under one of those is an edit the reader never agreed to.
   s.store.addRun({id:'live',taskId:t.id,role:'reviewer',providerId:'mock',modelId:'mock',status:'running',startedAt:new Date().toISOString()});
   s.store.heartbeat('live',t.id);
-  await assert.rejects(()=>s.feedback(t.id,'still there?'),/in flight/);
+  await assert.rejects(()=>s.feedback(t.id,'still there?'),/still running/);
   assert.equal(s.task(t.id).feedback,null,'nothing was written on the way to the refusal');
   s.store.releaseLease('live');
 });
@@ -5310,7 +5358,7 @@ test('a plan revision that has spent its repairs is refused, and the task lands 
   const branch=s.task(t.id).branch;
   const refusal=await s.repair(t.id).then(()=>null,(e)=>e);
   assert.equal(refusal.code,'REPAIR_LIMIT');
-  assert.match(refusal.message,/5 repair runs/,'the message names what was spent');
+  assert.match(refusal.message,/all 5 repairs/,'the message names what was spent');
   assert.match(refusal.message,/Replan/,'and the exit worth trying first');
   assert.match(refusal.message,/routing\.json/,'and the one that needs no replan');
   assert.match(refusal.message,/untouched/,'and says the work is still there');
@@ -5905,6 +5953,38 @@ test('a session run is started gated, and refuses to start ungated', () => {
   assert.throws(() => claudeArgs({ ...base, mcpConfig: '/tmp/mcp.json' }), /ungated/);
 });
 
+test('a chat handed the app tools pre-allows each one by name, and no other role gets them', () => {
+  const app = appMcpConfig('run-app', { endpoint: 'http://127.0.0.1:4317' });
+  try {
+    const cfg = JSON.parse(fs.readFileSync(app.configPath, 'utf8'));
+    const server = cfg.mcpServers['ai-code-app'];
+    assert.equal(server.env.AI_CODE_ENDPOINT, 'http://127.0.0.1:4317');
+    assert.ok(fs.existsSync(server.args[0]), 'the config names the real app-mcp.mjs');
+    // Named one by one: a server wildcard would also allow a write tool added later.
+    assert.ok(app.tools.length > 5 && app.tools.every((t) => t.startsWith('mcp__ai-code-app__')));
+    const argv = claudeArgs({ role: 'chat', model: 'm', prompt: 'p', appMcp: app });
+    assert.equal(argv[argv.indexOf('--mcp-config') + 1], app.configPath);
+    const allowed = argv.slice(argv.indexOf('--allowedTools') + 1, argv.indexOf('--'));
+    assert.deepEqual(allowed, app.tools);
+    // Still a read-only chat around them.
+    assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'plan');
+    assert.ok(!argv.includes('--dangerously-skip-permissions'));
+    // A chat without them, and a planner handed them by mistake, get neither flag.
+    for (const input of [{ role: 'chat' }, { role: 'planner', appMcp: app }, { role: 'reviewer', appMcp: app }]) {
+      const a = claudeArgs({ model: 'm', prompt: 'p', ...input });
+      assert.ok(!a.includes('--mcp-config') && !a.includes('--allowedTools'), input.role);
+    }
+  } finally {
+    removeMcpConfig(app.configPath);
+  }
+});
+
+test('the app tools note says they are read-only and tells the agent to name its evidence', () => {
+  assert.match(APP_TOOLS_NOTE, /read-only/);
+  assert.match(APP_TOOLS_NOTE, /cannot change anything/);
+  assert.match(APP_TOOLS_NOTE, /ids you relied on/);
+});
+
 test('a role that is not named in the allowlist still falls through to skip-permissions', () => {
   // The branch above has to sit above this one, and this is what saying so looks
   // like as a test: the fallthrough is load-bearing for every workflow role, and a
@@ -6024,6 +6104,217 @@ test('task-shaped counts what a turn wrote, not that it wrote', () => {
   // A turn that failed is never task-shaped: there is nothing to draft from it.
   assert.equal(taskShaped({ status: 'failed', events: [write('Write'), write('Edit')], changedPaths: ['a', 'b'] }), false);
   assert.equal(taskShaped({}), false);
+});
+
+test('a session drafts into the approval queue, and an untitled draft is refused', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const session = s.createSession(p.id, 'Dedupe');
+  const out = s.draftFromSession(session.id, { title: '  Fix email\n dedupe ', description: 'Add a collation.' });
+  assert.equal(out.project, 'p');
+  assert.equal(out.draft.title, 'Fix email dedupe');
+  assert.equal(out.draft.source, 'session');
+  // A draft, not a task: nothing exists until a person approves it.
+  assert.deepEqual(s.drafts(p.id).map((d) => d.id), [out.draft.id]);
+  assert.equal(s.store.listTasks(p.id).length, 0);
+  assert.throws(() => s.draftFromSession(session.id, { title: ' ', description: 'x' }), /title/);
+  // Proposing follow-up work leaves the session running.
+  assert.notEqual(s.sessionById(session.id).status, 'stopped');
+});
+
+test('the session MCP server lists draft_task and posts it to the session drafts route', async () => {
+  const http = await import('node:http');
+  const seen = [];
+  const srv = http.createServer((req, res) => {
+    let b = '';
+    req.on('data', (c) => (b += c));
+    req.on('end', () => {
+      seen.push({ url: req.url, body: JSON.parse(b) });
+      res.writeHead(201, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ draft: { title: 'Fix email dedupe' }, project: 'Novara' }));
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const endpoint = `http://127.0.0.1:${srv.address().port}`;
+  const file = fileURLToPath(new URL('../src/permission-mcp.mjs', import.meta.url));
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, [file], { env: { ...process.env, AI_CODE_PERMISSION_ENDPOINT: endpoint, AI_CODE_SESSION_ID: 's-1' }, stdio: ['pipe', 'pipe', 'ignore'] });
+  const replies = new Map();
+  let buf = '';
+  child.stdout.on('data', (c) => {
+    buf += c;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const m = JSON.parse(buf.slice(0, i));
+      buf = buf.slice(i + 1);
+      replies.get(m.id)?.(m);
+    }
+  });
+  const call = (id, method, params) =>
+    new Promise((r) => {
+      replies.set(id, r);
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    });
+  try {
+    const list = await call(1, 'tools/list', {});
+    assert.deepEqual(list.result.tools.map((t) => t.name), ['approve', 'draft_task']);
+    const done = await call(2, 'tools/call', { name: 'draft_task', arguments: { title: 'Fix email dedupe', description: 'Collation and validator.' } });
+    assert.equal(done.result.isError, false);
+    assert.match(done.result.content[0].text, /Drafted "Fix email dedupe" into the Novara project's approval queue/);
+    assert.deepEqual(seen, [{ url: '/api/sessions/s-1/drafts', body: { title: 'Fix email dedupe', description: 'Collation and validator.' } }]);
+  } finally {
+    child.kill();
+    srv.close();
+  }
+});
+
+test('a conversation runs read-only turns as chat and editing turns as session, in one history', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const c = s.createSession(p.id, 'Modes', { mode: 'read' });
+  assert.equal(c.mode, 'read');
+  s.askSession(c.id, 'What does the readme say?');
+  await s.sessionTurn(c.id);
+  s.setSessionMode(c.id, 'edit');
+  s.askSession(c.id, 'Now fix it.');
+  await s.sessionTurn(c.id);
+  // One conversation, two roles: the role is what decided the permissions.
+  assert.deepEqual(s.sessionTurns(c.id).map((t) => t.role), ['chat', 'session']);
+  assert.deepEqual(s.store.listSessionRuns(c.id).map((r) => r.role), ['chat', 'session']);
+  // The service default is still edit, which is what a session was before modes.
+  assert.equal(s.createSession(p.id, 'Legacy').mode, 'edit');
+  assert.throws(() => s.createSession(p.id, 'Bad', { mode: 'write' }), /Unknown conversation mode/);
+});
+
+// Two mock models that can answer both kinds of conversation turn. The fixture
+// scores s-m1 first, so a turn on s-m2 is the preference at work.
+function mockConversation(s) {
+  s.updateProvider('mock', { enabled: false });
+  s.addProvider({ id: 'mc', name: 'Mock Conversation', kind: 'mock', enabled: true, config: { routable: true } });
+  for (const id of ['s-m1', 's-m2']) {
+    s.addModel({ id, providerId: 'mc', name: id, capabilities: ['planning', 'coding'], speed: 1, quality: 1, cost: 0, contextLength: 100000 });
+  }
+  return s;
+}
+
+test('a conversation runs its turns on the model it was started with', async () => {
+  const root = repo();
+  const s = mockConversation(new Service(root, { allowMock: true, silent: true }));
+  const p = s.initProject('p', root);
+  const plain = s.createSession(p.id, 'Automatic', { mode: 'read' });
+  s.askSession(plain.id, 'What does the readme say?');
+  await s.sessionTurn(plain.id);
+  assert.equal(s.store.listSessionRuns(plain.id)[0].model_id, 's-m1', 'the fixture routes to s-m1 first');
+  s.archiveSession(plain.id);
+
+  const c = s.createSession(p.id, 'Chosen', { providerId: 'mc', modelId: 's-m2', mode: 'read' });
+  s.askSession(c.id, 'What does the readme say?');
+  await s.sessionTurn(c.id);
+  s.setSessionMode(c.id, 'edit');
+  s.askSession(c.id, 'Now fix it.');
+  await s.sessionTurn(c.id);
+  // Both roles: a read-only turn routes as chat, an editing one as session.
+  assert.deepEqual(s.store.listSessionRuns(c.id).map((r) => [r.role, r.model_id]), [['chat', 's-m2'], ['session', 's-m2']]);
+});
+
+test('a conversation whose model is unavailable runs elsewhere, and the turn says so', async () => {
+  const root = repo();
+  const s = mockConversation(new Service(root, { allowMock: true, silent: true }));
+  const p = s.initProject('p', root);
+  const c = s.createSession(p.id, 'Chosen', { providerId: 'mc', modelId: 's-m2', mode: 'read' });
+  s.updateModel('s-m2', { enabled: false });
+  s.askSession(c.id, 'What does the readme say?');
+  await s.sessionTurn(c.id);
+  const [run] = s.store.listSessionRuns(c.id);
+  assert.equal(run.model_id, 's-m1');
+  const notes = s.store.listEvents(run.id).filter((e) => e.type === 'note' && /Model override skipped: s-m2/.test(e.data?.content || ''));
+  assert.equal(notes.length, 1);
+});
+
+test('one conversation per project may edit, and a closed one does not hold the checkout', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const a = s.createSession(p.id, 'First', { mode: 'read' });
+  const b = s.createSession(p.id, 'Second', { mode: 'read' });
+  s.setSessionMode(a.id, 'edit');
+  assert.equal(s.checkoutHolder(p.id)?.id, a.id);
+  assert.throws(() => s.setSessionMode(b.id, 'edit'), (e) => e.code === 'CONFLICT' && e.holder === a.id && /"First" can already edit/.test(e.message));
+  // Read-only is never blocked, and switching the holder back frees the checkout.
+  s.setSessionMode(a.id, 'read');
+  s.setSessionMode(b.id, 'edit');
+  assert.equal(s.checkoutHolder(p.id)?.id, b.id);
+  // A stopped holder does not hold.
+  s.store.updateSession(b.id, { status: 'stopped' });
+  assert.equal(s.checkoutHolder(p.id), null);
+  s.setSessionMode(a.id, 'edit');
+  // Not mid-turn: the turn in flight was started under the other mode.
+  s.askSession(a.id, 'Go.');
+  assert.throws(() => s.setSessionMode(a.id, 'read'), /current turn/);
+});
+
+test('the passes open system conversations, and a person chat is not one', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  assert.equal(s.createChatSession(p.id, 'A question', null).system, 0);
+  assert.equal(s.createChatSession(p.id, 'Task proposals', null, null, { system: true }).system, 1);
+  // A draft from a conversation names it, so the conversation can show its own drafts.
+  const c = s.createSession(p.id, 'Drafts', { mode: 'read' });
+  assert.equal(s.draftFromSession(c.id, { title: 'T', description: 'D' }).draft.session_id, c.id);
+});
+
+test('a read-only turn carries the gate and the app tools, still in plan mode', () => {
+  const app = { configPath: '/app.json', tools: ['mcp__ai-code-app__list_tasks'] };
+  const argv = claudeArgs({ role: 'chat', model: 'm', prompt: 'p', permissionTool: 'mcp__ai-code-permissions__approve', mcpConfig: '/gate.json', appMcp: app });
+  assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'plan');
+  assert.deepEqual(argv.slice(argv.indexOf('--disallowedTools') + 1, argv.indexOf('--disallowedTools') + 4), ['Edit', 'Write', 'Bash']);
+  assert.equal(argv[argv.indexOf('--permission-prompt-tool') + 1], 'mcp__ai-code-permissions__approve');
+  // Both servers in one --mcp-config, which takes several files.
+  assert.deepEqual(argv.slice(argv.indexOf('--mcp-config') + 1, argv.indexOf('--mcp-config') + 3), ['/gate.json', '/app.json']);
+  assert.equal(argv.filter((x) => x === '--mcp-config').length, 1);
+  // An editing turn gets the app tools beside its gate.
+  const edit = claudeArgs({ role: 'session', model: 'm', prompt: 'p', permissionTool: 'mcp__ai-code-permissions__approve', mcpConfig: '/gate.json', appMcp: app });
+  assert.deepEqual(edit.slice(edit.indexOf('--allowedTools') + 1, edit.indexOf('--')), app.tools);
+  assert.ok(!edit.includes('--dangerously-skip-permissions'));
+});
+
+test('gitImpact grades each git and gh step by how far it reaches', () => {
+  const g = (c) => {
+    const x = gitImpact(c);
+    return x && [x.level, x.destructive, x.items.map((i) => i.label)];
+  };
+  assert.equal(gitImpact('npm test && echo done'), null);
+  // Reads, local history, and what leaves the machine.
+  assert.deepEqual(g('git status'), ['read', false, ['Reads the repository (git status)']]);
+  assert.deepEqual(g('git fetch origin && git log origin/main..HEAD'), ['read', false, ['Fetches from origin without changing your branches', 'Reads the repository (git log)']]);
+  assert.deepEqual(g('git merge --no-ff -m "msg; with a semicolon" feature'), ['local', false, ['Merges feature']]);
+  assert.deepEqual(g('git pull -r origin main'), ['local', true, ['Pulls main from origin and rebases onto it']]);
+  assert.deepEqual(g('git commit -m "fix" && git push origin feature'), ['remote', false, ['Commits', 'Pushes feature to origin']]);
+  // What cannot be taken back is marked, however it is spelled.
+  for (const c of ['git push -f', 'git push origin +main', 'git push --force-with-lease', 'git reset --hard HEAD~1', 'git checkout -- .', 'git clean -fd', 'git branch -D old', 'git push origin :old', 'git commit --amend']) {
+    assert.equal(gitImpact(c).destructive, true, c);
+  }
+  assert.equal(gitImpact('git clean -n').level, 'read');
+  // Prefixes and global options do not hide the command.
+  assert.deepEqual(g('cd repo && FOO=1 git -C /x -c user.name=a push origin main'), ['remote', false, ['Pushes main to origin']]);
+  // gh: reads, a local checkout, and actions on GitHub, with option values skipped.
+  assert.deepEqual(g('gh pr view 42 --comments'), ['read', false, ['Reads pull request 42 from GitHub']]);
+  assert.deepEqual(g('gh -R o/r pr diff 9'), ['read', false, ['Reads the diff of pull request 9']]);
+  assert.deepEqual(g('gh pr checkout 12'), ['local', false, ['Checks out pull request 12 into this checkout']]);
+  assert.deepEqual(g('gh pr create --title x --body y'), ['remote', false, ['Creates pull request on GitHub']]);
+  assert.deepEqual(g('gh pr review 42 --approve'), ['remote', false, ['Approves pull request 42 on GitHub']]);
+  assert.deepEqual(g('gh pr merge 42 --squash --delete-branch'), ['remote', false, ['Squash-merges pull request 42 on GitHub and deletes its branch']]);
+  assert.deepEqual(g('gh repo delete o/r --yes'), ['remote', true, ['Deletes repository o/r on GitHub']]);
+  // gh api is a read until a method or a field makes it a write.
+  assert.equal(gitImpact('gh api repos/o/r/pulls').level, 'read');
+  assert.equal(gitImpact('gh api repos/o/r/issues/1/comments -f body=hi').level, 'remote');
+  assert.equal(gitImpact('gh api -X DELETE repos/o/r/git/refs/heads/x').destructive, true);
+  // Unknown subcommands read as more consequential, never less.
+  assert.equal(gitImpact('git frobnicate').level, 'local');
+  assert.equal(gitImpact('gh frobnicate now').level, 'remote');
 });
 
 test('sessionSteps names each tool call and folds a failed result onto its step', () => {
@@ -6573,4 +6864,78 @@ test('a read in the planning copy counts as a read of the checkout\'s file',()=>
     {data:{message:{content:[{type:'tool_use',name:'Grep',input:{path:'lib'}}]}}},
   ];
   assert.deepEqual([...readPaths(events,[],['/wt/plan-1','/repo'])].sort(),['lib','src/a.mjs','src/b.mjs']);
+});
+
+// -- diffFiles: the per-file viewer's parser ---------------------------------
+import {diffFiles} from '../src/format.mjs';
+
+test('diffFiles groups a diff by file and reads git\'s headers into each entry',()=>{
+  const {files,extra}=diffFiles([
+    'diff --git a/src/app.mjs b/src/app.mjs','index 1..2 100644','--- a/src/app.mjs','+++ b/src/app.mjs',
+    '@@ -10,3 +10,4 @@ function main() {',' keep','-old','+new','+more',' tail',
+    'diff --git a/src/new.mjs b/src/new.mjs','new file mode 100644','--- /dev/null','+++ b/src/new.mjs','@@ -0,0 +1,1 @@','+hello',
+    'diff --git a/gone.txt b/gone.txt','deleted file mode 100644','--- a/gone.txt','+++ /dev/null','@@ -1 +0,0 @@','-bye',
+    'diff --git a/a/old.mjs b/a/renamed.mjs','similarity index 90%','rename from a/old.mjs','rename to a/renamed.mjs',
+    'diff --git a/bin/x b/bin/x','old mode 100644','new mode 100755',
+    'diff --git a/i.png b/i.png','Binary files a/i.png and b/i.png differ',
+  ].join('\n'));
+  assert.deepEqual(extra,[]);
+  assert.deepEqual(files.map((f)=>[f.status,f.path,f.add,f.del]),[['M','src/app.mjs',2,1],['A','src/new.mjs',1,0],['D','gone.txt',0,1],['R','a/renamed.mjs',0,0],['M','bin/x',0,0],['M','i.png',0,0]]);
+  const h=files[0].hunks[0];
+  assert.equal(h.fn,'function main() {');
+  assert.deepEqual(h.lines.map((l)=>[l.cls,l.old,l.new,l.text]),[['diff-ctx','10','10','keep'],['diff-del','11','','old'],['diff-add','','11','new'],['diff-add','','12','more'],['diff-ctx','12','13','tail']]);
+  assert.equal(files[3].from,'a/old.mjs');
+  assert.equal(files[3].similarity,'90%');
+  assert.match(files[4].notes[0],/Mode changed 100644 → 100755/);
+  assert.match(files[5].notes[0],/Binary/);
+});
+
+test('diffFiles ends a hunk where its header says, so the port\'s status tail is not content',()=>{
+  // The port view appends `git status --short`. ` M src/app.mjs` opens with a space,
+  // which a reader going by the first character takes for a context line.
+  const {files}=diffFiles([
+    'diff --git a/src/app.mjs b/src/app.mjs','--- a/src/app.mjs','+++ b/src/app.mjs','@@ -1,2 +1,2 @@',' a','-b','+c',
+    ' M src/app.mjs','?? notes/new.md','?? "with space.txt"',
+  ].join('\n'));
+  assert.deepEqual(files.map((f)=>[f.status,f.path]),[['M','src/app.mjs'],['U','notes/new.md'],['U','with space.txt']]);
+  assert.equal(files[0].hunks[0].lines.length,3);
+  assert.match(files[1].notes[0],/untracked/i);
+  // An untracked file alone, with no diff above it, is still a file.
+  assert.deepEqual(diffFiles('\n?? only.md').files.map((f)=>f.path),['only.md']);
+});
+
+test('diffFiles keys each file by its section, so a viewed mark lapses when the file changes',()=>{
+  const one=(body)=>diffFiles(['diff --git a/x b/x','--- a/x','+++ b/x','@@ -1 +1 @@','-a',`+${body}`,'diff --git a/y b/y','--- a/y','+++ b/y','@@ -1 +1 @@','-p','+q'].join('\n')).files;
+  const [x1,y1]=one('b');const [x2,y2]=one('c');
+  assert.notEqual(x1.key,x2.key);
+  assert.equal(y1.key,y2.key);
+  assert.match(x1.key,/^[0-9a-f]{8}$/);
+});
+
+test('diffFiles reads a diff with no git header, and keeps prose before it',()=>{
+  const {files,extra}=diffFiles(['The fix:','   indented prose','--- a/lib.mjs','+++ b/lib.mjs','@@ -1 +1 @@','-x','+y'].join('\n'));
+  assert.deepEqual(extra,['The fix:','   indented prose']);
+  assert.deepEqual(files.map((f)=>[f.path,f.add,f.del]),[['lib.mjs',1,1]]);
+});
+
+import {diffLanguage,splitHighlighted} from '../src/format.mjs';
+
+test('splitHighlighted keeps every line\'s spans balanced when a token spans lines',()=>{
+  const lines=splitHighlighted('<span class="hljs-comment">/* one\ntwo */</span> <span class="hljs-keyword">const</span> a\nb');
+  assert.deepEqual(lines,[
+    '<span class="hljs-comment">/* one</span>',
+    '<span class="hljs-comment">two */</span> <span class="hljs-keyword">const</span> a',
+    'b',
+  ]);
+  // Nested spans reopen in order.
+  assert.deepEqual(splitHighlighted('<span class="a"><span class="b">x\ny</span></span>'),['<span class="a"><span class="b">x</span></span>','<span class="a"><span class="b">y</span></span>']);
+  assert.deepEqual(splitHighlighted(''),['']);
+});
+
+test('diffLanguage maps a path to a highlight.js language, and nothing it would guess',()=>{
+  assert.equal(diffLanguage('src/app.mjs'),'javascript');
+  assert.equal(diffLanguage('web/index.html'),'xml');
+  assert.equal(diffLanguage('Makefile'),'makefile');
+  assert.equal(diffLanguage('notes/.env'),null);
+  assert.equal(diffLanguage('LICENSE'),null);
 });

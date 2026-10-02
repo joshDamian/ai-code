@@ -616,6 +616,183 @@ export function diffSides(diff) {
   return out;
 }
 
+// A diff as the files it touches, for a viewer that draws one box per file. The line
+// rules are diffLines' own; what this adds is the grouping, and three things only a
+// file-level reader needs.
+//
+// A hunk ends where its header says it does. The `@@` counts are how many old and new
+// lines it holds, and reading them is what tells a context line from what follows the
+// hunk. The port view appends `git status --short` to its diff, and a line reading
+// ` M src/app.mjs` is a context line to any reader that goes by the first character.
+// Of those status lines only `??` says something the diff cannot - an untracked file,
+// which no diff carries - so it becomes an entry of its own and the rest are dropped:
+// every other status names a file the diff already has.
+//
+// The git headers (`diff --git`, `index`, `---`, `+++`, modes, renames) are read into
+// the entry and not kept as lines, because the file header states them.
+//
+// `key` changes when the file's section of the diff does, so a mark stored against it
+// ("viewed") lapses on its own when the file changes underneath it.
+//
+// `extra` is anything before the first file: a reviewer that answered with prose and
+// then a diff has its prose kept rather than silently dropped.
+export function diffFiles(diff) {
+  const files = [];
+  const extra = [];
+  let f = null;
+  let hunk = null;
+  let oldLeft = 0;
+  let newLeft = 0;
+  let oldNo = 0;
+  let newNo = 0;
+  const strip = (p) => p.replace(/^[ab]\//, '');
+  const open = (path, from) => {
+    f = { path, from: from ?? path, status: 'M', similarity: null, notes: [], hunks: [], add: 0, del: 0, raw: [] };
+    files.push(f);
+    hunk = null;
+    return f;
+  };
+  for (const line of String(diff ?? '').split('\n')) {
+    if (hunk && (oldLeft > 0 || newLeft > 0)) {
+      f.raw.push(line);
+      if (line.startsWith('\\')) continue;
+      const c = line[0];
+      if (c === '+') {
+        newLeft--;
+        f.add++;
+        hunk.lines.push({ cls: 'diff-add', old: '', new: String(++newNo), text: line.slice(1) });
+      } else if (c === '-') {
+        oldLeft--;
+        f.del++;
+        hunk.lines.push({ cls: 'diff-del', old: String(++oldNo), new: '', text: line.slice(1) });
+      } else {
+        oldLeft--;
+        newLeft--;
+        hunk.lines.push({ cls: 'diff-ctx', old: String(++oldNo), new: String(++newNo), text: line.slice(1) });
+      }
+      continue;
+    }
+    hunk = null;
+    if (line.startsWith('diff --git ')) {
+      const m = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+      open(m ? m[2] : line.slice(11), m ? m[1] : undefined).raw.push(line);
+      continue;
+    }
+    const st = line.match(/^(\?\?|[ MADRCU!][ MADRCU!]) (.+)$/);
+    if (st && st[1] !== '  ' && (st[1] === '??' || files.length)) {
+      if (st[1] === '??') {
+        const path = st[2].replace(/^"(.*)"$/, '$1');
+        files.push({ path, from: path, status: 'U', similarity: null, notes: [], hunks: [], add: 0, del: 0, raw: [line] });
+      }
+      f = null;
+      continue;
+    }
+    if (line.startsWith('--- ')) {
+      // A diff with no `diff --git` line - one a model wrote - opens its file here.
+      if (!f || f.hunks.length) open(strip(line.slice(4)));
+      else if (line.slice(4) !== '/dev/null') f.from = strip(line.slice(4));
+      f.raw.push(line);
+      continue;
+    }
+    if (!f) {
+      if (line.trim()) extra.push(line);
+      continue;
+    }
+    f.raw.push(line);
+    if (line.startsWith('+++ ')) {
+      if (line.slice(4) !== '/dev/null') f.path = strip(line.slice(4));
+    } else if (line.startsWith('@@')) {
+      const m = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/);
+      if (!m) continue;
+      hunk = { oldStart: +m[1], oldLen: +(m[2] ?? 1), newStart: +m[3], newLen: +(m[4] ?? 1), fn: m[5] || '', lines: [] };
+      oldLeft = hunk.oldLen;
+      newLeft = hunk.newLen;
+      oldNo = hunk.oldStart - 1;
+      newNo = hunk.newStart - 1;
+      f.hunks.push(hunk);
+    } else if (line.startsWith('new file')) f.status = 'A';
+    else if (line.startsWith('deleted file')) f.status = 'D';
+    else if (line.startsWith('rename from ')) { f.status = 'R'; f.from = line.slice(12); }
+    else if (line.startsWith('rename to ')) f.path = line.slice(10);
+    else if (line.startsWith('similarity index ')) f.similarity = line.slice(17);
+    else if (line.startsWith('old mode ')) f.oldMode = line.slice(9);
+    else if (line.startsWith('new mode ')) f.notes.push(`Mode changed ${f.oldMode || ''} → ${line.slice(9)}`.replace('  ', ' '));
+    else if (line.startsWith('Binary files')) f.notes.push('Binary file changed. Contents not shown.');
+  }
+  for (const x of files) {
+    if (x.status === 'U') x.notes.push('New untracked file. It will be committed with the change, but its contents are not in the diff.');
+    x.key = hashText(x.raw.join('\n'));
+    delete x.raw;
+    delete x.oldMode;
+  }
+  return { files, extra };
+}
+
+// The highlight.js language for a path, or null when there is none worth trying.
+// By extension, plus the few files whose name is their type. Guessing a language from
+// content is left out on purpose: on a fragment of a file - which is all a hunk is -
+// the guess is wrong often enough to be worse than plain text.
+const LANGUAGES = {
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
+  ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+  py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java', kt: 'kotlin', kts: 'kotlin',
+  swift: 'swift', c: 'c', h: 'c', cc: 'cpp', cpp: 'cpp', cxx: 'cpp', hpp: 'cpp', cs: 'csharp',
+  php: 'php', sh: 'bash', bash: 'bash', zsh: 'bash', json: 'json', webmanifest: 'json',
+  yml: 'yaml', yaml: 'yaml', md: 'markdown', markdown: 'markdown',
+  html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml', css: 'css', scss: 'scss', less: 'less',
+  sql: 'sql', toml: 'ini', ini: 'ini', lua: 'lua', r: 'r', pl: 'perl', graphql: 'graphql', gql: 'graphql',
+};
+const NAMED = { makefile: 'makefile', gemfile: 'ruby', rakefile: 'ruby' };
+export function diffLanguage(path) {
+  const name = String(path || '').split('/').pop().toLowerCase();
+  if (NAMED[name]) return NAMED[name];
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? LANGUAGES[name.slice(dot + 1)] || null : null;
+}
+
+// Highlighted HTML cut into one string per source line, each with its spans balanced.
+// A hunk side is highlighted as one block so a string or comment that runs over
+// several lines keeps its colour on all of them - which leaves spans that open on one
+// line and close on another. Each line closes what is open at its end and the next
+// reopens it, so every line can be rendered on its own.
+//
+// It reads only the shape highlight.js writes: `<span class="...">`, `</span>` and
+// escaped text. Anything else is passed through as text.
+export function splitHighlighted(html) {
+  const lines = [];
+  const open = [];
+  let line = '';
+  const re = /(<span[^>]*>)|(<\/span>)|(\n)|([^<\n]+|<)/g;
+  let m;
+  while ((m = re.exec(String(html ?? '')))) {
+    if (m[1]) {
+      open.push(m[1]);
+      line += m[1];
+    } else if (m[2]) {
+      open.pop();
+      line += m[2];
+    } else if (m[3]) {
+      lines.push(line + '</span>'.repeat(open.length));
+      line = open.join('');
+    } else {
+      line += m[4];
+    }
+  }
+  lines.push(line + '</span>'.repeat(open.length));
+  return lines;
+}
+
+// FNV-1a over the text, as eight hex digits. A change detector, not a digest: two
+// sections colliding costs a stale "viewed" mark and nothing else.
+function hashText(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
 // How a block of model text should be displayed. A plan and a reviewer's verdict
 // are markdown; a reviewer that answered with a diff is a diff, and sending one
 // through a markdown renderer mangles it. This decision lived inline in the task
@@ -629,4 +806,308 @@ export function bodyKind(text) {
   // one-character version of the same hole.
   if (/^(diff --git |--- \S|\+\+\+ \S|@@ )/m.test(text)) return 'diff';
   return 'markdown';
+}
+
+// What a shell command does through git or the GitHub CLI, for the approval panel.
+//
+// A conversation that can edit may run git and gh like any other command, behind the
+// same approval. The approval is only worth what the person can read off it, and
+// `git pull --rebase origin main && git push -f` reads as one more command unless
+// something says that it rewrites history and then leaves the machine. So each git or
+// gh invocation in the command is named, and graded by how far its effect reaches:
+//
+//   read    looks and changes nothing (log, diff, status, fetch, gh pr view)
+//   local   changes this checkout's history, branches or files (commit, merge, pull)
+//   remote  changes something off this machine (push, gh pr create, gh pr merge)
+//
+// `destructive` marks what cannot be taken back from here: a hard reset, a force
+// push, a discarded file, a deleted branch. Anything this does not recognise is graded
+// local for git and remote for gh, so an unknown command reads as more consequential,
+// never less. Shared by the server and the dashboard, so the panel and the list row
+// say the same thing.
+const LEVELS = ['read', 'local', 'remote'];
+const higher = (a, b) => (LEVELS.indexOf(a) >= LEVELS.indexOf(b) ? a : b);
+
+// Shell words, with quotes honoured and the control operators as their own tokens,
+// so `git commit -m "fix; again" && git push` is two commands and not three.
+function shellWords(command) {
+  const out = [];
+  let cur = '';
+  let quote = null;
+  let started = false;
+  const flush = () => {
+    if (started) out.push(cur);
+    cur = '';
+    started = false;
+  };
+  const s = String(command || '');
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      else if (c === '\\' && quote === '"' && i + 1 < s.length) cur += s[++i];
+      else cur += c;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      started = true;
+    } else if (c === '\\' && i + 1 < s.length) {
+      cur += s[++i];
+      started = true;
+    } else if (c === '\n' || c === ';' || c === '|' || c === '&' || c === '(' || c === ')' || c === '`') {
+      flush();
+      // `&&`, `||` and `|&` are one separator; `$(` leaves its `$` on no word.
+      if ((c === '&' || c === '|') && (s[i + 1] === c || s[i + 1] === '&')) i++;
+      out.push(';');
+    } else if (c === '$' && s[i + 1] === '(') {
+      flush();
+    } else if (/\s/.test(c)) {
+      flush();
+    } else {
+      cur += c;
+      started = true;
+    }
+  }
+  flush();
+  return out;
+}
+
+function shellCommands(command) {
+  const cmds = [];
+  let words = [];
+  for (const w of shellWords(command)) {
+    if (w === ';') {
+      if (words.length) cmds.push(words);
+      words = [];
+    } else words.push(w);
+  }
+  if (words.length) cmds.push(words);
+  return cmds;
+}
+
+// The program a command runs, past the prefixes that only change how it runs.
+const PREFIXES = new Set(['sudo', 'command', 'env', 'time', 'nohup', 'exec', 'xargs', 'nice']);
+function programOf(words) {
+  let i = 0;
+  while (i < words.length && (PREFIXES.has(words[i]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]) || (i > 0 && PREFIXES.has(words[i - 1]) && words[i].startsWith('-')))) i++;
+  const name = (words[i] || '').split('/').pop();
+  return { name, args: words.slice(i + 1) };
+}
+
+const has = (args, ...flags) => args.some((a) => flags.includes(a) || flags.some((f) => f.startsWith('--') && a.startsWith(`${f}=`)));
+// The arguments that are not options, skipping the value an option takes: in
+// `git merge -m "msg" feature` the branch is `feature`, not the message.
+// Kept per tool: the same short flag takes a value in one and not the other (`-r` is
+// gh's reviewer and git's rebase).
+const GIT_VALUE_FLAGS = new Set(['-m', '-F', '--message', '--file', '-s', '--strategy', '-X', '--strategy-option', '--author', '--date', '-o', '--push-option', '--exec', '--onto', '-b', '-B', '-c', '-C']);
+const GH_VALUE_FLAGS = new Set(['-R', '--repo', '--hostname', '-t', '--title', '-b', '--body', '-F', '--body-file', '-B', '--base', '-H', '--head', '-l', '--label', '-a', '--assignee', '-r', '--reviewer', '-m', '--milestone', '-p', '--project', '-q', '--jq', '-T', '--template', '-X', '--method', '-f', '--field', '--raw-field', '--input', '-s', '--state', '-L', '--limit']);
+const positional = (args, valueFlags = GIT_VALUE_FLAGS, keep = new Set()) => {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i].startsWith('-')) {
+      if (valueFlags.has(args[i]) && !keep.has(args[i])) i++;
+    } else out.push(args[i]);
+  }
+  return out;
+};
+
+const GIT_GLOBAL_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env']);
+const GIT_READ = new Set(['status', 'log', 'diff', 'show', 'blame', 'rev-parse', 'rev-list', 'ls-files', 'ls-tree', 'ls-remote', 'grep', 'describe', 'shortlog', 'merge-base', 'cat-file', 'name-rev', 'whatchanged', 'show-ref', 'for-each-ref', 'count-objects', 'check-ignore', 'help', 'version', 'var', 'range-diff', 'cherry', 'difftool', 'annotate', 'show-branch', 'verify-commit', 'verify-tag']);
+
+function gitItem(args) {
+  let i = 0;
+  while (i < args.length && args[i].startsWith('-')) {
+    if (GIT_GLOBAL_VALUE.has(args[i])) i++;
+    i++;
+  }
+  const sub = args[i] || '';
+  const rest = args.slice(i + 1);
+  // `-b` and `-B` name the new branch for checkout and switch, so their value is the
+  // positional the label wants rather than one to skip.
+  const pos = positional(rest, GIT_VALUE_FLAGS, sub === 'checkout' || sub === 'switch' ? new Set(['-b', '-B', '-c', '-C']) : new Set());
+  const it = (level, label, destructive = false) => ({ tool: 'git', sub, level, label, destructive });
+  if (!sub || has(args, '--version', '--help')) return it('read', 'Shows git help or version');
+  if (GIT_READ.has(sub)) return it('read', `Reads the repository (git ${sub})`);
+  switch (sub) {
+    case 'fetch':
+      return it('read', `Fetches from ${pos[0] || 'the remote'} without changing your branches`);
+    case 'reflog':
+      return pos[0] === 'expire' || pos[0] === 'delete' ? it('local', 'Deletes reflog entries', true) : it('read', 'Reads the reflog');
+    case 'branch': {
+      if (has(rest, '-D') || (has(rest, '-d', '--delete') && has(rest, '-f', '--force'))) return it('local', `Force-deletes branch ${pos[0] || ''}`.trim(), true);
+      if (has(rest, '-d', '--delete')) return it('local', `Deletes branch ${pos[0] || ''}`.trim());
+      if (has(rest, '-m', '-M', '--move')) return it('local', 'Renames a branch', has(rest, '-M'));
+      if (has(rest, '-u', '--set-upstream-to', '--unset-upstream')) return it('local', 'Changes a branch upstream');
+      if (pos.length && !has(rest, '-l', '--list', '-a', '-r', '--contains', '--merged', '--no-merged', '--show-current')) return it('local', `Creates branch ${pos[0]}`);
+      return it('read', 'Lists branches');
+    }
+    case 'tag':
+      if (!pos.length || has(rest, '-l', '--list', '-n', '--contains', '--points-at')) return it('read', 'Lists tags');
+      return has(rest, '-d', '--delete') ? it('local', `Deletes tag ${pos[0]}`) : it('local', `Creates tag ${pos[0]}`, has(rest, '-f', '--force'));
+    case 'stash': {
+      const op = pos[0] || 'push';
+      if (op === 'list' || op === 'show') return it('read', 'Reads the stash');
+      if (op === 'drop' || op === 'clear') return it('local', op === 'clear' ? 'Deletes every stash' : 'Deletes a stash', true);
+      if (op === 'pop' || op === 'apply') return it('local', 'Applies stashed changes to the checkout');
+      return it('local', 'Stashes uncommitted changes');
+    }
+    case 'remote':
+      return !pos.length || ['show', 'get-url'].includes(pos[0]) ? it('read', 'Lists remotes') : it('local', `Changes remotes (git remote ${pos[0]})`, pos[0] === 'remove' || pos[0] === 'rm');
+    case 'worktree':
+      return pos[0] === 'list' ? it('read', 'Lists worktrees') : it('local', `Changes worktrees (git worktree ${pos[0] || ''})`.trim(), pos[0] === 'remove' && has(rest, '-f', '--force'));
+    case 'config':
+      return has(rest, '--get', '--get-all', '--get-regexp', '--list', '-l', '--show-origin') || pos.length <= 1 ? it('read', 'Reads git config') : it('local', 'Changes git config');
+    case 'submodule':
+      return !pos.length || pos[0] === 'status' || pos[0] === 'summary' ? it('read', 'Reads submodules') : it('local', `Changes submodules (git submodule ${pos[0]})`);
+    case 'commit':
+      return has(rest, '--amend') ? it('local', 'Rewrites the last commit', true) : it('local', 'Commits');
+    case 'merge':
+      if (has(rest, '--abort', '--quit')) return it('local', 'Abandons the merge in progress');
+      if (has(rest, '--continue')) return it('local', 'Concludes the merge in progress');
+      return it('local', `Merges ${pos.join(' ') || 'into the current branch'}`);
+    case 'pull':
+      return it('local', `Pulls ${pos.slice(1).join(' ') || 'the upstream branch'} from ${pos[0] || 'the remote'} and ${has(rest, '--rebase', '-r') ? 'rebases onto it' : 'merges it'}`, has(rest, '--rebase', '-r', '--force', '-f'));
+    case 'rebase':
+      if (has(rest, '--abort', '--quit')) return it('local', 'Abandons the rebase in progress');
+      if (has(rest, '--continue', '--skip')) return it('local', 'Continues the rebase in progress', has(rest, '--skip'));
+      return it('local', `Rebases onto ${pos[0] || 'the upstream branch'}, rewriting commits`, true);
+    case 'cherry-pick':
+    case 'revert':
+    case 'am':
+      return it('local', `${sub === 'revert' ? 'Reverts' : 'Applies'} commits (git ${sub})`);
+    case 'reset':
+      if (has(rest, '--hard', '--merge', '--keep')) return it('local', `Resets to ${pos[0] || 'HEAD'} and discards uncommitted changes`, true);
+      return it('local', pos.length ? `Moves the branch to ${pos[0]} or unstages paths` : 'Unstages changes');
+    case 'checkout':
+      if (has(rest, '--', '.') || has(rest, '-f', '--force')) return it('local', 'Discards changes to files', true);
+      if (has(rest, '-b', '-B')) return it('local', `Creates and switches to branch ${pos[0] || ''}`.trim(), has(rest, '-B'));
+      return it('local', `Switches to ${pos[0] || 'a branch'}`);
+    case 'switch':
+      return it('local', `Switches to ${pos[0] || 'a branch'}`, has(rest, '--discard-changes', '-f', '--force', '-C'));
+    case 'restore':
+      return has(rest, '--staged', '-S') && !has(rest, '--worktree', '-W') ? it('local', 'Unstages changes') : it('local', 'Discards changes to files', true);
+    case 'clean':
+      return has(rest, '-n', '--dry-run') ? it('read', 'Lists untracked files it would delete') : it('local', 'Deletes untracked files', true);
+    case 'add':
+    case 'rm':
+    case 'mv':
+      return it('local', sub === 'add' ? 'Stages changes' : sub === 'rm' ? 'Removes files' : 'Moves files', sub === 'rm' && has(rest, '-f', '--force'));
+    case 'push': {
+      const force = has(rest, '-f', '--force', '--force-with-lease', '--force-if-includes', '--mirror') || pos.some((p) => p.startsWith('+'));
+      const del = has(rest, '-d', '--delete') || pos.some((p) => p.startsWith(':'));
+      const target = pos.length ? `${pos.slice(1).join(' ') || 'the current branch'} to ${pos[0]}` : 'the current branch to its remote';
+      if (del) return it('remote', `Deletes branch ${pos.slice(1).join(' ').replace(/^:/, '') || ''} on ${pos[0] || 'the remote'}`.replace(/\s+/g, ' '), true);
+      return it('remote', `${force ? 'Force-pushes' : 'Pushes'} ${target}${has(rest, '--tags') ? ', with tags' : ''}`, force);
+    }
+    case 'send-email':
+    case 'request-pull':
+      return it('remote', `Sends patches (git ${sub})`);
+    case 'filter-branch':
+    case 'filter-repo':
+      return it('local', 'Rewrites history across the repository', true);
+    case 'clone':
+    case 'init':
+      return it('local', sub === 'clone' ? `Clones ${pos[0] || 'a repository'}` : 'Creates a repository');
+    default:
+      return it('local', `Runs git ${sub}`);
+  }
+}
+
+const GH_GLOBAL_VALUE = new Set(['-R', '--repo', '--hostname']);
+const GH_READ = {
+  pr: ['view', 'diff', 'list', 'checks', 'status'],
+  issue: ['view', 'list', 'status'],
+  repo: ['view', 'list'],
+  run: ['view', 'list', 'watch', 'download'],
+  workflow: ['view', 'list'],
+  release: ['view', 'list', 'download'],
+  gist: ['view', 'list'],
+  label: ['list'],
+  cache: ['list'],
+  secret: ['list'],
+  variable: ['list', 'get'],
+  auth: ['status', 'token'],
+  ruleset: ['view', 'list', 'check'],
+  project: ['view', 'list', 'item-list', 'field-list'],
+};
+const GH_LOCAL = { pr: ['checkout'], repo: ['clone', 'set-default'], gist: ['clone'], auth: ['setup-git'] };
+const GH_DESTRUCTIVE = new Set(['delete', 'archive', 'transfer']);
+const GH_VERBS = {
+  create: 'Creates',
+  merge: 'Merges',
+  close: 'Closes',
+  reopen: 'Reopens',
+  edit: 'Edits',
+  comment: 'Comments on',
+  review: 'Reviews',
+  ready: 'Marks ready',
+  delete: 'Deletes',
+  fork: 'Forks',
+  rename: 'Renames',
+  archive: 'Archives',
+  sync: 'Syncs',
+  transfer: 'Transfers',
+  lock: 'Locks',
+  unlock: 'Unlocks',
+  pin: 'Pins',
+  run: 'Runs',
+  rerun: 'Re-runs',
+  cancel: 'Cancels',
+  enable: 'Enables',
+  disable: 'Disables',
+  set: 'Sets',
+  upload: 'Uploads to',
+};
+
+function ghItem(args) {
+  const words = [];
+  for (let i = 0; i < args.length; i++) {
+    if (GH_GLOBAL_VALUE.has(args[i])) i++;
+    else words.push(args[i]);
+  }
+  const [group = '', action = ''] = positional(words, GH_VALUE_FLAGS);
+  const rest = words.slice(words.indexOf(action) + 1);
+  // The thing acted on is the word right after the action - `gh pr view 42` - and
+  // never a word after an option, which is that option's value.
+  const ref = rest[0] && !rest[0].startsWith('-') ? rest[0] : '';
+  const noun = { pr: 'pull request', issue: 'issue', repo: 'repository', run: 'workflow run', workflow: 'workflow', release: 'release', gist: 'gist', label: 'label', secret: 'secret', variable: 'variable', cache: 'cache', ruleset: 'ruleset', project: 'project' }[group] || group;
+  const it = (level, label, destructive = false) => ({ tool: 'gh', sub: `${group} ${action}`.trim(), level, label, destructive });
+  if (!group || has(args, '--version', '--help', '-h') || ['help', 'version', 'status', 'browse', 'search', 'completion'].includes(group)) return it('read', `Reads from GitHub (gh ${group || 'help'})`);
+  if (group === 'api') {
+    // GET unless a method or a field says otherwise: gh api turns fields into a POST.
+    const m = words.findIndex((w) => w === '-X' || w === '--method');
+    const method = (m >= 0 ? words[m + 1] : (words.find((w) => w.startsWith('--method=')) || '').split('=')[1]) || (has(words, '-f', '-F', '--field', '--raw-field', '--input') ? 'POST' : 'GET');
+    const path = positional(words.slice(1), GH_VALUE_FLAGS)[0] || '';
+    return method.toUpperCase() === 'GET' ? it('read', `Reads ${path} from the GitHub API`) : it('remote', `Sends ${method.toUpperCase()} ${path} to the GitHub API`, method.toUpperCase() === 'DELETE');
+  }
+  if (GH_READ[group]?.includes(action) || (group === 'gist' && !action)) {
+    return it('read', action === 'list' ? `Lists ${noun}s on GitHub` : action === 'diff' ? `Reads the diff of pull request ${ref}`.trim() : `Reads ${noun}${ref ? ` ${ref}` : 's'} from GitHub`);
+  }
+  if (GH_LOCAL[group]?.includes(action)) return it('local', group === 'pr' ? `Checks out pull request ${ref || ''} into this checkout`.trim() : `Runs gh ${group} ${action} locally`);
+  if (group === 'pr' && action === 'review') {
+    const kind = has(rest, '-a', '--approve') ? 'Approves' : has(rest, '-r', '--request-changes') ? 'Requests changes on' : 'Comments on';
+    return it('remote', `${kind} pull request ${ref || ''} on GitHub`.replace(/\s+on GitHub$/, ' on GitHub'));
+  }
+  if (group === 'pr' && action === 'merge') {
+    const how = has(rest, '--squash', '-s') ? 'Squash-merges' : has(rest, '--rebase', '-r') ? 'Rebase-merges' : 'Merges';
+    return it('remote', `${how} pull request ${ref || ''} on GitHub${has(rest, '-d', '--delete-branch') ? ' and deletes its branch' : ''}`.replace(/\s+on/, ' on'), has(rest, '--admin'));
+  }
+  const verb = GH_VERBS[action] || `Runs gh ${group} ${action}:`;
+  return it('remote', `${verb} ${GH_VERBS[action] ? `${noun}${ref ? ` ${ref}` : ''}` : ''} on GitHub`.replace(/\s+/g, ' ').replace(': on', ' on'), GH_DESTRUCTIVE.has(action));
+}
+
+export function gitImpact(command) {
+  const items = [];
+  for (const words of shellCommands(command)) {
+    const { name, args } = programOf(words);
+    if (name === 'git') items.push(gitItem(args));
+    else if (name === 'gh') items.push(ghItem(args));
+  }
+  if (!items.length) return null;
+  return {
+    level: items.reduce((l, x) => higher(l, x.level), 'read'),
+    destructive: items.some((x) => x.destructive),
+    items,
+  };
 }

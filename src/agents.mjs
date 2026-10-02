@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { TOOL_NAMES as APP_TOOL_NAMES } from './app-mcp.mjs';
 
 // The MCP server a supervised session's permission prompts are delegated to, and
 // the one tool it exposes. The name is a constant because two places have to agree
@@ -11,6 +12,9 @@ import { fileURLToPath } from 'node:url';
 // anything, which reads as a session that can do nothing.
 const PERMISSION_SERVER = 'ai-code-permissions';
 const PERMISSION_TOOL = 'approve';
+// The server a chat reads AI Code's own records through. Its tool names come from
+// the server module itself, so the allowlist below cannot drift from what it serves.
+const APP_SERVER = 'ai-code-app';
 
 // Ordered failure classification. First match wins, so the order is the design:
 // a 429 has to read as RATE_LIMIT before the broader patterns can claim it, and
@@ -331,6 +335,16 @@ export const REVIEWER_SCHEMA = {
   additionalProperties: false,
 };
 
+// The MCP servers a run loads, in one `--mcp-config` (it takes several files), and
+// the app tools pre-allowed. Those are named one by one rather than by a server
+// wildcard, so a write tool added to that server later is not allowed by this line;
+// without the allowlist, plan mode would hold every call for a person to approve.
+function mcpFlags(gateConfig, app) {
+  const configs = [gateConfig, app?.configPath].filter(Boolean);
+  if (!configs.length) return [];
+  return ['--mcp-config', ...configs, ...(app ? ['--allowedTools', ...app.tools] : [])];
+}
+
 // The permission flags are the whole safety story: a chat, a reviewer, or a
 // planner in the real checkout may not write, and only an implementation role or
 // a planner in its own disposable copy may run commands without prompting.
@@ -361,6 +375,14 @@ export function claudeArgs(input) {
   } else if (input.role === 'planner' || input.role === 'chat') {
     args.push('--permission-mode', 'plan', '--disallowedTools', 'Edit', 'Write', 'Bash');
     args.push('--append-system-prompt', READ_ONLY_NOTICE);
+    // A read-only turn of a conversation also carries the permission gate: plan mode
+    // still holds back anything that is not a read, and the gate is who it asks -
+    // which is how draft_task reaches the person rather than being refused for want
+    // of anyone to ask in --print. The writing tools are disallowed above, so the
+    // gate is never offered one.
+    const gated = input.role === 'chat' && input.permissionTool && input.mcpConfig;
+    if (gated) args.push('--permission-prompts', 'host', '--permission-prompt-tool', input.permissionTool);
+    if (input.role === 'chat') args.push(...mcpFlags(gated ? input.mcpConfig : null, input.appMcp));
   } else if (input.role === 'reviewer') {
     args.push('--permission-mode', 'plan', '--disallowedTools', 'Edit', 'Write');
     args.push('--append-system-prompt', READ_ONLY_NOTICE);
@@ -398,7 +420,7 @@ export function claudeArgs(input) {
       '--permission-mode', 'default',
       '--permission-prompts', 'host',
       '--permission-prompt-tool', input.permissionTool,
-      '--mcp-config', input.mcpConfig
+      ...mcpFlags(input.mcpConfig, input.appMcp)
     );
   } else {
     args.push('--dangerously-skip-permissions');
@@ -465,6 +487,31 @@ export function permissionMcpConfig(runId, { endpoint, sessionId, timeoutMs }) {
     { mode: 0o600 }
   );
   return { configPath, permissionTool: `mcp__${PERMISSION_SERVER}__${PERMISSION_TOOL}` };
+}
+
+// The read-only tools a chat gets over AI Code's own records (src/app-mcp.mjs). A
+// file per run for the reason the permission config is one: it names the port this
+// server bound. `tools` is the list claudeArgs pre-allows - every one is a GET.
+export function appMcpConfig(runId, { endpoint }) {
+  const configPath = path.join(os.tmpdir(), `ai-code-app-mcp-${runId}.json`);
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify(
+      {
+        mcpServers: {
+          [APP_SERVER]: {
+            command: process.execPath,
+            args: [fileURLToPath(new URL('./app-mcp.mjs', import.meta.url))],
+            env: { AI_CODE_ENDPOINT: endpoint },
+          },
+        },
+      },
+      null,
+      2
+    ),
+    { mode: 0o600 }
+  );
+  return { configPath, tools: APP_TOOL_NAMES.map((t) => `mcp__${APP_SERVER}__${t}`) };
 }
 
 // The other half of the pair above. A run that has finished leaves a config file

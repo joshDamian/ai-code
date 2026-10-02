@@ -363,7 +363,7 @@ export function MemoryPanel({ project, onReload, navigate, showSpec = true, draf
                       <div class="list-row-main">
                         <b>${d.title}</b>
                         <span class="muted">${d.description}</span>
-                        <span class="muted">from the ${d.source === 'proposal' ? 'proposals pass' : 'idea note'}</span>
+                        <span class="muted">from ${d.source === 'proposal' ? 'the proposals pass' : d.source === 'session' ? 'a session' : 'the idea note'}</span>
                       </div>
                       <div class="list-row-side">
                         <button class="btn" disabled=${!!busy} onClick=${() => approveDraft(d)}>

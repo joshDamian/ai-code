@@ -189,7 +189,9 @@ test('the chat view resolves the project the route does not hand it',async()=>{
     assert.equal(app.status,200);
     assert.match(app.body,/from '\.\/views\/chat\.mjs'/);
     assert.match(app.body,/case 'chat-detail'/);
-    assert.match(app.body,/c: '#\/chat'/);
+    // The chat list folded into conversations: `c` returns to them, where the person
+    // last was, and a chat still opens on its own route.
+    assert.match(app.body,/c: conversationsHref/);
   }finally{s.stop()}
 });
 
@@ -439,7 +441,7 @@ test('the port routes take their options from the request',async()=>{
     assert.match(view.diff,/diff --git a\/app\.mjs/);
     assert.equal(view.pending,true,'the work is uncommitted, and the assessment says so');
     assert.equal(view.state.key,'pending','and the verdict the tab leads with is served with it');
-    assert.match(view.state.headline,/uncommitted/, 'the verdict is prose, not a key the client expands');
+    assert.match(view.state.headline,/not committed/, 'the verdict is prose, not a key the client expands');
 
     const before=read(root,['rev-parse','staging']);
     const dry=await post(`${s.base}/api/tasks/${taskId}/port`,{to:'staging',dryRun:true});
@@ -481,7 +483,7 @@ test('the refine route refuses a task that already has a run in flight',async()=
   try{
     const r=await post(`${srv.base}/api/tasks/${t.id}/refine`,{feedback:'make it smaller'});
     assert.equal(r.status,400);
-    assert.match(JSON.parse(r.body).error,/in flight/);
+    assert.match(JSON.parse(r.body).error,/still running/);
   }finally{srv.stop()}
 });
 
@@ -491,7 +493,7 @@ test('POST /api/tasks/:id/close moves to CANCELLED',async()=>{const root=fs.mkdt
 
 test('GET /api/tasks?state=CANCELLED returns closed tasks',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-close-list-'));git(root,['init','-q']);fs.writeFileSync(path.join(root,'README.md'),'x');git(root,['add','.']);git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);const s=new Service(root,{allowMock:true,silent:true});const p=s.initProject('p',root);const t1=s.createTask(p.id,'close me');const t2=s.createTask(p.id,'keep me');s.prepare(t1.id);s.closeTask(t1.id);const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{const r=await get(`${server.base}/api/tasks?state=CANCELLED`);assert.equal(r.status,200);const body=JSON.parse(r.body);const ids=body.map(t=>t.id);assert.ok(ids.includes(t1.id));assert.equal(ids.includes(t2.id),false)}finally{server.stop()}});
 
-test('close refuses a task with a run in flight',async()=>{const {root,taskId}=seeded();const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{await post(`${server.base}/api/tasks/${taskId}/plan`);await post(`${server.base}/api/tasks/${taskId}/approve`);const reading=stream(`${server.base}/api/tasks/${taskId}/stream`,25000);const queued=await post(`${server.base}/api/tasks/${taskId}/execute/background`);await new Promise(r=>setTimeout(r,500));const closeR=await post(`${server.base}/api/tasks/${taskId}/close`);assert.equal(closeR.status,400);assert.match(JSON.parse(closeR.body).error,/task cancel/);await post(`${server.base}/api/tasks/${taskId}/cancel`);const closeR2=await post(`${server.base}/api/tasks/${taskId}/close`);assert.equal(closeR2.status,200)}finally{server.stop()}});
+test('close refuses a task with a run in flight',async()=>{const {root,taskId}=seeded();const server=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{await post(`${server.base}/api/tasks/${taskId}/plan`);await post(`${server.base}/api/tasks/${taskId}/approve`);const reading=stream(`${server.base}/api/tasks/${taskId}/stream`,25000);const queued=await post(`${server.base}/api/tasks/${taskId}/execute/background`);await new Promise(r=>setTimeout(r,500));const closeR=await post(`${server.base}/api/tasks/${taskId}/close`);assert.equal(closeR.status,400);assert.match(JSON.parse(closeR.body).error,/Cancel it first/);await post(`${server.base}/api/tasks/${taskId}/cancel`);const closeR2=await post(`${server.base}/api/tasks/${taskId}/close`);assert.equal(closeR2.status,200)}finally{server.stop()}});
 
 test('ai-code task close exits 0 and prints CANCELLED state',async()=>{const {root,taskId}=seeded();const r=await new Promise((res)=>{const p=spawn(process.execPath,[cliPath,'task','close',taskId],{cwd:root,env:{...process.env,AI_CODE_ROOT:root},stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});assert.equal(r.code,0);assert.match(r.out,/CANCELLED/)});
 
@@ -2034,5 +2036,76 @@ test('a phone holding a valid token cannot stop the server',async()=>{
     assert.equal(r.status,403);
     assert.match(JSON.parse(r.body).error,/this machine/);
     assert.equal((await get(`${s.base}/api/overview`)).status,200,'a refused stop left the server running');
+  }finally{s.stop()}
+});
+
+// The chat's read-only tools over AI Code itself (src/app-mcp.mjs), against the real
+// routes they wrap. A route that changes shape breaks a tool silently - the agent
+// just reads less - so every tool is called here and the ones with a fixed answer
+// are checked for it.
+test('every app tool answers from the real routes, and names resolve',async()=>{
+  const {root,taskId}=seeded();
+  const s=await startServer(root);
+  try{
+    const {TOOLS,callTool,httpGet}=await import('../src/app-mcp.mjs');
+    const read=httpGet(s.base);
+    const call=async(name,args)=>{const out=await callTool(name,args,read);return {...out,json:(()=>{try{return JSON.parse(out.text)}catch{return null}})()}};
+    const projects=await call('list_projects',{});
+    assert.equal(projects.isError,false,projects.text);
+    assert.equal(projects.json[0].name,'p');
+    // A project by name, a task by its title and by the start of its id.
+    assert.equal((await call('get_project',{project:'P'})).json.name,'p');
+    const byTitle=await call('get_task',{task:'serve the api'});
+    assert.equal(byTitle.json.task.id,taskId);
+    assert.equal((await call('get_task',{task:taskId.slice(0,8)})).json.task.id,taskId);
+    const listed=await call('list_tasks',{project:'p',query:'API'});
+    assert.deepEqual(listed.json.tasks.map((t)=>t.id),[taskId]);
+    assert.equal((await call('list_tasks',{query:'nothing like it'})).json.total,0);
+    // A miss is a result the agent reads, not a crash.
+    const miss=await call('get_project',{project:'novara'});
+    assert.equal(miss.isError,true);
+    assert.match(miss.text,/No project matches "novara"/);
+    // Nothing secret rides along on the provider listing.
+    const providers=await call('providers_status',{});
+    assert.ok(providers.json.providers.length);
+    assert.ok(providers.json.providers.every((p)=>!('config' in p)));
+    // The rest only have to answer.
+    for(const [name,args] of [['task_activity',{task:taskId}],['list_runs',{since:'7d'}],['usage',{period:'30d'}],['list_sessions',{}],['list_jobs',{active_only:false}],['check_setup',{}]]){
+      const out=await call(name,args);
+      assert.equal(out.isError,false,`${name}: ${out.text}`);
+    }
+    const runs=(await call('list_runs',{task:taskId})).json.runs;
+    if(runs.length){
+      const ev=await call('run_events',{run:runs[0].id,kind:'all'});
+      assert.equal(ev.isError,false,ev.text);
+    }
+    // Every tool the server lists is one this test knows about, so a new tool
+    // cannot arrive untested.
+    assert.deepEqual(Object.keys(TOOLS).sort(),['check_setup','get_project','get_session','get_task','list_jobs','list_projects','list_runs','list_sessions','list_tasks','providers_status','run_events','task_activity','task_diff','usage']);
+  }finally{s.stop()}
+});
+
+// The mode switch over HTTP: the dashboard's only route to editing, so the lock it
+// enforces has to come back as a 409 naming the holder, not as a generic failure.
+test('a conversation switches mode over PATCH, and a second editor is refused with the holder named',async()=>{
+  const {root}=seeded();
+  const s=await startServer(root);
+  try{
+    const req=(method,url,payload)=>fetch(`${s.base}${url}`,{method,headers:{'content-type':'application/json'},body:payload?JSON.stringify(payload):undefined}).then(async(r)=>({status:r.status,body:await r.json()}));
+    const projectId=(await req('GET','/api/projects')).body[0].id;
+    const a=(await req('POST','/api/sessions',{projectId,name:'A',mode:'read'})).body;
+    const b=(await req('POST','/api/sessions',{projectId,name:'B',mode:'read'})).body;
+    assert.equal(a.mode,'read');
+    // Without a mode the API keeps the old default, which every existing caller relies on.
+    assert.equal((await req('POST','/api/sessions',{projectId,name:'Legacy'})).body.mode,'edit');
+    await req('PATCH',`/api/sessions/${(await req('GET',`/api/sessions?projectId=${projectId}`)).body.find((x)=>x.name==='Legacy').id}`,{mode:'read'});
+    assert.equal((await req('PATCH',`/api/sessions/${a.id}`,{mode:'edit'})).body.mode,'edit');
+    const refused=await req('PATCH',`/api/sessions/${b.id}`,{mode:'edit'});
+    assert.equal(refused.status,409);
+    assert.equal(refused.body.holder,a.id);
+    assert.match(refused.body.error,/"A" can already edit/);
+    assert.equal((await req('PATCH',`/api/sessions/${b.id}`,{mode:'nonsense'})).status,400);
+    const listed=(await req('GET',`/api/sessions?projectId=${projectId}`)).body;
+    assert.deepEqual(listed.filter((x)=>x.mode==='edit').map((x)=>x.name),['A']);
   }finally{s.stop()}
 });

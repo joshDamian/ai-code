@@ -195,8 +195,8 @@ export function Projects({ navigate, openForm }) {
             `
           : html`<${EmptyState}
               title="No projects yet"
-              message="A project is a repository the pipeline may work in."
-              hint="Add one by path, or describe an idea and let the draft pass propose a spec."
+              message="A project is a git repository AI Code can work in."
+              hint="Add one by path, or describe an idea and AI Code will draft a spec."
               actionLabel="New project"
               onAction=${() => setMode(MODES.add)}
             />`

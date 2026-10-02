@@ -1,9 +1,10 @@
 // Router, global app shell, Preact mount point, global keyboard shortcuts.
-import { html, render, Fragment, useState, useEffect, useRef, useCallback } from './lib.mjs';
+import { html, render, Fragment, useState, useEffect, useRef, useCallback, remember, conversationsHref, CONVERSATIONS_PLACE } from './lib.mjs';
 import { Layout } from './components/layout.mjs';
 import { ShortcutLegend } from './components/kbd.mjs';
 import { CommandPalette } from './components/command-palette.mjs';
 import { ConfirmHost } from './components/confirm.mjs';
+import { ApprovalDock } from './components/approvals.mjs';
 import { requestPermission, notifyRunEnd } from './components/notify.mjs';
 import { Overview } from './views/overview.mjs';
 import { Projects } from './views/projects.mjs';
@@ -20,7 +21,9 @@ import { Settings, TokenGate } from './views/settings.mjs';
 import { ServerPanel } from './components/server-panel.mjs';
 import { notificationsUrl } from './api.mjs';
 
-const GO = { o: '#/overview', t: '#/tasks', c: '#/chat', s: '#/sessions', p: '#/providers', r: '#/runs' };
+// `c` and `s` both reach conversations - c was chat's, and chat is one of them now -
+// and return to where the person last was in them, as the sidebar link does.
+const GO = { o: '#/overview', t: '#/tasks', c: conversationsHref, s: conversationsHref, p: '#/providers', r: '#/runs' };
 
 function parseHash() {
   const hash = location.hash.replace(/^#\/?/, '');
@@ -116,6 +119,14 @@ function App() {
     newTaskRef.current = newTask;
   }, [newTask]);
 
+  // Every place inside Conversations is remembered as it is reached, so leaving for
+  // another view and coming back lands where the person left. The chat list is the
+  // conversations list now, so it is remembered as that.
+  useEffect(() => {
+    if (route.view === 'sessions' || route.view === 'session-detail' || route.view === 'chat-detail') remember(CONVERSATIONS_PLACE, location.hash);
+    else if (route.view === 'chat') remember(CONVERSATIONS_PLACE, '#/sessions');
+  }, [route]);
+
   useEffect(() => {
     function onHashChange() {
       setRoute(parseHash());
@@ -173,7 +184,8 @@ function App() {
 
       if (pending) {
         clearPending();
-        const target = GO[key.toLowerCase()];
+        const go = GO[key.toLowerCase()];
+        const target = typeof go === 'function' ? go() : go;
         if (target) {
           e.preventDefault();
           navigate(target);
@@ -291,8 +303,9 @@ function App() {
     case 'task-detail':
       view = html`<${TaskDetail} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
       break;
+    // The chat list is the conversations list now; a chat still opens on its own.
     case 'chat':
-      view = html`<${Chat} navigate=${navigate} onTitle=${setPageTitle} />`;
+      view = html`<${Sessions} navigate=${navigate} onTitle=${setPageTitle} />`;
       break;
     case 'chat-detail':
       view = html`<${Chat} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
@@ -327,7 +340,7 @@ function App() {
   // replaced by the one screen that can say what happened and offer to fix it.
   if (serverDown) view = html`<${ServerPanel} supervisorUp=${supervisorUp} />`;
 
-  const navRoute = route.view === 'task-detail' ? 'tasks' : route.view === 'chat-detail' ? 'chat' : route.view === 'session-detail' ? 'sessions' : route.view === 'project' ? 'projects' : route.view;
+  const navRoute = route.view === 'task-detail' ? 'tasks' : route.view === 'chat-detail' || route.view === 'chat' ? 'sessions' : route.view === 'session-detail' ? 'sessions' : route.view === 'project' ? 'projects' : route.view;
   const title = route.view === 'task-detail' || route.view === 'chat-detail' || route.view === 'session-detail' || route.view === 'project' ? pageTitle : null;
 
   return html`
@@ -351,6 +364,8 @@ function App() {
       ${/* Mounted once here, the way the toast stack is. A dialog any view can
            raise, and none of them has to render it. */ ''}
       <${ConfirmHost} />
+      ${/* Any conversation's permission prompt, answerable from every screen. */ ''}
+      <${ApprovalDock} route=${route} navigate=${navigate} paused=${unpaired || serverDown} />
     <//>
   `;
 }

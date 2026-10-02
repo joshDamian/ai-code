@@ -514,12 +514,12 @@ function runEndPayload(run, task) {
   };
 }
 
-// One run-end, to every subscribed browser. Failures here are the push service's and
-// are not the caller's problem - the run is already over and its row already written.
+// One notification - a run-end or a permission prompt - to every subscribed browser.
+// Failures here are the push service's and are not the caller's problem.
 // A 404 or a 410 is the one answer that means this subscription is dead for good (the
 // app was removed, or the browser rotated the endpoint), so that row is dropped;
 // anything else is left in place to fail again next time.
-async function pushRunEnd(payload) {
+async function pushAll(payload) {
   if (!vapid) return;
   const subs = svc.store.listPushSubscriptions();
   if (!subs.length) return;
@@ -555,7 +555,7 @@ function publishRunEnd(run, task) {
   // Not awaited: the SSE frame is already out, and a push is minutes of network away
   // from mattering. A rejected promise here would be an unhandled rejection for a
   // notification nobody is waiting on.
-  pushRunEnd(runEndPayload(run, task)).catch(() => {});
+  pushAll(runEndPayload(run, task)).catch(() => {});
 }
 
 // Runs that have finished and not been announced. The seed is everything already
@@ -1085,14 +1085,16 @@ const server = http.createServer(async (req, res) => {
     // Today's spend across sessions, for the list's footer. Its own path rather than
     // a field on the list, which is an array every other caller reads as one.
     if (u.pathname === '/api/session-spend' && req.method === 'GET') return json(res, svc.sessionsSpend());
+    // Every prompt waiting on the machine, for the approval card the whole app shows.
+    if (u.pathname === '/api/permissions' && req.method === 'GET') return json(res, svc.pendingPermissions());
 
     if (u.pathname === '/api/sessions') {
       if (req.method === 'GET') return json(res, svc.sessionSummaries(u.searchParams.get('projectId') || undefined));
       const b = await body(req);
-      return json(res, svc.createSession(b.projectId, b.name, { providerId: b.providerId, modelId: b.modelId }), 201);
+      return json(res, svc.createSession(b.projectId, b.name, { providerId: b.providerId, modelId: b.modelId, ...(b.mode ? { mode: b.mode } : {}) }), 201);
     }
 
-    const session = u.pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(messages|stream|archive|cancel|resume|permissions|draft-task|nudge)(?:\/([^/]+))?)?$/);
+    const session = u.pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(messages|stream|archive|cancel|resume|permissions|draft-task|drafts|nudge)(?:\/([^/]+))?)?$/);
     if (session) {
       const id = session[1];
       const what = session[2] || null;
@@ -1113,6 +1115,16 @@ const server = http.createServer(async (req, res) => {
           input: b.input ?? null,
           cwd: b.cwd ?? null,
         });
+        // A prompt is the one thing in a session that stops it until a person acts,
+        // so it is pushed like a finished run: a phone in a pocket hears about it
+        // before the countdown denies it.
+        const owner = svc.store.getSession(id);
+        pushAll({
+          title: 'Approval needed',
+          body: `${owner?.name || 'A conversation'} wants to run ${request.tool}.`,
+          url: `/#/sessions/${id}`,
+          tag: `permission-${request.id}`,
+        }).catch(() => {});
         return holdPermission(req, res, request);
       }
 
@@ -1178,6 +1190,18 @@ const server = http.createServer(async (req, res) => {
         return json(res, svc.dismissNudge(id));
       }
 
+      // The session agent's `draft_task` tool. Local only, for the reason the
+      // permissions route is: the caller is the MCP process beside the agent.
+      if (what === 'drafts' && req.method === 'POST') {
+        if (!fromLocalhost(req)) return json(res, { error: 'Drafts can only be proposed from this machine.' }, 403);
+        const b = await body(req);
+        try {
+          return json(res, svc.draftFromSession(id, { title: b.title, description: b.description }), 201);
+        } catch (e) {
+          return json(res, { error: e.message }, 400);
+        }
+      }
+
       if (what === 'draft-task' && req.method === 'POST') {
         let drafted;
         try {
@@ -1211,6 +1235,15 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'PATCH') {
           const b = await body(req);
           if ('name' in b) svc.renameSession(id, b.name);
+          // The mode first and on its own: it is the one change here that can be
+          // refused, and a refusal says which conversation holds the checkout.
+          if ('mode' in b) {
+            try {
+              svc.setSessionMode(id, b.mode);
+            } catch (e) {
+              return json(res, { error: e.message, holder: e.holder || null }, e.code === 'CONFLICT' ? 409 : 400);
+            }
+          }
           // Read back rather than returned from the write, so a rename and a model
           // change in one request produce one row from one read.
           const patch = {};

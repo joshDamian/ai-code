@@ -9,10 +9,10 @@ import {
   currentBranch, revParse, isAncestor, mergeBase, findCommit, branches, checkedOut, mergeTree, commitTree, setBranch, commitAll, removeWorktree, commitDiff,
   landingCommit, commitRef, git, createPlanWorktree, removePlanWorktree, planWorktreeIds, planWorktreeDir,
 } from './git.mjs';
-import { runAgent, classify, permissionMcpConfig, removeMcpConfig, DISCUSSION_OPENS } from './agents.mjs';
+import { runAgent, classify, permissionMcpConfig, appMcpConfig, removeMcpConfig, DISCUSSION_OPENS } from './agents.mjs';
 import { loadPolicies, savePolicies } from './policy.mjs';
 import { isTransient, healthThresholds, effectiveHealth } from './health.mjs';
-import { unifiedDiff, sessionSteps, toolTarget } from './format.mjs';
+import { unifiedDiff, sessionSteps, toolTarget, gitImpact } from './format.mjs';
 
 const exec = promisify(execFile);
 
@@ -263,7 +263,7 @@ function nextSteps(t, branch, target, a) {
   // landing. Promising both here left the next step to contradict it, in the same list.
   if (a.pending) {
     steps.push({
-      text: a.checkedOut ? `Commit the worktree onto ${branch}:` : `Commit the worktree onto ${branch} and land it on ${target}:`,
+      text: a.checkedOut ? `Commit the changes to ${branch}:` : `Commit the changes to ${branch} and merge them into ${target}:`,
       command: `ai-code task port ${t.id} --to ${target}`,
     });
   }
@@ -272,14 +272,14 @@ function nextSteps(t, branch, target, a) {
   if (a.blockedBy.length) {
     const shown = a.blockedBy.slice(0, 3).join(', ');
     steps.push({
-      text: `Commit or stash the ${a.blockedBy.length} uncommitted file(s) at the destination that this would overwrite (${shown}${a.blockedBy.length > 3 ? ', ...' : ''}).`,
+      text: `Commit or stash your unsaved edits to ${shown}${a.blockedBy.length > 3 ? ', ...' : ''} in ${target} first. The merge would overwrite them.`,
       command: null,
     });
   }
   // The destination is checked out in some working tree, so the port leaves its ref
   // where it is - moving it would rewrite the tree of whoever is working in it.
   if (a.checkedOut) {
-    steps.push({ text: `${target} is checked out, so its ref is left alone. Run this in that checkout:`, command: a.fastForward ? `git merge --ff-only ${branch}` : `git merge ${branch}` });
+    steps.push({ text: `${target} is checked out in your repo, so AI Code won't merge into it for you. Run this there:`, command: a.fastForward ? `git merge --ff-only ${branch}` : `git merge ${branch}` });
   }
   return steps;
 }
@@ -304,16 +304,16 @@ function portState(a) {
       tone: 'good',
       badge: 'Landed',
       headline: `${a.target} already contains this work`,
-      detail: `The task's commit is an ancestor of ${a.target}, so there is nothing left to land and nothing left to run. The branch stays as the record of the change.`,
+      detail: 'Nothing left to do. The task branch is kept as a record.',
     };
   }
   if (a.pending) {
     return {
       key: 'pending',
       tone: 'neutral',
-      badge: 'Not on the branch',
-      headline: 'The change is uncommitted in the worktree',
-      detail: `Committing is how the work becomes something that can be merged, so a port does that first${a.committed ? `, alongside the commit ${a.branch} already holds` : ''}.`,
+      badge: 'Not committed',
+      headline: 'The changes are not committed yet',
+      detail: 'Porting commits them first.',
     };
   }
   if (!a.committed) {
@@ -321,8 +321,8 @@ function portState(a) {
       key: 'empty',
       tone: 'neutral',
       badge: 'Nothing to port',
-      headline: 'There is no change here to land',
-      detail: 'The worktree holds nothing the branch lacks, and the branch holds no commit for this task.',
+      headline: 'There are no changes to port',
+      detail: 'This task made no changes.',
     };
   }
   if (a.conflicts.length) {
@@ -331,7 +331,7 @@ function portState(a) {
       tone: 'bad',
       badge: 'Conflict',
       headline: `${a.conflicts.length} file${a.conflicts.length === 1 ? '' : 's'} conflict with ${a.target}`,
-      detail: 'A port stops here and moves nothing. Git compares the two sides in the object store, so this is a prediction rather than a half-finished merge: the branch still holds the work, and the merge is yours to make.',
+      detail: 'Nothing was merged. Resolve the conflicts yourself when you merge the task branch.',
     };
   }
   if (a.blockedBy.length) {
@@ -339,18 +339,18 @@ function portState(a) {
       key: 'blocked',
       tone: 'warn',
       badge: 'Blocked',
-      headline: `${a.target} is uncommitted where this change lands`,
-      detail: `Git refuses a merge that would overwrite uncommitted work. ${a.blockedBy.length} file${a.blockedBy.length === 1 ? '' : 's'} at the destination overlap this change, and committing or stashing them there is what unblocks it.`,
+      headline: `${a.target} has unsaved edits to the same files`,
+      detail: `Commit or stash your edits to ${a.blockedBy.length === 1 ? 'that file' : `those ${a.blockedBy.length} files`} in ${a.target}, then port again.`,
     };
   }
   return {
     key: 'ready',
     tone: 'good',
     badge: 'Ready',
-    headline: a.fastForward ? `Lands on ${a.target} as a fast-forward` : `Lands on ${a.target} as a merge commit`,
+    headline: `Ready to merge into ${a.target}`,
     detail: a.checkedOut
-      ? `${a.target} is checked out somewhere, so a port will not move its ref underneath whoever is working in it. It prints the command instead.`
-      : `${a.target} is checked out nowhere, so a port moves its ref for you.`,
+      ? `${a.target} is checked out in your repo, so you'll run the merge yourself. The command is below.`
+      : 'Porting merges it for you.',
   };
 }
 
@@ -453,12 +453,10 @@ const BUDGET_CODES = new Set(['TOOL_CALL_LIMIT', 'COST_LIMIT', 'REPAIR_LIMIT']);
 // did make progress - and the only exit that needs no code.
 export function repairLimitError(prior) {
   const err = new Error(
-    `REPAIR_LIMIT: this plan revision has spent its whole repair budget (${prior} repair run${prior === 1 ? '' : 's'}). ` +
-      `Nothing was started, and the work is untouched in the worktree and on the branch. ` +
-      `Three ways out, in the order worth trying: ` +
-      `(1) Replan - the failing review is carried into the planner prompt, and a new plan revision resets this count; ` +
-      `(2) raise repair.maxRepairs in .ai-code/routing.json and then Retry - the count persists, so it needs raising above ${prior}; ` +
-      `(3) Close - discards the worktree, knowingly.`
+    `REPAIR_LIMIT: this plan has used all ${prior} repair${prior === 1 ? '' : 's'}. Your work is untouched. ` +
+      `Options: (1) Replan - the new plan sees the failing review and gets fresh repairs; ` +
+      `(2) raise repair.maxRepairs above ${prior} in .ai-code/routing.json, then Retry; ` +
+      `(3) Close - deletes the worktree.`
   );
   err.code = 'REPAIR_LIMIT';
   return err;
@@ -578,8 +576,22 @@ export const CHAT_PROMPT =
 // The question is the `TASK` half of the prompt runRole builds, so only what came
 // before it belongs here. A first question has no history and gets the prompt
 // alone rather than an empty section heading.
-function chatPrompt(history) {
-  return history ? `${CHAT_PROMPT}\n\nCONVERSATION SO FAR, oldest first:\n\n${history}` : CHAT_PROMPT;
+function chatPrompt(history, app = null) {
+  const head = app ? `${CHAT_PROMPT}\n\n${appToolsNote(app)}` : CHAT_PROMPT;
+  return history ? `${head}\n\nCONVERSATION SO FAR, oldest first:\n\n${history}` : head;
+}
+
+// What a chat is told about its tools over AI Code's own records (src/app-mcp.mjs),
+// and where the person is asking from. The ids are given so "this task" and "this
+// project" resolve without a lookup, and so the agent does not mistake the repo's
+// files for the only evidence there is: a question about why a task failed is
+// answered from its runs, not from the code.
+export const APP_TOOLS_NOTE =
+  'You can also read AI Code itself - its projects, tasks, plans, reviews, runs and their errors, supervised sessions, background jobs, spend, and providers - with the read-only ai-code-app tools. Use them for any question about the work AI Code is tracking: why a task failed, what is running, what something cost. Name the task, run or session ids you relied on. These tools cannot change anything; if the person asks for an action, say what they would do in the dashboard.';
+
+function appToolsNote({ project, task }) {
+  const where = [`project "${project.name}" (${project.id})`, task ? `task "${task.title}" (${task.id})` : ''].filter(Boolean).join(', ');
+  return `${APP_TOOLS_NOTE} The person is asking from ${where}.`;
 }
 
 // The supervised session's preamble. Pinned by test for the reason CHAT_PROMPT is:
@@ -593,21 +605,37 @@ function chatPrompt(history) {
 // routes around it by hand, because "do not bypass it" is a rule a model can read
 // its way past: it says the denial is final, and it names the tempting detours.
 //
-// The third clause is the boundary between a session and a task. A session is for
+// The third clause is git. A session that can edit runs git and gh like any other
+// command, behind the same approval - pulling, merging, resolving conflicts and
+// working with pull requests are things a person reasonably asks for in their own
+// checkout, and the approval panel says which commands change history or reach
+// GitHub (see gitImpact). What the clause adds is initiative: those happen when the
+// person asks, never as the agent's own idea of finishing up.
+//
+// The fourth clause is the boundary between a session and a task. A session is for
 // work that is not yet shaped like anything: exploring, a small fix, trying an
 // approach. The moment it has become a change worth reviewing and landing, it
-// belongs to a task - which is the only route from this checkout into the repo's
-// history, and which carries a plan, a reviewer and a budget that a session has
+// belongs to a task - which carries a plan, a reviewer and a budget that a session has
 // none of. So the instruction is to stop and say so rather than to carry on, and
 // "say what is left" is asked for explicitly because the draft is built from that
 // sentence.
 export const SESSION_PROMPT =
-  'Work in this checkout on the instruction below. You are supervised: every action that writes a file or runs a command is sent to the person watching this session and requires live human approval to proceed. Never bypass this gate - there is no workaround. A denial is final for that action - do not retry it, reword it, or reach the same place another way, whether through a different tool, a shell command, or a file you already had permission to edit. If you are denied, stop and say what you were trying to do and why. Do not commit, merge, push, rebase, tag, or open a pull request: those routes into the repository belong to a task, which has a plan, a review and an approval that this session does not. If the work grows task-shaped - more than a small, self-contained change - stop and say so, and describe what is left to do, rather than doing it here.';
+  'Work in this checkout on the instruction below. You are supervised: every action that writes a file or runs a command is sent to the person watching this session and requires live human approval to proceed. Never bypass this gate - there is no workaround. A denial is final for that action - do not retry it, reword it, or reach the same place another way, whether through a different tool, a shell command, or a file you already had permission to edit. If you are denied, stop and say what you were trying to do and why. Git and the GitHub CLI (gh) are available like any other command, behind the same approval: pull, merge, resolve conflicts, commit, push, review and comment on pull requests when the person asks for it. Do not change git history or anything on GitHub on your own initiative - no commit, merge, rebase, push, or pull request action the person did not ask for - and before a command that rewrites history or leaves this machine, say what it will do. If the work grows task-shaped - more than a small, self-contained change - stop and say so, and describe what is left to do, rather than doing it here. When the person asks for a task, or the work left is task-shaped, propose it with the draft_task tool: it lands in this project\'s approval queue and becomes a task only when the person approves it. The built-in Task tools (TaskCreate, TaskList, TaskUpdate) are a private todo list for this turn, not this project\'s tasks: never report their output as a task.';
+
+// A read-only turn of a conversation. It is a chat - the same read-only clauses, the
+// same plan mode - with the two things a conversation adds: the person can switch
+// it to editing, and it can propose a task. Both are named because the alternative
+// is the failure that started this: a model asked to change something or to "create
+// a task" that has no honest way to do either, and claims it did.
+export const READ_TURN_PROMPT =
+  `${CHAT_PROMPT} This conversation is read-only right now. If the person asks you to change files or run commands, say what you would change and tell them to switch the conversation to Can edit. When the person asks for a task, or the work you found is task-shaped, propose it with the draft_task tool: it lands in this project's approval queue and becomes a task only when the person approves it. The built-in Task tools (TaskCreate, TaskList, TaskUpdate) are a private todo list for this turn, not this project's tasks: never report their output as a task.`;
 
 // The instruction is the `TASK` half of the prompt runRole builds, so only what
-// came before it belongs here.
-function sessionPrompt(history) {
-  return history ? `${SESSION_PROMPT}\n\nWHAT HAS HAPPENED SO FAR, oldest first:\n\n${history}` : SESSION_PROMPT;
+// came before it belongs here. `head` is the mode's preamble; `app` names where the
+// person is asking from when the AI Code tools are available.
+function sessionPrompt(history, { head = SESSION_PROMPT, app = null } = {}) {
+  const top = app ? `${head}\n\n${appToolsNote(app)}` : head;
+  return history ? `${top}\n\nWHAT HAS HAPPENED SO FAR, oldest first:\n\n${history}` : top;
 }
 
 // What a session's turn is about, as the prompt's APPROVED PLAN slot.
@@ -874,6 +902,9 @@ export function slugify(text, words = 4) {
 const DEFAULT_CHAT_TITLE = 'New chat';
 const DEFAULT_SESSION_NAME = 'New session';
 
+// What a conversation may do. See setSessionMode.
+const SESSION_MODES = new Set(['read', 'edit']);
+
 // How much of a conversation is replayed into the next question. A chat has no
 // natural end, so the whole history in every request is a cost that grows with
 // the conversation - and a long one would eventually be refused outright by the
@@ -922,6 +953,19 @@ function parseJson(text) {
 // Everything that is not `allowed` denies, and each refusal says which one it was,
 // because the agent reads that sentence and acts on it - "somebody said no" and
 // "nobody answered" call for different next moves.
+// What a pending git or gh command would do, as the list row says it: the furthest-
+// reaching step of the command, so "Wants to force-push main to origin" is read off a
+// conversation without opening it. Null for anything that is not git or gh.
+function pendingGit(row) {
+  if (row?.tool !== 'Bash') return null;
+  // permissionFor has already parsed the input; a raw row has not.
+  const input = typeof row.input === 'string' ? parseJson(row.input) : row.input;
+  const impact = gitImpact(input?.command);
+  if (!impact) return null;
+  const top = [...impact.items].reverse().find((x) => x.level === impact.level) || impact.items[0];
+  return { level: impact.level, destructive: impact.destructive, label: top.label };
+}
+
 export function permissionDecision(row) {
   if (row?.status === 'allowed') return { behavior: 'allow', updatedInput: parseJson(row.input) ?? {} };
   const message =
@@ -1348,7 +1392,7 @@ export class Service {
     // whatever directory happens to contain the project, would hand it the whole
     // neighbourhood as context.
     fs.mkdirSync(project.path, { recursive: true });
-    const session = this.createChatSession(project.id, 'Intake', null);
+    const session = this.createChatSession(project.id, 'Intake', null, null, { system: true });
     // Written with a run id so the note is *waiting*: the draft pass answers it, and
     // that pairing is what every chat surface reads to tell a question nobody has
     // answered from one nobody asked. Same shape as askChat.
@@ -1481,10 +1525,10 @@ export class Service {
 
   // `chatSessionId` is the conversation the pass answered in, so that conversation
   // can show the drafts it proposed and no others.
-  addDrafts(projectId, tasks, source, chatSessionId = null) {
+  addDrafts(projectId, tasks, source, chatSessionId = null, sessionId = null) {
     const drafts = this.drafts(projectId);
     const at = new Date().toISOString();
-    const added = tasks.map((t) => ({ id: this.store.id(), title: t.title, description: t.description, source, at, chat_session_id: chatSessionId }));
+    const added = tasks.map((t) => ({ id: this.store.id(), title: t.title, description: t.description, source, at, chat_session_id: chatSessionId, ...(sessionId ? { session_id: sessionId } : {}) }));
     this.store.updateProjectDrafts(projectId, [...drafts, ...added]);
     return added;
   }
@@ -1566,7 +1610,7 @@ export class Service {
   // the run the waiting question names, so a proposal without one would land in the
   // transcript with nothing having shown it arriving.
   askProposals(projectId) {
-    const session = this.createChatSession(projectId, 'Task proposals', null);
+    const session = this.createChatSession(projectId, 'Task proposals', null, null, { system: true });
     const runId = this.store.id();
     this.store.addChatMessage({ id: this.store.id(), sessionId: session.id, role: 'user', content: PROPOSALS_QUESTION, runId });
     return this.chatSession(session.id);
@@ -1614,7 +1658,7 @@ export class Service {
 
   // Opens the conversation an infer-spec pass answers in, and writes the question into it.
   askInferSpec(projectId) {
-    const session = this.createChatSession(projectId, 'Infer spec', null);
+    const session = this.createChatSession(projectId, 'Infer spec', null, null, { system: true });
     const runId = this.store.id();
     this.store.addChatMessage({ id: this.store.id(), sessionId: session.id, role: 'user', content: INFER_SPEC_QUESTION, runId });
     return this.chatSession(session.id);
@@ -2089,7 +2133,7 @@ export class Service {
   // is asked with that task's own record in hand. Optional, and null is the
   // project-wide chat every session without it has always been - the two are one
   // feature with one difference in the prompt, not two surfaces.
-  createChatSession(projectId, title, taskId, focus = null) {
+  createChatSession(projectId, title, taskId, focus = null, { system = false } = {}) {
     this.project(projectId);
     let scoped = null;
     if (taskId) {
@@ -2110,6 +2154,7 @@ export class Service {
       // about task 632ed54a should not lose the name of the task it is about.
       title: String(title || '').trim() || (scoped ? `Questions about ${scoped.title}` : DEFAULT_CHAT_TITLE),
       taskId: scoped ? scoped.id : null,
+      system,
     });
   }
 
@@ -2186,7 +2231,7 @@ export class Service {
             : 'No plan: this is a direct question about the project, not a task. Nothing here has been approved for implementation.',
         },
         'chat',
-        chatPrompt(this.#chatHistory(sessionId, pending.run_id)),
+        chatPrompt(this.#chatHistory(sessionId, pending.run_id), this.permissionEndpoint ? { project, task: subject } : null),
         // The project root and no worktree, named explicitly: `cwd` absent means
         // "inherit the server's own directory", which is a different claim about
         // the tree the agent may read.
@@ -2195,7 +2240,7 @@ export class Service {
         // `chatSessionId` is what routes the run's rows to `chat_runs` instead of
         // `runs`; `runId` is minted by askChat, because the question carries the id
         // of the run that will answer it.
-        { runId: pending.run_id, chatSessionId: sessionId }
+        { runId: pending.run_id, chatSessionId: sessionId, appTools: true }
       );
       const answer = this.finalText(result.runId).trim() || 'The model returned no answer. Inspect the run events before asking again.';
       return this.store.addChatMessage({ id: this.store.id(), sessionId, role: 'assistant', content: answer, runId: result.runId });
@@ -2235,17 +2280,45 @@ export class Service {
   // only new mechanism is the permission round trip, and even that is a row in a
   // table rather than a channel held in memory.
 
-  createSession(projectId, name, { providerId, modelId } = {}) {
+  // `mode` defaults to 'edit', which is what every session was before conversations
+  // had modes; the dashboard starts its conversations read-only and switches them
+  // with setSessionMode, which is where the checkout lock is enforced.
+  createSession(projectId, name, { providerId, modelId, mode = 'edit' } = {}) {
     const p = this.project(projectId);
     const label = String(name || '').trim();
     if (!label) throw new Error('A session needs a name');
+    if (!SESSION_MODES.has(mode)) throw new Error(`Unknown conversation mode: ${mode}`);
     return this.store.createSession({
       id: this.store.id(),
       projectId: p.id,
       name: label,
       providerId: providerId ?? null,
       modelId: modelId ?? null,
+      mode,
     });
+  }
+
+  // The open conversation that may edit this project's checkout, other than
+  // `exceptId`. Closed ones do not hold it: a stopped conversation cannot start a
+  // turn until it is resumed.
+  checkoutHolder(projectId, exceptId = null) {
+    return this.store.listSessions(projectId).find((x) => x.id !== exceptId && x.mode === 'edit' && x.status !== 'stopped' && x.status !== 'archived') || null;
+  }
+
+  // Read-only <-> can edit. A conversation edits the project's own checkout, not a
+  // copy, so one at a time per project: a second would be two agents writing the
+  // same files with neither seeing the other's edits. Refused mid-turn as well - the
+  // turn in flight was started under the other mode, and its permissions with it.
+  setSessionMode(id, mode) {
+    const s = this.sessionById(id);
+    if (!SESSION_MODES.has(mode)) throw new Error(`Unknown conversation mode: ${mode}`);
+    if (s.mode === mode) return s;
+    if (s.pending_run_id) throw Object.assign(new Error('Wait for the current turn to finish before switching mode'), { code: 'CONFLICT' });
+    if (mode === 'edit') {
+      const holder = this.checkoutHolder(s.project_id, id);
+      if (holder) throw Object.assign(new Error(`"${holder.name}" can already edit this project. Switch it to read-only first.`), { code: 'CONFLICT', holder: holder.id });
+    }
+    return this.store.updateSession(id, { mode });
   }
 
   listSessions(projectId) {
@@ -2270,7 +2343,7 @@ export class Service {
   // archive is a session whose work was abandoned by a click on a different button.
   archiveSession(id) {
     const s = this.sessionById(id);
-    if (s.pending_run_id) throw new Error('This session has a turn in flight; stop it first');
+    if (s.pending_run_id) throw new Error('This session is still working. Stop it first.');
     return this.store.updateSession(id, { status: 'archived' });
   }
 
@@ -2368,6 +2441,12 @@ export class Service {
       // question is "did this turn change files", and the only tree that can answer
       // it is the one the turn ran in.
       const before = changedInCheckout(project.path);
+      // The mode decides the role, and the role decides the permissions: a read-only
+      // turn runs as a chat (plan mode, no writing tools), an editing one as a
+      // session. Both are recorded in this conversation's session_runs, so the history
+      // either reads is the whole conversation whichever mode wrote it.
+      const editing = s.mode !== 'read';
+      const app = this.permissionEndpoint ? { project, task: null } : null;
       let result;
       try {
         result = await this.runRole(
@@ -2380,10 +2459,10 @@ export class Service {
             project_id: s.project_id,
             title: s.name,
             description: pending.text,
-            plan: SESSION_NO_PLAN,
+            plan: editing ? SESSION_NO_PLAN : 'No plan: this is a read-only turn of a conversation, not a task. Nothing here has been approved for implementation.',
           },
-          'session',
-          sessionPrompt(this.#sessionHistory(sessionId, pending.runId)),
+          editing ? 'session' : 'chat',
+          sessionPrompt(this.#sessionHistory(sessionId, pending.runId), { head: editing ? SESSION_PROMPT : READ_TURN_PROMPT, app }),
           // The project root, named explicitly. This is the one role that may write
           // there, and it is why the prompt spends two clauses on the gate: nothing
           // below this line confines it to a worktree, so the permission round trip
@@ -2393,6 +2472,10 @@ export class Service {
           {
             runId: pending.runId,
             sessionId,
+            // The model picked when the conversation was started. A preference, like
+            // a task's planning model: routing still skips it when it is unhealthy.
+            preferredModelId: s.model_id || null,
+            appTools: true,
             permission: {
               endpoint: this.permissionEndpoint,
               timeoutMs: (Number(policy.permissionTimeoutMs) || 120) * 1000,
@@ -2506,6 +2589,9 @@ export class Service {
         error: run.error,
         cost: run.cost || 0,
         model_id: run.model_id || null,
+        // 'chat' for a read-only turn and 'session' for one that could edit, so the
+        // transcript can mark where the conversation changed mode.
+        role: run.role || null,
         instruction: instruction?.data?.text || '',
         answer: run.status === 'succeeded' ? (this.finalText(run.id) || '').trim() : '',
         steps: markRefused(
@@ -2535,7 +2621,7 @@ export class Service {
       return {
         ...s,
         turn_count: runs.length,
-        pending: pending ? { tool: pending.tool, target: toolTarget(pending.input), timeout_at: pending.timeout_at } : null,
+        pending: pending ? { tool: pending.tool, target: toolTarget(pending.input), timeout_at: pending.timeout_at, git: pendingGit(pending) } : null,
         activity,
         preview,
       };
@@ -2679,7 +2765,22 @@ export class Service {
   // to a request already in flight, which is what somebody raising it is asking for.
   permissionFor(sessionId) {
     const r = this.store.pendingPermission(sessionId);
-    if (!r) return null;
+    return r ? this.#permissionView(r) : null;
+  }
+
+  // Every prompt waiting on the machine, with the conversation and project it
+  // belongs to: what the app-wide approval card reads, so a prompt is answerable
+  // from whatever screen the person is on rather than only from its conversation.
+  pendingPermissions() {
+    return this.store.listPendingPermissions().flatMap((r) => {
+      const s = this.store.getSession(r.session_id);
+      if (!s) return [];
+      const p = this.store.getProject(s.project_id);
+      return [{ ...this.#permissionView(r), session_id: s.id, session_name: s.name, project_name: p?.name || null, project_path: p?.path || null }];
+    });
+  }
+
+  #permissionView(r) {
     const ms = (Number(this.policies.session?.permissionTimeoutMs) || 120) * 1000;
     return {
       id: r.id,
@@ -2780,7 +2881,7 @@ export class Service {
     ]
       .filter(Boolean)
       .join('\n\n');
-    const chat = this.createChatSession(project.id, `Task from session: ${s.name}`, null, focus || s.name);
+    const chat = this.createChatSession(project.id, `Task from session: ${s.name}`, null, focus || s.name, { system: true });
     const runId = this.store.id();
     this.store.addChatMessage({
       id: this.store.id(),
@@ -2794,6 +2895,19 @@ export class Service {
     // that task would be a second agent editing the same files.
     this.store.updateSession(sessionId, { status: 'stopped', nudge_dismissed: 1 });
     return { project: this.project(project.id), chatSession: this.chatSession(chat.id) };
+  }
+
+  // A task the session's agent proposes through its `draft_task` tool. It goes to
+  // the same queue and through the same `draftTasks` filter as every other draft,
+  // so nothing the agent sends becomes a task until a person approves it. The
+  // session is left running: unlike "Draft as task", proposing follow-up work does
+  // not mean this session's own work is done.
+  draftFromSession(sessionId, task) {
+    const s = this.sessionById(sessionId);
+    const [draft] = draftTasks([task]);
+    if (!draft) throw new Error('A drafted task needs a title');
+    const [added] = this.addDrafts(s.project_id, [draft], 'session', null, s.id);
+    return { draft: added, project: this.project(s.project_id).name };
   }
 
   // -- execution ------------------------------------------------------------
@@ -2845,10 +2959,9 @@ export class Service {
         const later = baseline.dirty ? blocked.filter((f) => !baseline.dirty.includes(f)) : [];
         throw Object.assign(
           new Error(
-            `PLAN_BASE_DIRTY: ${blocked.length} file(s) this plan depends on have uncommitted changes (${blocked.join(', ')}). ` +
-              `The implementer runs in a worktree built from HEAD (${String(baseline.head).slice(0, 12)}), which contains none of them. ` +
-              (later.length ? `${later.length} of them changed after the plan was written. ` : '') +
-              `Commit them first, or re-run with --force.`
+            `PLAN_BASE_DIRTY: the plan relies on uncommitted changes to ${blocked.join(', ')}. ` +
+              `The implementer only sees committed code, so commit them first, or re-run with --force to go without them. ` +
+              (later.length ? `${later.length} of them changed after planning.` : '')
           ),
           { code: 'PLAN_BASE_DIRTY' }
         );
@@ -3474,7 +3587,7 @@ export class Service {
     if (recorded) return recorded;
     const live = currentBranch(this.project(task.project_id).path);
     if (live) return live;
-    throw new Error('No target branch: pass --to <branch>, or run this from a branch (HEAD is detached)');
+    throw new Error('No target branch. Pick one with --to <branch>.');
   }
 
   // The branches a port could name as its destination. Local heads only, and the
@@ -3757,8 +3870,8 @@ export class Service {
           // The destination is what did not move. The task branch did and must have:
           // the commit is what makes the work addressable enough to merge by hand,
           // which is the remedy this message is about to recommend.
-          `CONFLICT: ${a.conflicts.length} file(s) differ between ${branch} and ${target} (${a.conflicts.join(', ')}). ` +
-            `${target} was not moved. The work is committed on ${branch} - merge it by hand, or port it to a branch that has not moved.`
+          `CONFLICT: ${a.conflicts.join(', ')} conflict${a.conflicts.length === 1 ? 's' : ''} with ${target}. ` +
+            `Nothing was merged. The work is committed on ${branch}; merge it by hand to resolve the conflicts.`
         ),
         { code: 'CONFLICT', conflicts: a.conflicts }
       );
@@ -3875,7 +3988,7 @@ export class Service {
       throw new Error(`Cannot close a task that is already ${t.state}`);
     }
     if (this.store.taskHasLiveRun(id) || this.store.activeJobs().some((j) => j.task_id === id)) {
-      throw new Error('This task has a run or job in flight; cancel it first with `task cancel`');
+      throw new Error('This task is still running. Cancel it first.');
     }
     if (t.worktree) removeWorktree(this.project(t.project_id).path, t.worktree);
     return this.transition(id, 'CANCELLED');
@@ -4137,7 +4250,7 @@ export class Service {
   // called it.
   #assertIdle(id, verb, { job = true } = {}) {
     if (this.store.taskHasLiveRun(id) || (job && this.store.activeJobs().some((j) => j.task_id === id))) {
-      throw new Error(`This task has a run or job in flight; wait for it to finish before ${verb}`);
+      throw new Error(`This task is still running. Wait for it to finish before ${verb}.`);
     }
   }
 
@@ -4310,10 +4423,11 @@ export class Service {
 
     for (let attempt = 0; attempt < 8; attempt++) {
       let p, m, healthForced;
-      // The task's own planning-model preference, honoured for the planner and
-      // nowhere else. It is read on every attempt rather than hoisted: a caller
-      // that changes it mid-run is asking for the next attempt to see it.
-      const preferred = role === 'planner' && task.plan_model ? task.plan_model : null;
+      // The caller's model preference (a conversation's chosen model), else the
+      // task's own planning-model preference, honoured for the planner only. It is
+      // read on every attempt rather than hoisted: a caller that changes the task's
+      // preference mid-run is asking for the next attempt to see it.
+      const preferred = options.preferredModelId || (role === 'planner' && task.plan_model ? task.plan_model : null);
       try {
         ({ p, m, healthForced } = this.select(role, excluded, preferred));
       } catch (selErr) {
@@ -4354,17 +4468,18 @@ export class Service {
         if (turnRunId && turnRunId !== run.id) this.store.retargetChatQuestion(chat, turnRunId, run.id);
         turnRunId = run.id;
       }
-      // The task asked for a planning model and this run is not on it. Saying so
+      // The task or conversation asked for a model and this run is not on it. Saying so
       // on the run's own record is the only place it can be read: the preference
       // is a request, not a constraint, so nothing failed and nothing is retried
       // - and without this line the pick looks like routing ignoring the setting.
       // Once, on the first attempt: a fallback is a different story and a note
       // per attempt would repeat the same sentence down the activity feed.
-      if (!chat && role === 'planner' && attempt === 0 && preferred && preferred !== m.id) {
+      if (!chat && attempt === 0 && preferred && preferred !== m.id) {
+        const what = role === 'planner' && !options.preferredModelId ? 'Planning model' : 'Model';
         this.store.addEvent({
           runId: run.id,
           type: 'note',
-          data: { content: `Planning model override skipped: ${preferred} unavailable or unhealthy — using ${m.displayName || m.name}.` },
+          data: { content: `${what} override skipped: ${preferred} unavailable or unhealthy — using ${m.displayName || m.name}.` },
         });
       }
       const started = Date.now();
@@ -4515,6 +4630,13 @@ export class Service {
           stallId = null;
           if (!stallMs) return;
           stallId = setTimeout(() => {
+            // A session waiting on its permission gate is waiting on the person, not
+            // wedged: the tool call is silent until they answer or the gate times out,
+            // and either answer is a frame that re-arms this. Charged as a stall it was
+            // a fallback to another model - and a health strike against the provider -
+            // every time a prompt went unanswered.
+            const asking = session ? this.store.pendingPermission(session) : null;
+            if (asking && asking.run_id === run.id) return armStall();
             const err = new Error(`${role} produced nothing for ${Math.round(stallMs / 1000)}s after its response began`);
             err.code = 'STALLED';
             controller.abort(err);
@@ -4562,6 +4684,10 @@ export class Service {
               AI_CODE_PERMISSION_TIMEOUT_MS: String(options.permission.timeoutMs ?? 120000),
             }
           : {};
+        // A chat's read-only tools over AI Code's records, when this process is the
+        // server and so has an endpoint for them to read. A chat run from the CLI
+        // has none and answers from the tree alone, as it always did.
+        const app = options.appTools && this.permissionEndpoint ? appMcpConfig(run.id, { endpoint: this.permissionEndpoint }) : null;
 
         try {
           // The spawn point: the generator below starts its process on the first
@@ -4579,6 +4705,7 @@ export class Service {
             resumeSession,
             ...(role === 'planner' && options.sandbox ? { sandbox: options.sandbox } : {}),
             ...(gate ? { permissionTool: gate.permissionTool, mcpConfig: gate.configPath, env: gateEnv } : {}),
+            ...(app ? { appMcp: app } : {}),
           })) {
             this.store.addEvent({ runId: run.id, type: e.type, data: e.data });
             noteWait(e);
@@ -4616,6 +4743,7 @@ export class Service {
           // with it. A temp file naming a session and an endpoint is not something to
           // leave behind once per turn.
           removeMcpConfig(gate?.configPath);
+          removeMcpConfig(app?.configPath);
           if (!quiet) process.stderr.write('\r\x1b[K');
         }
 

@@ -325,15 +325,15 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
             : noProjects
               ? html`<${EmptyState}
                   title="Add a project first"
-                  message="Tasks are changes to a project’s code, and there is no project yet."
-                  hint="Add a repository by its path, or start from an idea and let the draft pass propose one."
+                  message="Add a project before creating tasks."
+                  hint="Add a repository by path, or describe an idea and AI Code will draft one."
                   actionLabel="Add a project"
                   onAction=${() => navigate('#/projects/new')}
                 />`
               : html`<${EmptyState}
                   title="No tasks yet"
                   message="This workspace has no tasks."
-                  hint="A task is one unit of work: a description, a plan you approve, an implementation, and a review."
+                  hint="Each task is planned, approved by you, implemented and reviewed."
                   actionLabel="New task"
                   onAction=${() => setShowForm(true)}
                 />`

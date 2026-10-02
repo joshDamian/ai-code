@@ -1,11 +1,20 @@
-// Supervised sessions. URL hash: #/sessions (the list, and a new session beside it),
-// #/sessions/new (a new session on its own), or #/sessions/:id (one of them).
+// Conversations. URL hash: #/sessions (the list, and a new conversation beside it),
+// #/sessions/new (a new one on its own), or #/sessions/:id (one of them). The route
+// keeps its old name so links into sessions written before conversations still open.
 //
-// A session is an agent working in the project's own checkout on instructions a
-// person types, with every write and every command held at a permission prompt. So
-// the view is a workspace rather than a page: the sessions down the left, grouped by
-// what each one needs from you; the open session in the middle; and what it has
-// cost and changed on the right. Switching sessions is one click, and a session
+// A conversation is read-only or can edit, and the person switches it in the header
+// without starting over. Read-only answers from the repo and AI Code's own records
+// and asks for nothing; editing works in the project's own checkout with every write
+// and every command held at a permission prompt, and one conversation per project
+// may do it at a time. Both are one row type on the server - a session with a mode -
+// so the history a turn reads is the whole conversation whichever mode wrote it.
+//
+// Chats from before conversations had modes are listed below them and open in the
+// chat view. The conversations the drafting passes open are hidden unless asked for.
+//
+// The view is a workspace rather than a page: the conversations down the left,
+// grouped by what each one needs from you; the open one in the middle; and what it
+// has cost and changed on the right. Switching is one click, and a conversation
 // that is waiting on you says so in the list without being opened.
 //
 // The approval is docked to the composer rather than laid over the top of the page.
@@ -13,7 +22,7 @@
 // has stopped, is holding a provider slot, and will be denied by the clock - and the
 // composer is where a person's eyes already are. On a phone it is a bottom sheet,
 // for the same reason: it is where the thumb is.
-import { html, useState, useEffect, useRef, useCallback, useMemo, formatCost, formatDuration, diffLines, unifiedDiff, sessionSteps, shortDir } from '../lib.mjs';
+import { html, useState, useEffect, useRef, useCallback, useMemo, formatCost, formatDuration, diffLines, unifiedDiff, sessionSteps, shortDir, gitImpact, recall, remember } from '../lib.mjs';
 import { api, sessionStreamUrl } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
@@ -22,7 +31,29 @@ import { EventStream } from '../components/event-stream.mjs';
 import { Time } from '../components/time.mjs';
 import { Select } from '../components/form.mjs';
 import { NoProject } from '../components/empty-state.mjs';
+import { confirmAction } from '../components/confirm.mjs';
 import { createEventBuffer } from './task-detail.mjs';
+
+// What this view remembers between visits, per browser (see `recall` in lib.mjs):
+// the project last chosen, how the list was filtered, and text typed and not sent,
+// per conversation and for the new one. Where the person was is remembered by the
+// app shell, which owns the route.
+const MEMORY = {
+  project: 'ai-code:conversations:project',
+  list: 'ai-code:conversations:list',
+  unsent: 'ai-code:conversations:unsent',
+};
+// Unsent text is kept for this many conversations, newest first: enough to cover the
+// ones a person has open, few enough that the record never grows without end.
+const UNSENT_KEPT = 20;
+const readUnsent = (id) => (recall(MEMORY.unsent, {}) || {})[id]?.text || '';
+function writeUnsent(id, text) {
+  const all = recall(MEMORY.unsent, {}) || {};
+  delete all[id];
+  if (text.trim()) all[id] = { text, at: Date.now() };
+  const kept = Object.entries(all).sort((a, b) => b[1].at - a[1].at).slice(0, UNSENT_KEPT);
+  remember(MEMORY.unsent, Object.fromEntries(kept));
+}
 
 // A turn the queue is still holding. Read from the job row rather than from a local
 // flag, so a reload and a second tab see the same thing this one does.
@@ -53,8 +84,12 @@ const VERBS = {
   WebSearch: 'Search web',
   Task: 'Delegate',
   TodoWrite: 'Plan',
+  draft_task: 'Draft task',
 };
-const verbOf = (tool) => VERBS[tool] || String(tool || 'tool').replace(/^mcp__[^_]+__/, '');
+const verbOf = (tool) => {
+  const name = String(tool || 'tool').replace(/^mcp__[^_]+__/, '');
+  return VERBS[tool] || VERBS[name] || name;
+};
 
 const WRITES = new Set(['Edit', 'MultiEdit', 'NotebookEdit', 'Write']);
 
@@ -88,7 +123,11 @@ function approvalOf(tool, input, root) {
   const i = { ...(input || {}) };
   if (i.file_path) i.file_path = relTo(root, i.file_path);
   if (tool === 'Bash') {
-    return { title: 'Run a command', allow: 'Allow command', command: i.command || '(a command with no text)', note: i.description || '' };
+    // git and gh run like any other command, but the panel says what they reach:
+    // this checkout's history, or something off this machine. See gitImpact.
+    const git = gitImpact(i.command);
+    const title = !git ? 'Run a command' : git.level === 'remote' ? 'Run a command that reaches beyond this machine' : git.level === 'local' ? 'Run a git command that changes this checkout' : 'Run a read-only git command';
+    return { title, allow: 'Allow command', command: i.command || '(a command with no text)', note: i.description || '', git };
   }
   if (i.file_path && WRITES.has(tool)) {
     let diff = '';
@@ -100,6 +139,11 @@ function approvalOf(tool, input, root) {
     const added = rows.filter((l) => l.cls === 'diff-add').length;
     const removed = rows.filter((l) => l.cls === 'diff-del').length;
     return { title: tool === 'Write' ? 'Write' : 'Edit', file: i.file_path, allow: tool === 'Write' ? 'Allow write' : 'Allow edit', rows, added, removed };
+  }
+  // A proposed task is read as the task, not as JSON: the title is the decision, and
+  // approving it here only puts it in the queue, which the note says.
+  if (verbOf(tool) === 'Draft task') {
+    return { title: `Draft a task: ${i.title || '(untitled)'}`, allow: 'Allow draft', note: `${i.description || ''}\n\nIt lands in the project's approval queue; it becomes a task only when you approve it there.`.trim() };
   }
   if (i.file_path) return { title: verbOf(tool), file: i.file_path, allow: 'Allow' };
   if (i.url) return { title: verbOf(tool), command: i.url, allow: 'Allow' };
@@ -162,6 +206,7 @@ function groupOf(s) {
 }
 
 function rowLine(s, root) {
+  if (s.pending?.git && s.pending.git.level !== 'read') return html`<span class=${s.pending.git.level === 'remote' || s.pending.git.destructive ? 'bad' : ''}>${s.pending.git.label}?</span>`;
   if (s.pending) return html`Wants to ${verbOf(s.pending.tool).toLowerCase()} <${Path} path=${relTo(root, s.pending.target)} />`;
   if (s.pending_run_id) return s.activity ? html`${verbOf(s.activity.tool)} <${Path} path=${relTo(root, s.activity.target)} />` : 'Working…';
   if (s.status === 'archived') return 'Archived';
@@ -182,6 +227,7 @@ function SessionRow({ s, active, now, root, onControl }) {
       <span class="ss-row-main">
         <span class="ss-row-top">
           <span class="ss-row-name">${s.name}</span>
+          ${s.mode === 'edit' && g !== 'closed' ? html`<span class="ss-mode-tag" title="This conversation can edit the checkout">Can edit</span>` : null}
           ${g === 'needs'
             ? html`<span class="ss-row-clock">${clock(secondsLeft(s.pending.timeout_at, now))}</span>`
             : g === 'working'
@@ -214,30 +260,70 @@ const GROUPS = [
   { id: 'idle', label: 'Idle' },
 ];
 
-function SessionList({ sessions, projects, projectsLoaded, projectId, onProject, activeId, spend, now, onNew, creating, onControl }) {
+// Only an editing conversation is tagged in the list. Read-only is the default and
+// the safe case; the tag marks the one that can change the checkout.
+const MODE_FILTERS = [
+  { value: 'all', label: 'All' },
+  { value: 'read', label: 'Read-only' },
+  { value: 'edit', label: 'Can edit' },
+];
+
+// A chat from before conversations had modes. It opens in the chat view, which is
+// where its messages are stored.
+function ChatRow({ c, now }) {
+  return html`
+    <div class="ss-row-wrap">
+      <a class="ss-row ss-row-idle ${c.system ? 'ss-row-system' : ''}" href=${`#/chat/${c.id}`}>
+        <span class="ss-dot ss-dot-idle" aria-hidden="true"></span>
+        <span class="ss-row-main">
+          <span class="ss-row-top">
+            <span class="ss-row-name">${c.title}</span>
+            <span class="ss-row-when"><${Time} at=${c.updated_at} now=${now} /></span>
+          </span>
+          <span class="ss-row-line">${c.system ? 'Opened by a drafting pass' : 'Chat'}</span>
+        </span>
+      </a>
+    </div>
+  `;
+}
+
+function SessionList({ sessions, chats, projects, projectsLoaded, projectId, onProject, activeId, spend, now, onNew, creating, onControl }) {
   const root = projects.find((p) => p.id === projectId)?.path || '';
-  const [query, setQuery] = useState('');
-  const [showClosed, setShowClosed] = useState(false);
+  const saved = useMemo(() => recall(MEMORY.list, {}) || {}, []);
+  const [query, setQuery] = useState(saved.query || '');
+  const [mode, setMode] = useState(MODE_FILTERS.some((f) => f.value === saved.mode) ? saved.mode : 'all');
+  const [showClosed, setShowClosed] = useState(!!saved.showClosed);
+  const [showChats, setShowChats] = useState(!!saved.showChats);
+  const [showSystem, setShowSystem] = useState(!!saved.showSystem);
+  useEffect(() => {
+    remember(MEMORY.list, { query, mode, showClosed, showChats, showSystem });
+  }, [query, mode, showClosed, showChats, showSystem]);
   const q = query.trim().toLowerCase();
-  const shown = (sessions || []).filter((s) => !q || s.name.toLowerCase().includes(q) || (s.preview || '').toLowerCase().includes(q));
+  const shown = (sessions || []).filter((s) => (mode === 'all' || s.mode === mode) && (!q || s.name.toLowerCase().includes(q) || (s.preview || '').toLowerCase().includes(q)));
   const by = (g) => shown.filter((s) => groupOf(s) === g);
   const closed = by('closed');
+  // Older chats are read-only, so a Can edit filter leaves them out.
+  const chatRows = mode === 'edit' ? [] : (chats || []).filter((c) => (showSystem || !c.system) && (!q || c.title.toLowerCase().includes(q)));
+  const systemCount = (chats || []).filter((c) => c.system).length;
   return html`
-    <aside class="ss-list" aria-label="Sessions">
+    <aside class="ss-list" aria-label="Conversations">
       <div class="ss-list-head">
         <div class="ss-list-title">
           ${projects.length > 1
             ? html`<${Select} className="ss-project" ariaLabel="Project" value=${projectId} onChange=${onProject} options=${projects.map((p) => ({ value: p.id, label: p.name }))} />`
             : html`<span class="ss-project-name">${projects[0]?.name || ''}</span>`}
-          <button class="btn primary sm ss-new" type="button" onClick=${onNew} disabled=${creating || !projectId} aria-label="New session">
+          <button class="btn primary sm ss-new" type="button" onClick=${onNew} disabled=${creating || !projectId} aria-label="New conversation">
             ${icon(ICONS.plus)}<span>New</span>
           </button>
         </div>
         <div class="ss-list-tools">
           <label class="ss-filter">
             ${icon(ICONS.search)}
-            <input type="search" placeholder="Filter" aria-label="Filter sessions" value=${query} onInput=${(e) => setQuery(e.target.value)} />
+            <input type="search" placeholder="Filter" aria-label="Filter conversations" value=${query} onInput=${(e) => setQuery(e.target.value)} />
           </label>
+        </div>
+        <div class="seg ss-mode-filter" role="group" aria-label="Show">
+          ${MODE_FILTERS.map((f) => html`<button type="button" key=${f.value} class="seg-btn ${mode === f.value ? 'active' : ''}" aria-pressed=${mode === f.value} onClick=${() => setMode(f.value)}>${f.label}</button>`)}
         </div>
       </div>
       <div class="ss-list-body">
@@ -245,8 +331,8 @@ function SessionList({ sessions, projects, projectsLoaded, projectId, onProject,
           ? html`<p class="ss-list-empty muted">No projects yet.</p>`
           : sessions === null
             ? html`<div class="ss-list-empty"><${Spinner} /></div>`
-            : !sessions.length
-              ? html`<p class="ss-list-empty muted">No sessions in this project yet.</p>`
+            : !sessions.length && !(chats || []).length
+              ? html`<p class="ss-list-empty muted">No conversations in this project yet.</p>`
               : html`
                   ${GROUPS.map(({ id: g, label }) => {
                     const rows = by(g);
@@ -266,13 +352,27 @@ function SessionList({ sessions, projects, projectsLoaded, projectId, onProject,
                         ${showClosed ? closed.map((s) => html`<${SessionRow} key=${s.id} s=${s} active=${s.id === activeId} now=${now} root=${root} onControl=${onControl} />`) : null}
                       `
                     : null}
-                  ${q && !shown.length ? html`<p class="ss-list-empty muted">Nothing matches “${query}”.</p>` : null}
+                  ${chatRows.length
+                    ? html`
+                        <button class="ss-closed-toggle" type="button" aria-expanded=${showChats} onClick=${() => setShowChats((v) => !v)}>
+                          ${icon(ICONS.chevron, showChats ? 'open' : '')} Earlier chats · ${chatRows.length}
+                        </button>
+                        ${showChats ? chatRows.map((c) => html`<${ChatRow} key=${c.id} c=${c} now=${now} />`) : null}
+                      `
+                    : null}
+                  ${systemCount && mode !== 'edit'
+                    ? html`<button class="ss-system-toggle" type="button" aria-pressed=${showSystem} onClick=${() => {
+                        setShowSystem((v) => !v);
+                        setShowChats(true);
+                      }}>${showSystem ? 'Hide' : 'Show'} conversations opened by drafting passes (${systemCount})</button>`
+                    : null}
+                  ${q && !shown.length && !chatRows.length ? html`<p class="ss-list-empty muted">Nothing matches “${query}”.</p>` : null}
                 `}
       </div>
       ${spend
         ? html`
             <div class="ss-list-foot">
-              <div class="ss-meter-row"><span>Today, all sessions</span><span class="ss-mono">${formatCost(spend.todaySpent)}${spend.dailyCap ? html` <span class="muted">/ ${formatCost(spend.dailyCap)}</span>` : null}</span></div>
+              <div class="ss-meter-row"><span>Today, all conversations</span><span class="ss-mono">${formatCost(spend.todaySpent)}${spend.dailyCap ? html` <span class="muted">/ ${formatCost(spend.dailyCap)}</span>` : null}</span></div>
               ${spend.dailyCap ? html`<${Meter} value=${spend.todaySpent} max=${spend.dailyCap} />` : null}
             </div>
           `
@@ -317,7 +417,7 @@ function Steps({ steps, waitingOn, root }) {
 // working turn emits an event per tool call, and committing each one to the page
 // would redraw the transcript beside it - the markdown, the approval and the
 // composer - once per event.
-function LiveSteps({ store, waiting, root }) {
+function LiveSteps({ store, waiting, root, editing }) {
   const [events, setEvents] = useState(store.events);
   useEffect(() => {
     const sync = () => setEvents(store.events);
@@ -328,7 +428,7 @@ function LiveSteps({ store, waiting, root }) {
   return html`
     <div class="ss-answer">
       <${Steps} steps=${steps} waitingOn=${waiting} root=${root} />
-      ${waiting ? null : html`<div class="ss-live"><${Spinner} /> <span>${steps.length ? 'Working in the checkout…' : 'Starting…'}</span></div>`}
+      ${waiting ? null : html`<div class="ss-live"><${Spinner} /> <span>${steps.length ? (editing ? 'Working in the checkout…' : 'Reading…') : 'Starting…'}</span></div>`}
     </div>
   `;
 }
@@ -376,7 +476,57 @@ function Turn({ t, live, root, children }) {
   `;
 }
 
-function Approval({ permission, now, busy, onAnswer, root }) {
+// Where the conversation changed mode, between the turns either side of the switch.
+// Drawn from the turns' own roles rather than from a stored event, so it marks the
+// mode a turn actually ran in, not the moment someone clicked.
+const roleOfMode = (mode) => (mode === 'edit' ? 'session' : 'chat');
+function ModeDivider({ role }) {
+  const edit = role === 'session';
+  return html`<div class="ss-divider ${edit ? 'ss-divider-edit' : 'ss-divider-read'}" role="separator">${edit ? 'Switched to Can edit' : 'Switched to Read-only'}</div>`;
+}
+
+// A task this conversation proposed, still waiting in the project's queue. Approve
+// and Drop are the queue's own actions, so deciding here and on the project page is
+// one decision, not two.
+function DraftCard({ draft, busy, onApprove, onDrop }) {
+  return html`
+    <section class="ss-draft" aria-label="Drafted task">
+      <div class="ss-draft-head">
+        ${icon(ICONS.task)}
+        <b>${draft.title}</b>
+        <span class="badge badge-info">Waiting for approval</span>
+      </div>
+      ${draft.description && draft.description !== draft.title ? html`<p>${draft.description}</p>` : null}
+      <div class="ss-draft-actions">
+        <button class="btn primary sm" type="button" onClick=${onApprove} disabled=${busy}>Approve</button>
+        <button class="btn secondary sm" type="button" onClick=${onDrop} disabled=${busy}>Drop</button>
+        <span class="muted">The same queue as the project page.</span>
+      </div>
+    </section>
+  `;
+}
+
+// Each git or gh step of the command, with how far it reaches. The words are the
+// classifier's; the panel only adds the scope, so a reader sees "Leaves this machine"
+// before the label that says what leaves.
+const GIT_SCOPE = { read: 'Reads only', local: 'This checkout', remote: 'Leaves this machine' };
+function GitImpact({ impact }) {
+  return html`
+    <ul class="ss-git ss-git-${impact.level}" aria-label="What this git command does">
+      ${impact.items.map(
+        (x, i) => html`
+          <li key=${i} class=${`ss-git-${x.level}`}>
+            <span class="ss-git-scope">${GIT_SCOPE[x.level]}</span>
+            <span>${x.label}</span>
+            ${x.destructive ? html`<span class="ss-git-warn">Can't be undone from here</span>` : null}
+          </li>
+        `
+      )}
+    </ul>
+  `;
+}
+
+export function Approval({ permission, now, busy, onAnswer, root }) {
   const a = approvalOf(permission.tool, permission.input, root);
   const cwd = permission.cwd ? relTo(root, permission.cwd) : '';
   const left = secondsLeft(permission.timeout_at, now);
@@ -396,6 +546,7 @@ function Approval({ permission, now, busy, onAnswer, root }) {
         ${a.rows ? html`<span class="ss-mono ss-approval-count"><span class="good">+${a.added}</span> <span class="bad">−${a.removed}</span></span>` : null}
       </div>
       ${a.command ? html`<pre class="ss-approval-cmd"><span class="muted">$ </span>${a.command}</pre>` : null}
+      ${a.git ? html`<${GitImpact} impact=${a.git} />` : null}
       ${a.note ? html`<p class="ss-approval-note">${a.note}</p>` : null}
       ${a.rows && a.rows.length
         ? html`
@@ -415,7 +566,7 @@ function Approval({ permission, now, busy, onAnswer, root }) {
       <div class="ss-approval-foot">
         <span class="muted">Nothing happens until you allow it.</span>
         <button class="btn secondary" type="button" onClick=${() => onAnswer('deny')} disabled=${busy}>Deny</button>
-        <button class="btn ss-allow" type="button" onClick=${() => onAnswer('allow')} disabled=${busy}>${a.allow}</button>
+        <button class="btn ss-allow ${a.git?.destructive || a.git?.level === 'remote' ? 'ss-allow-hot' : ''}" type="button" onClick=${() => onAnswer('allow')} disabled=${busy}>${a.allow}</button>
       </div>
     </section>
   `;
@@ -489,7 +640,7 @@ function Rail({ detail, turns, project, events, open, onClose, busy, onDraft, on
     timeout: history.filter((h) => h.status === 'timeout').length,
   };
   return html`
-    <aside class="ss-rail ${open ? 'open' : ''}" aria-label="Session details">
+    <aside class="ss-rail ${open ? 'open' : ''}" aria-label="Conversation details">
       <div class="ss-rail-head">
         <h3>Details</h3>
         <button class="btn secondary ss-icon-btn" type="button" aria-label="Close details" onClick=${onClose}>${icon(ICONS.cross)}</button>
@@ -498,7 +649,7 @@ function Rail({ detail, turns, project, events, open, onClose, busy, onDraft, on
         ? html`
             <section class="ss-rail-sec">
               <h3 class="ss-eyebrow">Spend</h3>
-              <div class="ss-spend"><span class="ss-mono ss-spend-figure">${formatCost(budget.spent)}</span><span class="muted">this session</span></div>
+              <div class="ss-spend"><span class="ss-mono ss-spend-figure">${formatCost(budget.spent)}</span><span class="muted">this conversation</span></div>
               ${budget.runCap
                 ? html`
                     <div class="ss-meter-row"><span>Last turn</span><span class="ss-mono">${formatCost(lastTurn?.cost || 0)} <span class="muted">/ ${formatCost(budget.runCap)}</span></span></div>
@@ -507,7 +658,7 @@ function Rail({ detail, turns, project, events, open, onClose, busy, onDraft, on
                 : null}
               ${budget.dailyCap
                 ? html`
-                    <div class="ss-meter-row"><span>Today, all sessions</span><span class="ss-mono">${formatCost(budget.todaySpent)} <span class="muted">/ ${formatCost(budget.dailyCap)}</span></span></div>
+                    <div class="ss-meter-row"><span>Today, all conversations</span><span class="ss-mono">${formatCost(budget.todaySpent)} <span class="muted">/ ${formatCost(budget.dailyCap)}</span></span></div>
                     <${Meter} value=${budget.todaySpent} max=${budget.dailyCap} />
                   `
                 : null}
@@ -543,7 +694,7 @@ function Rail({ detail, turns, project, events, open, onClose, busy, onDraft, on
         ? html`
             <section class="ss-nudge">
               <div class="ss-nudge-head">${icon(ICONS.task)}<h3>This is starting to look like a task</h3></div>
-              <p>Changes here land straight in your checkout. A task gets its own worktree, a review and a commit.</p>
+              <p>Changes here go straight into your project. A task works in its own worktree and gets reviewed.</p>
               <div class="ss-nudge-actions">
                 <button class="btn primary sm" type="button" onClick=${onDraft} disabled=${busy}>Draft as task</button>
                 <button class="btn secondary sm" type="button" onClick=${onDismiss} disabled=${busy}>Not now</button>
@@ -577,7 +728,10 @@ function Rail({ detail, turns, project, events, open, onClose, busy, onDraft, on
 // anything to say about it; this one creates the session with its first instruction,
 // which is also what names it.
 function NewSession({ projects, projectsLoaded, projectId, onProject, models, onStarted, navigate }) {
-  const [text, setText] = useState('');
+  const [text, setText] = useState(() => readUnsent('new'));
+  useEffect(() => {
+    writeUnsent('new', text);
+  }, [text]);
   const [model, setModel] = useState('');
   const [busy, setBusy] = useState(false);
   const ref = useRef(null);
@@ -591,8 +745,9 @@ function NewSession({ projects, projectsLoaded, projectId, onProject, models, on
     setBusy(true);
     try {
       const [providerId, modelId] = model ? model.split('::') : [null, null];
-      const s = await api.createSession(projectId, 'New session', { providerId, modelId });
+      const s = await api.createSession(projectId, 'New session', { providerId, modelId, mode: 'read' });
       await api.sendSessionMessage(s.id, instruction);
+      writeUnsent('new', '');
       onStarted(s.id);
     } catch (e) {
       showToast(e.message, 'error');
@@ -603,7 +758,7 @@ function NewSession({ projects, projectsLoaded, projectId, onProject, models, on
     return html`
       <div class="ss-new-pane">
         <div class="ss-new-inner">
-          <${NoProject} what="A session works in a project’s own checkout, so it needs a project to work in." />
+          <${NoProject} what="Conversations belong to a project. Add one first." />
         </div>
       </div>
     `;
@@ -612,23 +767,23 @@ function NewSession({ projects, projectsLoaded, projectId, onProject, models, on
   return html`
     <div class="ss-new-pane">
       <div class="ss-new-inner">
-        ${navigate ? html`<a class="ss-back" href="#/sessions">${icon(ICONS.back)} Sessions</a>` : null}
+        ${navigate ? html`<a class="ss-back" href="#/sessions">${icon(ICONS.back)} Conversations</a>` : null}
         <div class="ss-new-head">
           <span class="muted">
-            New session in
+            New conversation in
             ${projects.length > 1
               ? html` <${Select} inline size="sm" className="ss-inline-select" ariaLabel="Project" value=${projectId} onChange=${onProject} options=${projects.map((p) => ({ value: p.id, label: p.name }))} />`
               : html` <strong>${project?.name || '—'}</strong>`}
             ${project ? html` · <span class="ss-mono" title=${project.path}>${shortDir(project.path)}</span>` : null}
           </span>
-          <h2>What should the agent work on?</h2>
+          <h2>What do you want to know or change?</h2>
         </div>
         <div class="ss-new-box">
           <textarea
             ref=${ref}
             rows="4"
-            aria-label="First instruction"
-            placeholder="e.g. Find why the upload test is flaky and fix it"
+            aria-label="First message"
+            placeholder="e.g. Why did the last failed task fail?"
             value=${text}
             disabled=${busy || !projectId}
             onInput=${(e) => setText(e.target.value)}
@@ -653,13 +808,13 @@ function NewSession({ projects, projectsLoaded, projectId, onProject, models, on
               : null}
             <span class="ss-new-spacer"></span>
             <span class="ss-mono muted ss-kbd-hint">⌘↵</span>
-            <button class="btn primary" type="button" onClick=${start} disabled=${busy || !text.trim() || !projectId}>${busy ? 'Starting…' : 'Start session'}</button>
+            <button class="btn primary" type="button" onClick=${start} disabled=${busy || !text.trim() || !projectId}>${busy ? 'Starting…' : 'Start'}</button>
           </div>
         </div>
         <div class="ss-facts-grid">
-          <div>${icon(ICONS.branch, 'accent')}<b>Your own checkout</b><span>No worktree. Approved changes land in the project directly.</span></div>
-          <div>${icon(ICONS.shield, 'warn')}<b>You approve each change</b><span>Reading is free. Every write and command waits for you.</span></div>
-          <div>${icon(ICONS.clock)}<b>Silence means no</b><span>A request left unanswered is denied, and the agent carries on.</span></div>
+          <div>${icon(ICONS.search, 'accent')}<b>Starts read-only</b><span>It reads the code and AI Code's own records: tasks, runs, spend. Nothing changes.</span></div>
+          <div>${icon(ICONS.shield, 'warn')}<b>Switch to Can edit for changes</b><span>Then it works in your checkout, and every write and command waits for you.</span></div>
+          <div>${icon(ICONS.task)}<b>Bigger work becomes a task</b><span>It can draft one into the project's queue; you approve it there or here.</span></div>
         </div>
         <p class="muted ss-new-alt">Want a branch, a review and a commit? <a class="link" href="#/tasks">Create a task instead</a></p>
       </div>
@@ -677,6 +832,7 @@ export function Sessions({ id, navigate, onTitle }) {
   const [projectId, setProjectId] = useState('');
   const [models, setModels] = useState([]);
   const [sessions, setSessions] = useState(null);
+  const [chats, setChats] = useState([]);
   const [spend, setSpend] = useState(null);
   const [detail, setDetail] = useState(null);
   const [turns, setTurns] = useState([]);
@@ -744,7 +900,9 @@ export function Sessions({ id, navigate, onTitle }) {
         if (cancelled) return;
         setProjects(p);
         setProjectsLoaded(true);
-        setProjectId((cur) => cur || (p[0] && p[0].id) || '');
+        // The project chosen last time, while it still exists; otherwise the first.
+        const last = recall(MEMORY.project, '');
+        setProjectId((cur) => cur || (p.some((x) => x.id === last) ? last : (p[0] && p[0].id) || ''));
       })
       .catch((e) => {
         if (cancelled) return;
@@ -770,6 +928,10 @@ export function Sessions({ id, navigate, onTitle }) {
     if (session?.project_id) setProjectId(session.project_id);
   }, [session?.project_id]);
 
+  useEffect(() => {
+    if (projectId) remember(MEMORY.project, projectId);
+  }, [projectId]);
+
   const refreshList = useCallback(() => setListTick((n) => n + 1), []);
 
   // The list is re-read on a slow poll while anything in it is moving, so a session
@@ -779,10 +941,11 @@ export function Sessions({ id, navigate, onTitle }) {
     let cancelled = false;
     const read = async () => {
       try {
-        const [list, s] = await Promise.all([api.sessions(projectId), api.sessionSpend().catch(() => null)]);
+        const [list, s, c] = await Promise.all([api.sessions(projectId), api.sessionSpend().catch(() => null), api.chatSessions(projectId).catch(() => [])]);
         if (cancelled) return;
         setSessions(list);
         setSpend(s);
+        setChats(c || []);
       } catch (e) {
         if (!cancelled) setError(e.message);
       }
@@ -806,7 +969,9 @@ export function Sessions({ id, navigate, onTitle }) {
   const load = useCallback(async () => {
     if (!sessionId) return;
     try {
-      const d = await api.session(sessionId);
+      const [d, p] = await Promise.all([api.session(sessionId), api.projects().catch(() => null)]);
+      // The projects carry the drafts, and a turn may just have proposed one.
+      if (p) setProjects(p);
       setDetail(d);
       setTurns(d.turns || []);
       setPermission(d.permission || null);
@@ -825,9 +990,16 @@ export function Sessions({ id, navigate, onTitle }) {
         setSent('');
       }
     } catch (e) {
+      // A conversation that no longer exists - the remembered one, deleted since -
+      // is not an error to sit on: back to the list, which the shell then remembers.
+      if (/not found/i.test(e.message)) {
+        writeUnsent(sessionId, '');
+        navigate('#/sessions');
+        return;
+      }
       setError(e.message);
     }
-  }, [sessionId, onTitle]);
+  }, [sessionId, onTitle, navigate]);
 
   const openStream = useCallback(() => {
     closeStream();
@@ -884,8 +1056,10 @@ export function Sessions({ id, navigate, onTitle }) {
     setError(null);
     setRenaming(false);
     setRailOpen(false);
+    // What was typed here and not sent, restored with the conversation.
+    setInput(sessionId ? readUnsent(sessionId) : '');
     if (!sessionId) {
-      onTitle?.(isNew ? 'New session' : null);
+      onTitle?.(isNew ? 'New conversation' : null);
       return undefined;
     }
     load();
@@ -917,6 +1091,7 @@ export function Sessions({ id, navigate, onTitle }) {
     try {
       await api.sendSessionMessage(sessionId, text);
       setInput('');
+      writeUnsent(sessionId, '');
       setSent(text);
       setWorking(true);
       sawWorking.current = true;
@@ -966,6 +1141,46 @@ export function Sessions({ id, navigate, onTitle }) {
     }
   }, [sessionId, navigate]);
 
+  // Up to editing asks first, because it changes what the next turn may do to the
+  // checkout; back to read-only does not, because it only takes abilities away.
+  const switchMode = useCallback(
+    async (mode) => {
+      if (!session || session.mode === mode) return;
+      if (mode === 'edit') {
+        const ok = await confirmAction({
+          title: 'Allow this conversation to edit?',
+          body: `Its next turns work in ${project ? project.name : 'the project'}'s own checkout, not a copy. Every write and command waits for your approval, git and gh included: the approval says when a command changes history or reaches GitHub. Spend counts against the conversations budget, and no other conversation can edit this project until this one goes back to read-only.`,
+          confirmLabel: 'Allow edits',
+          cancelLabel: 'Stay read-only',
+        });
+        if (!ok) return;
+      }
+      await guarded(() => api.updateSession(sessionId, { mode }), 'Switch mode');
+    },
+    [session, project, sessionId, guarded]
+  );
+
+  const decideDraft = useCallback(
+    async (draft, approve) => {
+      if (!project) return;
+      setBusy(true);
+      try {
+        if (approve) {
+          const r = await api.approveDraft(project.id, draft.id);
+          showToast(`Task created: ${r.task?.title || draft.title}`);
+        } else {
+          await api.dropDraft(project.id, draft.id);
+        }
+      } catch (e) {
+        showToast(e.message, 'error');
+      } finally {
+        setBusy(false);
+        load();
+      }
+    },
+    [project, load]
+  );
+
   // Renamed to what the box holds, and the box is left open when the server refuses:
   // the name a person typed is theirs to fix, and closing the editor would have them
   // retype it.
@@ -988,12 +1203,18 @@ export function Sessions({ id, navigate, onTitle }) {
   const list = html`
     <${SessionList}
       sessions=${sessions}
+      chats=${chats}
       projects=${projects}
       projectsLoaded=${projectsLoaded}
       projectId=${projectId}
       onProject=${(v) => {
         setProjectId(v);
         setSessions(null);
+        setChats([]);
+        // A conversation from another project stays open no longer: it is the place
+        // the shell remembers, and on the way back it would pull the list back to
+        // its own project through the effect that follows the open conversation.
+        if (session && session.project_id !== v) navigate('#/sessions');
       }}
       activeId=${sessionId}
       spend=${spend}
@@ -1046,22 +1267,27 @@ export function Sessions({ id, navigate, onTitle }) {
         : stopped
           ? { cls: 'closed', label: 'Stopped' }
           : { cls: 'idle', label: 'Idle' };
+  const editing = session?.mode === 'edit';
+  // Who holds the checkout, when it is not this conversation. Read from the list,
+  // which is polled, so a switch in another tab shows here within a few seconds.
+  const holder = !editing ? (sessions || []).find((x) => x.id !== sessionId && x.mode === 'edit' && x.status !== 'stopped' && x.status !== 'archived') || null : null;
+  const drafts = (project?.drafts || []).filter((d) => d.session_id === sessionId);
   const placeholder = permission
-    ? 'The session is paused on the approval above.'
+    ? 'Paused on the approval above.'
     : working
-      ? 'Working… send the next instruction when it replies.'
+      ? 'Working… send the next message when it replies.'
       : closed
-        ? 'Resume this session to send an instruction.'
-        : turns.length
-          ? 'Tell the session what to do next…'
-          : 'Tell the session what to do…';
+        ? 'Resume this conversation to send a message.'
+        : editing
+          ? 'Tell it what to change. Each write asks you first.'
+          : 'Ask about the code, tasks, runs or spend…';
 
   return html`
     <div class="ss-shell ss-shell-open ${railOpen ? 'rail-open' : ''}">
       ${list}
-      <main class="ss-conv" aria-label=${session?.name || 'Session'}>
+      <main class="ss-conv" aria-label=${session?.name || 'Conversation'}>
         <header class="ss-conv-head">
-          ${renaming ? null : html`<a class="btn secondary ss-icon-btn ss-back-btn" href="#/sessions" aria-label="Back to sessions">${icon(ICONS.back)}</a>`}
+          ${renaming ? null : html`<a class="btn secondary ss-icon-btn ss-back-btn" href="#/sessions" aria-label="Back to conversations">${icon(ICONS.back)}</a>`}
           <div class="ss-conv-title">
             ${renaming
               ? html`
@@ -1069,7 +1295,7 @@ export function Sessions({ id, navigate, onTitle }) {
                     <input
                       class="input"
                       value=${nameDraft}
-                      aria-label="Session name"
+                      aria-label="Conversation name"
                       ref=${renameRef}
                       onInput=${(e) => setNameDraft(e.target.value)}
                       onKeyDown=${(e) => {
@@ -1086,12 +1312,14 @@ export function Sessions({ id, navigate, onTitle }) {
                 `
               : html`
                   <div class="ss-title-row">
-                    <h2>${session?.name || 'Session'}</h2>
-                    ${session ? html`<span class="ss-pill ss-pill-${statusPill.cls}"><span></span>${statusPill.label}</span>` : null}
+                    <h2>${session?.name || 'Conversation'}</h2>
+                    ${session && statusPill.cls !== 'idle' ? html`<span class="ss-pill ss-pill-${statusPill.cls}"><span></span>${statusPill.label}</span>` : null}
                   </div>
                   <div class="ss-meta">
                     ${project ? html`<span>${project.name}</span><span aria-hidden="true">·</span>` : null}
-                    <span class="ss-meta-branch">${icon(ICONS.branch)} own checkout</span>
+                    ${editing
+                      ? html`<span class="ss-meta-branch">${icon(ICONS.branch)} edits the checkout</span>`
+                      : html`<span class="ss-meta-branch">${icon(ICONS.search)} changes nothing</span>`}
                     <span aria-hidden="true">·</span>
                     <span>${turns.length} turn${turns.length === 1 ? '' : 's'}</span>
                     ${detail?.budget?.spent ? html`<span aria-hidden="true">·</span><span class="ss-mono">${formatCost(detail.budget.spent)}</span>` : null}
@@ -1105,9 +1333,22 @@ export function Sessions({ id, navigate, onTitle }) {
             : closed
               ? html`<button class="btn primary sm" type="button" onClick=${() => guarded(() => api.resumeSession(sessionId), 'Resume')} disabled=${busy}>Resume</button>`
               : null}
+          ${renaming || !session
+            ? null
+            : html`<div class="seg ss-mode" role="group" aria-label="Mode">
+                <button type="button" class="seg-btn ${!editing ? 'active ss-mode-read' : ''}" aria-pressed=${!editing} onClick=${() => switchMode('read')} disabled=${busy || working}>Read-only</button>
+                <button
+                  type="button"
+                  class="seg-btn ${editing ? 'active ss-mode-edit' : ''}"
+                  aria-pressed=${editing}
+                  title=${holder ? `"${holder.name}" can already edit this project` : ''}
+                  onClick=${() => switchMode('edit')}
+                  disabled=${busy || working || !!holder || closed}
+                >Can edit</button>
+              </div>`}
           ${renaming
             ? null
-            : html`<button class="btn secondary ss-icon-btn ss-rail-btn" type="button" aria-label="Session details" aria-expanded=${railOpen} onClick=${() => setRailOpen((v) => !v)}>
+            : html`<button class="btn secondary ss-icon-btn ss-rail-btn" type="button" aria-label="Conversation details" aria-expanded=${railOpen} onClick=${() => setRailOpen((v) => !v)}>
                 ${icon(ICONS.panel)}
               </button>`}
           ${renaming ? null : html`<${MoreMenu}
@@ -1117,11 +1358,16 @@ export function Sessions({ id, navigate, onTitle }) {
                   setRenaming(true);
                 } },
               detail?.nudge ? { label: 'Draft as task', onSelect: draftTask } : null,
-              !working && !closed ? { label: 'Stop session', onSelect: () => guarded(() => api.stopSession(sessionId), 'Stop') } : null,
+              !working && !closed ? { label: 'Stop conversation', onSelect: () => guarded(() => api.stopSession(sessionId), 'Stop') } : null,
               !archived ? { label: 'Archive', danger: true, onSelect: () => guarded(() => api.archiveSession(sessionId), 'Archive') } : null,
             ]}
           />`}
         </header>
+        ${holder
+          ? html`<div class="ss-lock" role="status">
+              Can edit is unavailable: <a class="link" href=${`#/sessions/${holder.id}`}>${holder.name}</a> can already edit ${project ? project.name : 'this project'}. Switch it to read-only to free the checkout.
+            </div>`
+          : null}
 
         <div class="ss-transcript" ref=${transcriptRef}>
           ${detail === null
@@ -1129,17 +1375,27 @@ export function Sessions({ id, navigate, onTitle }) {
             : !settledTurns.length && !working
               ? html`<div class="ss-empty">
                   <b>Nothing yet</b>
-                  <span class="muted">Type an instruction below and the agent starts working in the checkout. You approve every write and command.</span>
+                  <span class="muted">${editing
+                    ? 'Tell it what to change below. It works in the checkout, and you approve every write and command.'
+                    : 'Ask anything below. It reads the code and AI Code\'s records and changes nothing.'}</span>
                 </div>`
               : null}
-          ${settledTurns.map((t) => html`<${Turn} key=${t.run_id} t=${t} root=${project?.path} />`)}
+          ${settledTurns.map((t, i) => {
+            const prev = settledTurns[i - 1];
+            const switched = prev && prev.role && t.role && prev.role !== t.role;
+            return html`${switched ? html`<${ModeDivider} key=${`m${t.run_id}`} role=${t.role} />` : null}<${Turn} key=${t.run_id} t=${t} root=${project?.path} />`;
+          })}
           ${working || (permission && pendingRun)
             ? html`
+                ${settledTurns.length && settledTurns[settledTurns.length - 1].role && settledTurns[settledTurns.length - 1].role !== roleOfMode(session?.mode)
+                  ? html`<${ModeDivider} role=${roleOfMode(session?.mode)} />`
+                  : null}
                 <${Turn} key="live" t=${{ instruction: liveInstruction }} live>
-                  <${LiveSteps} store=${events} waiting=${!!permission} root=${project?.path} />
+                  <${LiveSteps} store=${events} waiting=${!!permission} root=${project?.path} editing=${editing} />
                 </${Turn}>
               `
             : null}
+          ${drafts.map((d) => html`<${DraftCard} key=${d.id} draft=${d} busy=${busy} onApprove=${() => decideDraft(d, true)} onDrop=${() => decideDraft(d, false)} />`)}
           ${error ? html`<div class="ss-failure">${error}</div>` : null}
         </div>
 
@@ -1153,7 +1409,10 @@ export function Sessions({ id, navigate, onTitle }) {
               placeholder=${placeholder}
               value=${input}
               disabled=${busy || working || closed || !!permission}
-              onInput=${(e) => setInput(e.target.value)}
+              onInput=${(e) => {
+                setInput(e.target.value);
+                writeUnsent(sessionId, e.target.value);
+              }}
               onKeyDown=${(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();

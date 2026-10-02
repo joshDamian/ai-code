@@ -15,8 +15,7 @@ const NAV = [
   { label: 'Overview', href: '#/overview' },
   { label: 'Projects', href: '#/projects' },
   { label: 'Tasks', href: '#/tasks' },
-  { label: 'Chat', href: '#/chat' },
-  { label: 'Sessions', href: '#/sessions' },
+  { label: 'Conversations', href: '#/sessions' },
   { label: 'Providers', href: '#/providers' },
   { label: 'Routing', href: '#/routing' },
   { label: 'Runs', href: '#/runs' },
@@ -67,8 +66,7 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
     const commands = [
       ...NAV.map((n) => ({ group: 'Go to', kind: 'nav', key: n.href, label: n.label, hint: n.href.slice(1), href: n.href })),
       { group: 'Actions', kind: 'new-task', key: 'new-task', label: 'New task' },
-      { group: 'Actions', kind: 'nav', key: 'new-session', label: 'New session', href: '#/sessions/new' },
-      { group: 'Actions', kind: 'nav', key: 'new-chat', label: 'New chat', href: '#/chat/new' },
+      { group: 'Actions', kind: 'nav', key: 'new-session', label: 'New conversation', href: '#/sessions/new' },
       // listTasks orders by updated_at DESC, so with no query the head is the recent
       // five; with one, every task is a candidate.
       ...(q ? tasks : tasks.slice(0, 5)).map((t) => ({
@@ -82,14 +80,14 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
       ...(q
         ? [
             ...projects.map((p) => ({ group: 'Projects', kind: 'nav', key: `#/project/${p.id}`, label: p.name, hint: 'project', href: `#/project/${p.id}` })),
-            ...chats.map((c) => ({ group: 'Conversations', kind: 'nav', key: `#/chat/${c.id}`, label: c.title, hint: projectName.get(c.project_id) || 'chat', href: `#/chat/${c.id}` })),
-            ...sessions.map((x) => ({ group: 'Sessions', kind: 'nav', key: `#/sessions/${x.id}`, label: x.name, hint: stateLabel(x.status), href: `#/sessions/${x.id}` })),
+            ...sessions.map((x) => ({ group: 'Conversations', kind: 'nav', key: `#/sessions/${x.id}`, label: x.name, hint: x.mode === 'edit' ? 'can edit' : stateLabel(x.status), href: `#/sessions/${x.id}` })),
+            ...chats.filter((c) => !c.system).map((c) => ({ group: 'Earlier chats', kind: 'nav', key: `#/chat/${c.id}`, label: c.title, hint: projectName.get(c.project_id) || 'chat', href: `#/chat/${c.id}` })),
           ]
         : []),
     ];
     // How many rows a searched group may hold. A query that matches forty tasks is a
     // query to refine, not forty rows to scroll past on the way to Projects.
-    const CAP = { Tasks: 8, Projects: 5, Conversations: 5, Sessions: 5 };
+    const CAP = { Tasks: 8, Projects: 5, Conversations: 5, 'Earlier chats': 5 };
     const buckets = new Map();
     for (const c of commands) {
       const m = q ? fuzzy(c.label, q) : { score: 0, hits: [] };

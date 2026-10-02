@@ -259,7 +259,7 @@ export function Usage() {
                 title="Cost per day by provider"
                 ariaLabel=${`Cost per day split by provider over ${period}. ${costStack.rows.length} day(s), ${costStack.series.length} series. Total ${formatCost(totals.cost)}.`}
                 formatValue=${axisCost}
-                zeroNote="Every run in this period priced at $0 - no pricing is configured for these models. Hover or focus a day for its per-provider breakdown."
+                zeroNote="Every run shows $0 because these models have no pricing set. Hover a day to see each provider."
               />
             `}
       </figure>

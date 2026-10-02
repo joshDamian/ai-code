@@ -77,8 +77,10 @@ self.addEventListener('push', (e) => {
       badge: '/icons/icon-192.png',
       // Collapses repeats for the same task rather than stacking a lock screen full of
       // them, which is what a repair loop failing three times would otherwise do.
-      tag: data.taskId || data.runId || title,
-      data: { url: data.taskId ? `/#/tasks/${data.taskId}` : '/' },
+      tag: data.tag || data.taskId || data.runId || title,
+      // A payload may name its own screen (a permission prompt opens its
+      // conversation); otherwise the task, otherwise the dashboard.
+      data: { url: data.url || (data.taskId ? `/#/tasks/${data.taskId}` : '/') },
     })
   );
 });

@@ -82,8 +82,7 @@ export function ServerPanel({ supervisorUp }) {
   } else if (phase === 'timeout') {
     action = html`
       <div class="muted">
-        The start was accepted but the server has not answered. Its output is in
-        <code>~/Library/Logs/ai-code/server.log</code>.
+        The server didn't come up. Check <code>~/Library/Logs/ai-code/server.log</code>.
       </div>
     `;
   } else if (canStart) {
@@ -91,12 +90,12 @@ export function ServerPanel({ supervisorUp }) {
   } else if (supervisorUp) {
     // A supervisor is holding the port, but this page is not on the machine it is
     // holding it on - the phone, which can reach the API and nothing more.
-    action = html`<div class="muted">Starting the server needs a terminal on the machine itself.</div>`;
+    action = html`<div class="muted">Start the server from a terminal on its machine.</div>`;
   } else {
     action = html`
       <div class="muted">
-        Nothing on this machine is listening for a start request. Run <code>ai-code web</code> in a terminal there,
-        or install the supervisor (<code>bin/install-ai-code --supervisor</code>) to put a Start button here.
+        Run <code>ai-code web</code> on that machine to start it. To get a Start button here, install the
+        supervisor with <code>bin/install-ai-code --supervisor</code>.
       </div>
     `;
   }
@@ -113,8 +112,7 @@ export function ServerPanel({ supervisorUp }) {
           <span>${phase === 'starting' ? 'Starting the server…' : 'The dashboard server is not running'}</span>
         </div>
         <p class="muted">
-          The dashboard is a process on the machine it runs on, and it is not answering. Nothing is progressing while
-          it is down: no plans, no runs, no terminals.
+          Nothing runs while it's down: no plans, no agents, no terminals.
         </p>
         ${action}
         ${error ? html`<div class="token-error">${error}</div>` : null}

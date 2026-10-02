@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // The MCP server claude delegates its permission prompts to during a supervised
-// session. One tool, one job: take the action claude is about to perform, ask the
-// ai-code server, and block until a person answers.
+// session. Its main job: take the action claude is about to perform, ask the
+// ai-code server, and block until a person answers. Its second tool, `draft_task`,
+// proposes a task to the project and is itself gated like any other action.
 //
 // It is a stdio server in the shape MCP describes - newline-delimited JSON-RPC 2.0
 // on stdin and stdout - written against node's builtins rather than against
@@ -37,6 +38,12 @@ const CLIENT_TIMEOUT_MS = SERVER_TIMEOUT_MS + 15000;
 // src/agents.mjs, which is what writes the `mcp__<server>__<tool>` value into the
 // argv - a mismatch is a session that can ask for nothing.
 const TOOL_NAME = 'approve';
+// The session's one route into the project's task list. It proposes rather than
+// creates: the draft lands in the approval queue every other drafting pass writes
+// to, and becomes a task only when a person approves it there. Without it, an agent
+// asked to "create a task" reached for claude's own TaskCreate - a todo list that
+// dies with the turn - and reported a task that never existed.
+const DRAFT_TOOL = 'draft_task';
 
 // Everything this process writes is diagnostics. stdout is the protocol, so a
 // stray line on it corrupts a frame; stderr is where a person debugging a session
@@ -96,6 +103,31 @@ async function decide(args) {
   return deny(decision?.message || 'Denied.');
 }
 
+// The draft, posted to the server, and the sentence the agent reports back from.
+// A failure is returned as an error result rather than thrown: the agent has to be
+// able to tell the person the draft did not land, or it will say that it did.
+async function draftTask(args) {
+  if (!ENDPOINT || !SESSION) return { ok: false, text: 'This session has no endpoint, so no task was drafted.' };
+  let res;
+  try {
+    res = await fetch(`${ENDPOINT}/api/sessions/${SESSION}/drafts`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: args?.title, description: args?.description }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (e) {
+    note(`draft: no answer from ${ENDPOINT}: ${e.message}`);
+    return { ok: false, text: 'The ai-code server did not answer, so no task was drafted.' };
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) return { ok: false, text: `No task was drafted: ${body.error || `the server answered ${res.status}`}.` };
+  return {
+    ok: true,
+    text: `Drafted "${body.draft.title}" into the ${body.project} project's approval queue. It is a draft, not a task: it becomes a task when the person approves it in the dashboard.`,
+  };
+}
+
 // A human-readable one-liner for the prompt the dashboard shows. Written here
 // rather than server-side because this is where the tool input is, and the server
 // stores the input verbatim - a summary derived at write time could not be
@@ -145,8 +177,29 @@ async function handle(msg) {
             required: ['tool_name', 'input'],
           },
         },
+        {
+          name: DRAFT_TOOL,
+          description:
+            "Propose a task to this AI Code project. Use it when the person asks for a task, or when the work left is task-shaped. The draft lands in the project's approval queue and becomes a task only when the person approves it. One task per call.",
+          inputSchema: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: 'The task in a few words.' },
+              description: {
+                type: 'string',
+                description: 'The full brief a planner will work from: what is wrong, where, what done looks like, and anything to check first.',
+              },
+            },
+            required: ['title', 'description'],
+          },
+        },
       ],
     });
+  }
+  if (method === 'tools/call' && params?.name === DRAFT_TOOL) {
+    const out = await draftTask(params.arguments || {});
+    note(`draft ${out.ok ? 'landed' : 'failed'}`);
+    return reply(id, { content: [{ type: 'text', text: out.text }], isError: !out.ok });
   }
   if (method === 'tools/call') {
     const args = params?.arguments || {};

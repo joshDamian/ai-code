@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Port Diff Prototype</title>
+<style>
+/* Tokens copied from web/index.html so the prototype reads as the app does. */
+:root{
+  --bg:#0a0c10;--text:#edf2f7;--muted:#8e9aaa;--accent:#9fb9ff;--accent-dim:#4a6fa5;--on-accent:#0b0d10;
+  --radius:10px;--radius-sm:6px;
+  --font-ui:-apple-system,BlinkMacSystemFont,"Inter",ui-sans-serif,system-ui,sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --text-xs:11px;--text-sm:12.5px;--text-md:14px;--text-lg:16px;--text-xl:20px;
+  --surface-sunken:#090b0e;--surface-0:#0b0e12;--surface-1:#11151b;--surface-2:#171c23;--surface-3:#1d232c;
+  --line:#29313c;--line-strong:#39424f;--wash:rgba(255,255,255,.02);
+  --shadow-1:0 1px 2px rgba(0,0,0,.30);
+  --good:#6fe0a1;--good-bg:rgba(111,224,161,.10);--good-line:#2c5c46;
+  --warn:#ffd37a;--warn-bg:rgba(255,211,122,.10);--warn-line:#5c4f2c;
+  --bad:#ff8585;--bad-bg:rgba(255,133,133,.10);--bad-line:#5c2c2c;
+  --info:#9fb9ff;--info-bg:rgba(159,185,255,.10);--info-line:#4a6fa5;
+  --ease:cubic-bezier(.2,.7,.3,1);--dur-fast:.12s;
+  --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-6:24px;--space-7:32px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:var(--text-md)/1.5 var(--font-ui);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+h3{font-size:var(--text-md);color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:0;font-weight:650}
+code{font-family:var(--font-mono);font-size:var(--text-sm)}
+.muted{color:var(--muted)}
+.page{max-width:1180px;margin:0 auto;padding:var(--space-6) var(--space-4) 80px}
+.card{background:var(--surface-1);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-4);box-shadow:var(--shadow-1)}
+.btn{display:inline-flex;align-items:center;gap:var(--space-2);border-radius:var(--radius-sm);cursor:pointer;background:var(--surface-2);color:var(--text);border:1px solid var(--line);padding:var(--space-1) var(--space-3);font-size:var(--text-xs);font-weight:600}
+.btn:hover{border-color:var(--line-strong)}
+.btn.on{color:var(--accent);border-color:var(--accent-dim)}
+.seg{display:inline-flex}
+.seg .btn{border-radius:0}
+.seg .btn:first-child{border-radius:var(--radius-sm) 0 0 var(--radius-sm)}
+.seg .btn:last-child{border-radius:0 var(--radius-sm) var(--radius-sm) 0;margin-left:-1px}
+
+/* ---- prototype chrome ---- */
+.proto-bar{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap;margin-bottom:var(--space-5)}
+.proto-bar h1{font-size:var(--text-xl);margin:0}
+.proto-note{color:var(--muted);font-size:var(--text-sm);margin:var(--space-1) 0 0}
+.notes{margin-top:var(--space-5);display:grid;gap:var(--space-2);font-size:var(--text-sm);color:var(--muted)}
+.notes b{color:var(--text);font-weight:600}
+
+/* ---- BEFORE: the current viewer, verbatim ---- */
+.diff-viewer{background:var(--surface-sunken);border:1px solid var(--line);border-radius:var(--radius);overflow:auto;max-height:520px;font-family:var(--font-mono);font-size:var(--text-sm)}
+.diff-line{display:flex;gap:var(--space-3);padding:1px var(--space-3)}
+.diff-lineno{color:var(--muted);width:36px;text-align:right;flex:0 0 auto;user-select:none}
+.diff-text{white-space:pre-wrap;overflow-wrap:anywhere;flex:1 1 auto;min-width:0}
+.diff-add{background:var(--good-bg);color:var(--good)}
+.diff-del{background:var(--bad-bg);color:var(--bad)}
+.diff-hunk{color:var(--accent);background:var(--info-bg)}
+.diff-file,.diff-meta{color:var(--muted)}
+
+/* ---- AFTER ---- */
+/* The summary line and the controls. The summary is the answer to "how big is this"
+   before a single line is read. */
+.cd-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap;margin-bottom:var(--space-3)}
+.cd-sum{display:flex;align-items:baseline;gap:var(--space-2);flex-wrap:wrap}
+.cd-sum h3{margin-right:var(--space-1)}
+.cd-sum .n{font-size:var(--text-sm);color:var(--text)}
+.add-n{color:var(--good);font-family:var(--font-mono);font-size:var(--text-sm)}
+.del-n{color:var(--bad);font-family:var(--font-mono);font-size:var(--text-sm)}
+.cd-ctrl{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap}
+
+/* Two columns: the file list is the table of contents, the diff is the body. The
+   list is sticky so any file is one click away however far down the reader is. */
+.cd-body{display:grid;grid-template-columns:240px minmax(0,1fr);gap:var(--space-4);align-items:start}
+.cd-nav{position:sticky;top:var(--space-4);background:var(--surface-0);border:1px solid var(--line);border-radius:var(--radius);padding:var(--space-2);max-height:calc(100vh - 32px);overflow:auto}
+.cd-nav-item{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:var(--space-2);align-items:center;padding:6px var(--space-2);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--text-sm);border:0;background:none;width:100%;text-align:left}
+.cd-nav-item:hover{background:var(--surface-2)}
+.cd-nav-item.active{background:var(--surface-3)}
+.cd-nav-item.viewed .nav-name{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line-strong)}
+.nav-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:var(--text-xs)}
+.nav-dir{color:var(--muted)}
+.nav-count{font-family:var(--font-mono);font-size:10.5px;color:var(--muted);white-space:nowrap}
+
+/* The status letter, in the tone of what happened to the file. */
+.st{display:inline-grid;place-items:center;width:16px;height:16px;border-radius:4px;font:700 10px/1 var(--font-mono);border:1px solid}
+.st-M{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-line)}
+.st-A{color:var(--good);background:var(--good-bg);border-color:var(--good-line)}
+.st-D{color:var(--bad);background:var(--bad-bg);border-color:var(--bad-line)}
+.st-R{color:var(--info);background:var(--info-bg);border-color:var(--info-line)}
+.st-U{color:var(--good);background:transparent;border-color:var(--good-line);border-style:dashed}
+
+.cd-files{display:grid;gap:var(--space-4);min-width:0}
+.cd-files>*{min-width:0}
+
+/* One file, one box. The border and the gap between boxes are the demarcation:
+   a file ends where its box does, with the page showing through before the next. */
+.cd-file{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface-sunken);scroll-margin-top:var(--space-4)}
+.cd-file.viewed{border-color:var(--surface-3)}
+.cd-fh{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:var(--space-2);padding:var(--space-2) var(--space-3);background:var(--surface-2);border-bottom:1px solid var(--line);border-radius:var(--radius) var(--radius) 0 0;min-height:40px}
+.cd-file.collapsed .cd-fh{border-bottom-color:transparent;border-radius:var(--radius)}
+.chev{width:20px;height:20px;display:grid;place-items:center;border:0;background:none;color:var(--muted);cursor:pointer;border-radius:4px;flex:0 0 auto;transition:transform var(--dur-fast) var(--ease)}
+.chev:hover{background:var(--surface-3);color:var(--text)}
+.cd-file.collapsed .chev{transform:rotate(-90deg)}
+.fpath{font-family:var(--font-mono);font-size:var(--text-sm);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+.fpath bdi{direction:ltr}
+.fpath .dir{color:var(--muted)}
+.fpath .base{color:var(--text);font-weight:600}
+.fpath .from{color:var(--muted);text-decoration:line-through}
+.fmeta{margin-left:auto;display:flex;align-items:center;gap:var(--space-3);flex:0 0 auto}
+.bar{display:inline-flex;gap:1px}
+.bar i{width:7px;height:7px;border-radius:1.5px;background:var(--line)}
+.bar i.a{background:var(--good)}
+.bar i.d{background:var(--bad)}
+.viewed-box{display:inline-flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--muted);cursor:pointer;user-select:none;border:1px solid var(--line);border-radius:var(--radius-sm);padding:2px var(--space-2);background:var(--surface-1)}
+.viewed-box input{margin:0;accent-color:var(--accent)}
+.cd-file.viewed .viewed-box{color:var(--accent);border-color:var(--accent-dim)}
+.icon-btn{border:0;background:none;color:var(--muted);cursor:pointer;padding:2px;border-radius:4px;display:grid;place-items:center}
+.icon-btn:hover{color:var(--text);background:var(--surface-3)}
+
+.cd-code{font-family:var(--font-mono);font-size:var(--text-sm);overflow-x:auto;border-radius:0 0 var(--radius) var(--radius)}
+.cd-file.collapsed .cd-code{display:none}
+.row{display:grid;grid-template-columns:44px 44px 16px minmax(0,1fr)}
+.row>span{padding:1px 0}
+.ln{color:var(--muted);text-align:right;padding-right:var(--space-2)!important;user-select:none;opacity:.7}
+.sign{user-select:none;text-align:center;color:var(--muted)}
+.txt{white-space:pre-wrap;overflow-wrap:anywhere;padding-right:var(--space-3)!important;min-width:0}
+.row.add{background:var(--good-bg)}
+.row.add .sign,.row.add .txt{color:var(--good)}
+.row.add{box-shadow:inset 3px 0 0 var(--good)}
+.row.del{background:var(--bad-bg)}
+.row.del .sign,.row.del .txt{color:var(--bad)}
+.row.del{box-shadow:inset 3px 0 0 var(--bad)}
+/* The hunk header is where the file is cut, so it reads as a seam: a divider with
+   the enclosing function named, instead of the raw @@ coordinates. */
+.hunk{display:flex;align-items:center;gap:var(--space-2);padding:4px var(--space-3);background:var(--info-bg);color:var(--info);font-size:var(--text-xs);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.hunk:first-child{border-top:0}
+.hunk .fn{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hunk .coords{margin-left:auto;color:var(--muted);opacity:.7;white-space:nowrap}
+.note{padding:var(--space-3);color:var(--muted);font-family:var(--font-ui);font-size:var(--text-sm);display:flex;gap:var(--space-2);align-items:center}
+.note b{color:var(--text);font-weight:600}
+
+/* Split view: each side is its own number + text pair. */
+.srow{display:grid;grid-template-columns:44px minmax(0,1fr) 44px minmax(0,1fr)}
+.srow>span{padding:1px 0}
+.srow .txt{padding-left:var(--space-2)!important}
+.srow .l.del{background:var(--bad-bg);color:var(--bad)}
+.srow .l.add{background:var(--good-bg);color:var(--good)}
+.srow .blank{background:var(--wash)}
+.srow .ln.r{border-left:1px solid var(--line)}
+
+@media (max-width:820px){
+  .cd-body{grid-template-columns:minmax(0,1fr)}
+  .cd-nav{position:static;max-height:none}
+  .row{grid-template-columns:36px 36px 14px minmax(0,1fr)}
+  .fmeta .bar,.fmeta .sim,.cd-fh .icon-btn{display:none}
+  .card{padding:var(--space-3)}
+  .cd-fh{padding:var(--space-2)}
+}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="proto-bar">
+    <div>
+      <h1>Port tab · the change</h1>
+      <p class="proto-note">Prototype. Same diff, same tokens as the app. Toggle to compare.</p>
+    </div>
+    <div class="seg" role="group" aria-label="Compare">
+      <button class="btn" id="show-before">Current</button>
+      <button class="btn on" id="show-after">Proposed</button>
+    </div>
+  </div>
+
+  <section class="card" id="before" hidden>
+    <h3 style="margin-bottom:var(--space-2)">The change (not committed yet)</h3>
+    <div class="diff-viewer" id="before-body"></div>
+  </section>
+
+  <section class="card" id="after">
+    <div class="cd-head">
+      <div class="cd-sum">
+        <h3>The change</h3>
+        <span class="n" id="sum-files"></span>
+        <span class="add-n" id="sum-add"></span>
+        <span class="del-n" id="sum-del"></span>
+        <span class="muted" id="sum-viewed" style="font-size:var(--text-sm)"></span>
+      </div>
+      <div class="cd-ctrl">
+        <button class="btn" id="toggle-all">Collapse all</button>
+        <div class="seg" role="group" aria-label="Layout">
+          <button class="btn on" id="mode-unified">Unified</button>
+          <button class="btn" id="mode-split">Split</button>
+        </div>
+      </div>
+    </div>
+    <div class="cd-body">
+      <nav class="cd-nav" id="nav" aria-label="Changed files"></nav>
+      <div class="cd-files" id="files"></div>
+    </div>
+  </section>
+
+  <div class="notes">
+    <div><b>One box per file.</b> Border, sunken fill and a gap between boxes. A file ends where its box ends.</div>
+    <div><b>Sticky file header.</b> Status letter, dimmed directory with a bold filename, +/− counts and a 5-cell bar. It stays pinned while you scroll a long file, so you always know which file you're in.</div>
+    <div><b>Git's plumbing lines are gone.</b> <code>diff --git</code>, <code>index</code>, <code>---</code> and <code>+++</code> are replaced by the header. Renames, mode changes and binary files become a one-line note.</div>
+    <div><b>Hunks read as seams.</b> A divider that names the enclosing function, with the line range pushed to the right.</div>
+    <div><b>File list.</b> Sticky on wide screens and stacked above the diff on narrow ones. Click to jump. Files marked "Viewed" collapse and are struck through in the list.</div>
+    <div><b>Untracked files</b> (git's status lines at the end of the port diff today) get their own box that says their contents aren't shown.</div>
+  </div>
+</div>
+
+<script>
+// A realistic port diff: a modified file with two hunks, a new file, a deletion, a
+// rename with an edit, a mode change, a binary, and the porcelain tail the port view
+// appends today.
+const DIFF = `diff --git a/src/git.mjs b/src/git.mjs
+index 3f1a2b4..9c8d7e1 100644
+--- a/src/git.mjs
++++ b/src/git.mjs
+@@ -14,7 +14,9 @@ export function status(root){
+ export function protectAiCode(root){const f=path.join(root,'.git','info','exclude');
+ export function head(root){return git(root,['rev-parse','HEAD'])}
+-export function createWorktree(root,id){ensureGit(root);const base=head(root);
++// Where every worktree cut from this repository lives.
++export function worktreeRoot(root){return process.env.AI_CODE_WORKTREE_ROOT||path.join(path.dirname(root),'.ai-code-worktrees')}
++export function createWorktree(root,id){ensureGit(root);const base=head(root);const dir=path.join(worktreeRoot(root),id);
+ // A worktree shares the repo's package.json but not its node_modules (gitignored).
+ // Without this, every test step and every implementer that imports a dependency
+ // fails on ERR_MODULE_NOT_FOUND. A symlink is instant and always in sync.
+@@ -164,6 +166,11 @@ export function commitInitial(dir,msg){
+ export function removeWorktree(root,dir){return git(root,['worktree','remove','--force',dir])}
++export function removePlanWorktree(root,id){
++  const dir=planWorktreeDir(root,id);
++  if(!fs.existsSync(dir))return false;
++  try{git(root,['worktree','remove','--force',dir])}catch{fs.rmSync(dir,{recursive:true,force:true})}
++  return true;
++}
+ export function landingCommit(root,taskTip,targetTip){
+diff --git a/src/plan-tree.mjs b/src/plan-tree.mjs
+new file mode 100644
+index 0000000..a1b2c3d
+--- /dev/null
++++ b/src/plan-tree.mjs
+@@ -0,0 +1,9 @@
++import { createPlanWorktree, removePlanWorktree } from './git.mjs';
++
++// The states in which a task's planning copy is still worth having.
++export const PLAN_TREE_STATES = new Set(['CONTEXT_READY', 'PLANNING', 'AWAITING_APPROVAL']);
++
++export function release(task, root) {
++  if (PLAN_TREE_STATES.has(task.state)) return false;
++  return removePlanWorktree(root, task.id);
++}
+diff --git a/src/legacy-plan.mjs b/src/legacy-plan.mjs
+deleted file mode 100644
+index 77aa1f0..0000000
+--- a/src/legacy-plan.mjs
++++ /dev/null
+@@ -1,4 +0,0 @@
+-// Superseded by plan-tree.mjs.
+-export function legacyPlan(root) {
+-  return root;
+-}
+diff --git a/web/views/port.mjs b/web/views/port-tab.mjs
+similarity 91%
+rename from web/views/port.mjs
+rename to web/views/port-tab.mjs
+index 5e6f7a8..6d7e8f9 100644
+--- a/web/views/port.mjs
++++ b/web/views/port-tab.mjs
+@@ -41,7 +41,7 @@ function PortTab({ task, branches, busy, run, onActions }) {
+   if (error) return html\`<div class="card"><p class="error-text">\${error}</p></div>\`;
+-  if (!view) return html\`<\${Spinner} message="Reading the worktree..." />\`;
++  if (!view) return html\`<\${Spinner} message="Checking the changes..." />\`;
+
+   const conflicts = view.conflicts || [];
+diff --git a/bin/ai-code.js b/bin/ai-code.js
+old mode 100644
+new mode 100755
+diff --git a/web/icons/icon-192.png b/web/icons/icon-192.png
+index 1a2b3c4..5d6e7f8 100644
+Binary files a/web/icons/icon-192.png and b/web/icons/icon-192.png differ
+?? notes/plan-sandbox.md`;
+
+// ---- the parser. The same line rules as diffLines() in src/format.mjs, grouped
+// by file section instead of flattened.
+function parse(diff) {
+  const files = [];
+  let f = null, hunk = null, oldNo = 0, newNo = 0;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      const m = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+      f = { from: m[1], path: m[2], status: 'M', hunks: [], notes: [], add: 0, del: 0 };
+      files.push(f); hunk = null; continue;
+    }
+    if (line.startsWith('?? ')) { files.push({ path: line.slice(3), status: 'U', hunks: [], notes: [], add: 0, del: 0 }); continue; }
+    if (!f) continue;
+    if (line.startsWith('@@')) {
+      const m = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/);
+      oldNo = +m[1] - 1; newNo = +m[3] - 1;
+      hunk = { oldStart: +m[1], oldLen: +(m[2] ?? 1), newStart: +m[3], newLen: +(m[4] ?? 1), fn: m[5] || '', lines: [] };
+      f.hunks.push(hunk); continue;
+    }
+    if (!hunk) {
+      if (line.startsWith('new file')) f.status = 'A';
+      else if (line.startsWith('deleted file')) f.status = 'D';
+      else if (line.startsWith('rename from')) f.status = 'R';
+      else if (line.startsWith('old mode')) f.oldMode = line.slice(9);
+      else if (line.startsWith('new mode')) f.notes.push(`Mode changed ${f.oldMode} → ${line.slice(9)}`);
+      else if (line.startsWith('similarity')) f.similarity = line.slice(11);
+      else if (line.startsWith('Binary files')) f.notes.push('Binary file changed. Contents not shown.');
+      continue;
+    }
+    if (line.startsWith('+')) { f.add++; hunk.lines.push({ k: 'add', o: '', n: ++newNo, t: line.slice(1) }); }
+    else if (line.startsWith('-')) { f.del++; hunk.lines.push({ k: 'del', o: ++oldNo, n: '', t: line.slice(1) }); }
+    else if (line.startsWith(' ') || line === '') { hunk.lines.push({ k: 'ctx', o: ++oldNo, n: ++newNo, t: line.slice(1) }); }
+  }
+  for (const x of files) if (x.status === 'U') x.notes.push('New untracked file. It will be committed with the change, but its contents aren’t in the diff.');
+  return files;
+}
+
+// ---- BEFORE, rendered exactly as UnifiedDiff does today.
+function renderBefore() {
+  const out = [];
+  let inHunk = false, o = 0, n = 0;
+  for (const line of DIFF.split('\n')) {
+    let cls = 'diff-meta', ol = '', nl = '';
+    if (line.startsWith('diff --git ')) inHunk = false;
+    else if (line.startsWith('@@')) { cls = 'diff-hunk'; inHunk = true; const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)/); o = +m[1] - 1; n = +m[2] - 1; }
+    else if (!inHunk && (line.startsWith('--- ') || line.startsWith('+++ '))) cls = 'diff-file';
+    else if (line.startsWith('+')) { cls = 'diff-add'; nl = ++n; }
+    else if (line.startsWith('-')) { cls = 'diff-del'; ol = ++o; }
+    else if (line.startsWith(' ')) { cls = 'diff-ctx'; ol = ++o; nl = ++n; }
+    out.push(`<div class="diff-line ${cls}"><span class="diff-lineno">${ol}</span><span class="diff-lineno">${nl}</span><span class="diff-text">${esc(line) || ' '}</span></div>`);
+  }
+  document.getElementById('before-body').innerHTML = out.join('');
+}
+
+// ---- AFTER
+const files = parse(DIFF);
+const state = { split: false, collapsed: new Set(), viewed: new Set() };
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const LABEL = { M: 'Modified', A: 'Added', D: 'Deleted', R: 'Renamed', U: 'Untracked' };
+
+function splitPath(p) { const i = p.lastIndexOf('/'); return i < 0 ? ['', p] : [p.slice(0, i + 1), p.slice(i + 1)]; }
+function pathHtml(f) {
+  const [dir, base] = splitPath(f.path);
+  const from = f.status === 'R' ? `<span class="from">${esc(f.from)}</span> → ` : '';
+  return `<bdi>${from}<span class="dir">${esc(dir)}</span><span class="base">${esc(base)}</span></bdi>`;
+}
+// GitHub's five-cell bar: the share of added and deleted lines, rounded to cells.
+function bar(f) {
+  const total = f.add + f.del;
+  if (!total) return '';
+  const a = !f.add ? 0 : f.del ? Math.max(1, Math.min(4, Math.round((f.add / total) * 5))) : 5, d = 5 - a;
+  return `<span class="bar" aria-hidden="true">${'<i class="a"></i>'.repeat(a)}${'<i class="d"></i>'.repeat(d)}${'<i></i>'.repeat(Math.max(0, 5 - a - d))}</span>`;
+}
+const chev = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m3 4.5 3 3 3-3"/></svg>`;
+const copyIcon = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg>`;
+
+function unified(h) {
+  return h.lines.map((l) => `<div class="row ${l.k}"><span class="ln">${l.o}</span><span class="ln">${l.n}</span><span class="sign">${l.k === 'add' ? '+' : l.k === 'del' ? '−' : ''}</span><span class="txt">${esc(l.t) || ' '}</span></div>`).join('');
+}
+// Pairs a run of deletions with the run of additions after it, so a rewritten line
+// sits opposite its replacement.
+function split(h) {
+  const rows = []; let i = 0;
+  while (i < h.lines.length) {
+    const l = h.lines[i];
+    if (l.k === 'ctx') { rows.push([l, l]); i++; continue; }
+    const dels = [], adds = [];
+    while (i < h.lines.length && h.lines[i].k === 'del') dels.push(h.lines[i++]);
+    while (i < h.lines.length && h.lines[i].k === 'add') adds.push(h.lines[i++]);
+    for (let j = 0; j < Math.max(dels.length, adds.length); j++) rows.push([dels[j] || null, adds[j] || null]);
+  }
+  const cell = (c, side) => c
+    ? `<span class="ln ${side}">${side === 'l' ? c.o : c.n}</span><span class="txt l ${c.k === 'ctx' ? '' : c.k}">${esc(c.t) || ' '}</span>`
+    : `<span class="ln ${side} blank"></span><span class="txt blank"></span>`;
+  return rows.map(([a, b]) => `<div class="srow">${cell(a, 'l')}${cell(b, 'r')}</div>`).join('');
+}
+
+function fileHtml(f, i) {
+  const collapsed = state.collapsed.has(i) || state.viewed.has(i);
+  const body = f.hunks.length
+    ? f.hunks.map((h) => `<div class="hunk"><span>@@</span><span class="fn">${esc(h.fn) || '&nbsp;'}</span><span class="coords">${h.newLen ? `lines ${h.newStart}–${h.newStart + h.newLen - 1}` : `removed lines ${h.oldStart}–${h.oldStart + h.oldLen - 1}`}</span></div>${state.split ? split(h) : unified(h)}`).join('')
+    : '';
+  const notes = f.notes.map((n) => `<div class="note">${esc(n)}</div>`).join('');
+  const counts = f.add + f.del ? `<span class="add-n">+${f.add}</span><span class="del-n">−${f.del}</span>` : '';
+  return `<article class="cd-file ${collapsed ? 'collapsed' : ''} ${state.viewed.has(i) ? 'viewed' : ''}" id="f${i}">
+    <header class="cd-fh">
+      <button class="chev" data-toggle="${i}" aria-label="Collapse file">${chev}</button>
+      <span class="st st-${f.status}" title="${LABEL[f.status]}">${f.status}</span>
+      <span class="fpath" title="${esc(f.path)}">${pathHtml(f)}</span>
+      <button class="icon-btn" data-copy="${esc(f.path)}" title="Copy path">${copyIcon}</button>
+      <span class="fmeta">
+        ${f.similarity ? `<span class="muted sim" style="font-size:var(--text-xs)">${esc(f.similarity)} similar</span>` : ''}
+        ${counts}${bar(f)}
+        <label class="viewed-box"><input type="checkbox" data-viewed="${i}" ${state.viewed.has(i) ? 'checked' : ''}> Viewed</label>
+      </span>
+    </header>
+    <div class="cd-code">${body}${notes}</div>
+  </article>`;
+}
+
+function navHtml(f, i) {
+  const [dir, base] = splitPath(f.path);
+  const counts = f.add + f.del ? `<span class="nav-count"><span class="add-n" style="font-size:inherit">+${f.add}</span> <span class="del-n" style="font-size:inherit">−${f.del}</span></span>` : '<span class="nav-count"></span>';
+  return `<button class="cd-nav-item ${state.viewed.has(i) ? 'viewed' : ''}" data-jump="${i}" title="${esc(f.path)}"><span class="st st-${f.status}">${f.status}</span><span class="nav-name"><span class="nav-dir">${esc(dir)}</span>${esc(base)}</span>${counts}</button>`;
+}
+
+function render() {
+  const add = files.reduce((s, f) => s + f.add, 0), del = files.reduce((s, f) => s + f.del, 0);
+  document.getElementById('sum-files').textContent = `${files.length} files`;
+  document.getElementById('sum-add').textContent = `+${add}`;
+  document.getElementById('sum-del').textContent = `−${del}`;
+  document.getElementById('sum-viewed').textContent = state.viewed.size ? `· ${state.viewed.size} of ${files.length} viewed` : '';
+  document.getElementById('nav').innerHTML = files.map(navHtml).join('');
+  document.getElementById('files').innerHTML = files.map(fileHtml).join('');
+  const allCollapsed = files.every((_, i) => state.collapsed.has(i) || state.viewed.has(i));
+  document.getElementById('toggle-all').textContent = allCollapsed ? 'Expand all' : 'Collapse all';
+  document.getElementById('mode-unified').classList.toggle('on', !state.split);
+  document.getElementById('mode-split').classList.toggle('on', state.split);
+}
+
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-toggle],[data-jump],[data-copy]');
+  if (!t) return;
+  if (t.dataset.toggle != null) {
+    const i = +t.dataset.toggle;
+    if (state.viewed.has(i)) state.viewed.delete(i);
+    else state.collapsed.has(i) ? state.collapsed.delete(i) : state.collapsed.add(i);
+    render();
+  } else if (t.dataset.jump != null) {
+    const i = +t.dataset.jump;
+    state.collapsed.delete(i);
+    render();
+    document.getElementById(`f${i}`).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else if (t.dataset.copy != null) {
+    navigator.clipboard?.writeText(t.dataset.copy);
+  }
+});
+document.addEventListener('change', (e) => {
+  if (e.target.dataset.viewed == null) return;
+  const i = +e.target.dataset.viewed;
+  e.target.checked ? state.viewed.add(i) : state.viewed.delete(i);
+  render();
+});
+document.getElementById('toggle-all').onclick = () => {
+  const allCollapsed = files.every((_, i) => state.collapsed.has(i) || state.viewed.has(i));
+  state.collapsed = allCollapsed ? new Set() : new Set(files.map((_, i) => i));
+  if (allCollapsed) state.viewed.clear();
+  render();
+};
+document.getElementById('mode-unified').onclick = () => { state.split = false; render(); };
+document.getElementById('mode-split').onclick = () => { state.split = true; render(); };
+document.getElementById('show-before').onclick = () => { before.hidden = false; after.hidden = true; document.getElementById('show-before').classList.add('on'); document.getElementById('show-after').classList.remove('on'); };
+document.getElementById('show-after').onclick = () => { before.hidden = true; after.hidden = false; document.getElementById('show-after').classList.add('on'); document.getElementById('show-before').classList.remove('on'); };
+// ?split and ?viewed open the prototype straight into those states.
+if (location.search.includes('split')) state.split = true;
+if (location.search.includes('viewed')) { state.viewed.add(1); state.viewed.add(2); }
+renderBefore();
+render();
+</script>
+</body>
+</html>

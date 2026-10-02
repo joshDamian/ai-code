@@ -1,5 +1,5 @@
 // App shell: sidebar + header + content area + toast container.
-import { html, useState, useEffect, useRef } from '../lib.mjs';
+import { html, useState, useEffect, useRef, conversationsHref } from '../lib.mjs';
 import { ToastContainer } from './toast.mjs';
 
 // One 16px stroke icon per destination, drawn inline. Inline rather than a
@@ -23,10 +23,9 @@ const NAV = [
   { id: 'overview', label: 'Overview', icon: () => icon(html`<rect x="1.75" y="1.75" width="5.5" height="5.5" rx="1.6" /><rect x="8.75" y="1.75" width="5.5" height="5.5" rx="1.6" /><rect x="1.75" y="8.75" width="5.5" height="5.5" rx="1.6" /><rect x="8.75" y="8.75" width="5.5" height="5.5" rx="1.6" />`) },
   { id: 'projects', label: 'Projects', icon: () => icon(html`<path d="M2 5.25A1.75 1.75 0 0 1 3.75 3.5h2.4l1.5 2h4.6A1.75 1.75 0 0 1 14 7.25v4A1.75 1.75 0 0 1 12.25 13h-8.5A1.75 1.75 0 0 1 2 11.25z" />`) },
   { id: 'tasks', label: 'Tasks', icon: () => icon(html`<rect x="2" y="2" width="12" height="12" rx="3" /><path d="M5.4 8.2l1.9 1.9 3.6-4" />`) },
-  { id: 'chat', label: 'Chat', icon: () => icon(html`<path d="M2 3a1.75 1.75 0 0 1 1.75-1.75h8.5A1.75 1.75 0 0 1 14 3v7.25A1.75 1.75 0 0 1 12.25 12h-4L4 14.75v-2.75H3.75A1.75 1.75 0 0 1 2 10.25z" />`) },
-  // A terminal window with a prompt inside it, because that is what a supervised
-  // session is: an agent at a shell, with somebody standing at the gate.
-  { id: 'sessions', label: 'Sessions', icon: () => icon(html`<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.8" /><path d="M4.5 6.5l1.6 1.5-1.6 1.5" /><path d="M7.9 9.5h3.3" />`) },
+  // Chat and supervised sessions are one destination: a conversation is read-only or
+  // can edit, switched in place. The id stays 'sessions' because the route does.
+  { id: 'sessions', label: 'Conversations', icon: () => icon(html`<path d="M2 3a1.75 1.75 0 0 1 1.75-1.75h8.5A1.75 1.75 0 0 1 14 3v7.25A1.75 1.75 0 0 1 12.25 12h-4L4 14.75v-2.75H3.75A1.75 1.75 0 0 1 2 10.25z" />`) },
   { id: 'providers', label: 'Providers', icon: () => icon(html`<rect x="2" y="3" width="12" height="4.5" rx="1.6" /><rect x="2" y="8.5" width="12" height="4.5" rx="1.6" /><circle cx="4.9" cy="5.25" r=".9" fill="currentColor" stroke="none" /><circle cx="4.9" cy="10.75" r=".9" fill="currentColor" stroke="none" />`) },
   { id: 'routing', label: 'Routing', icon: () => icon(html`<path d="M2.5 8h3.1c1.8 0 2.8-1 2.8-2.8V3.5" /><path d="M2.5 8h3.1c1.8 0 2.8 1 2.8 2.8V12.5" /><path d="M7.05 4.9L8.4 3.5l1.35 1.4" /><path d="M7.05 11.1L8.4 12.5l1.35-1.4" />`) },
   { id: 'runs', label: 'Runs', icon: () => icon(html`<circle cx="8" cy="8" r="5.75" /><path d="M8 4.75V8l2.4 1.6" />`) },
@@ -38,7 +37,7 @@ const NAV = [
 // name slices of it by id, so a new destination cannot be added to the nav
 // without appearing in exactly one group.
 const NAV_GROUPS = [
-  { label: 'Workspace', items: ['overview', 'projects', 'tasks', 'chat', 'sessions'] },
+  { label: 'Workspace', items: ['overview', 'projects', 'tasks', 'sessions'] },
   { label: 'Ops', items: ['providers', 'routing', 'runs', 'usage'] },
   { label: 'System', items: ['settings'] },
 ];
@@ -160,7 +159,7 @@ export function Layout({ route, title, serverDown = false, onOpenPalette, onNewT
                 ${g.items.map((id) => {
                   const n = NAV.find((x) => x.id === id);
                   return html`
-                    <a key=${n.id} href="#/${n.id}" class="nav-item ${route === n.id ? 'active' : ''}" title=${n.label}>
+                    <a key=${n.id} href=${n.id === 'sessions' ? conversationsHref() : `#/${n.id}`} class="nav-item ${route === n.id ? 'active' : ''}" title=${n.label}>
                       ${n.icon()}
                       <span class="nav-item-label">${n.label}</span>
                     </a>
