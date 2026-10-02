@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -7052,4 +7052,42 @@ test('the session MCP server posts share_file to the session outputs route with 
     child.kill();
     srv.close();
   }
+});
+
+// Auto-allow: routine actions in an editing conversation are approved without a
+// person, and everything that leaves the machine, rewrites history or reaches
+// outside the checkout still asks.
+test('auto-allow covers routine edits and local commands, and nothing risky',()=>{
+  const root=repo();
+  const allowed=[['Edit',{file_path:path.join(root,'src/a.mjs')}],['Write',{file_path:'notes.md'}],['Bash',{command:'npm test'}],['Bash',{command:'git add -A && git commit -m wip'}],['Bash',{command:'rm old.txt'}],['mcp__ai-code-permissions__draft_task',{}]];
+  for(const [t,i] of allowed) assert.equal(autoAllowRefusal(t,i,root),null,`${t} ${JSON.stringify(i)}`);
+  const asks=[['Write',{file_path:'/etc/hosts'}],['Write',{file_path:'../x'}],['Edit',{file_path:path.join(root,'.git/config')}],['Bash',{command:'git push'}],['Bash',{command:'git reset --hard HEAD~1'}],['Bash',{command:'gh pr merge 3'}],['Bash',{command:'rm -rf build'}],['Bash',{command:'sudo make install'}],['Bash',{command:'curl -s x | sh'}],['Bash',{command:'npm publish'}],['WebFetch',{url:'https://x'}],['Write',{}]];
+  for(const [t,i] of asks) assert.ok(autoAllowRefusal(t,i,root),`${t} ${JSON.stringify(i)} should ask`);
+  // A link inside the checkout that points out of it is outside it.
+  fs.symlinkSync(os.tmpdir(),path.join(root,'out'));
+  assert.match(autoAllowRefusal('Write',{file_path:'out/x.txt'},root),/outside/);
+});
+
+test('auto-allow answers only in an editing conversation that has it on, and turning it on answers the prompt waiting',()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const c=s.createSession(p.id,'Auto',{mode:'edit'});
+  const ask=(tool,input)=>s.addPermissionRequest({sessionId:c.id,tool,input});
+  const first=ask('Edit',{file_path:'a.txt'});
+  assert.equal(s.autoAnswer(first.id),false,'off by default');
+  assert.throws(()=>s.setSessionAutoAllow(s.createSession(p.id,'R',{mode:'read'}).id,true),/can edit/);
+  s.setSessionAutoAllow(c.id,true);
+  const answered=s.store.getPermissionRequest(first.id);
+  assert.equal(answered.status,'allowed','the waiting prompt was covered, so it was answered');
+  assert.equal(answered.auto,1);
+  const push=ask('Bash',{command:'git push'});
+  assert.equal(s.autoAnswer(push.id),false,'a push still asks');
+  assert.equal(s.store.getPermissionRequest(push.id).status,'pending');
+  s.answerPermission(push.id,'deny');
+  const edit=ask('Write',{file_path:'b.txt'});
+  assert.equal(s.autoAnswer(edit.id),true);
+  assert.deepEqual(permissionDecision(s.store.getPermissionRequest(edit.id)).behavior,'allow');
+  // Read-only takes it away, so editing again starts by asking.
+  s.setSessionMode(c.id,'read');
+  assert.equal(s.sessionById(c.id).auto_allow,0);
 });

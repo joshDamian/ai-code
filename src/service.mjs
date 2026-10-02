@@ -1025,6 +1025,69 @@ function pendingGit(row) {
   return { level: impact.level, destructive: impact.destructive, label: top.label };
 }
 
+// Whether an action may be approved without asking, in a conversation the person
+// has put on auto-allow. Auto-allow is for the routine: edits inside the checkout
+// and commands that stay on this machine. So the rule is an allowlist of shapes,
+// and everything it does not recognise still asks - a tool added to the CLI later
+// is a prompt until somebody names it here.
+//
+// What always asks, whatever the switch says:
+// - a write outside the project's checkout;
+// - a git or gh command that leaves this machine (push, pr create, api POST) or
+//   rewrites history or deletes (reset --hard, clean, force-push, filter-branch) -
+//   the same grading the approval card shows (gitImpact);
+// - a command that reaches for privilege, deletes recursively, pipes a download
+//   into a shell, or publishes a package;
+// - any other tool (web fetches, other MCP servers).
+//
+// Returns the reason it would ask, or null when it may be allowed.
+const AUTO_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+const AUTO_ALWAYS_TOOLS = new Set(['mcp__ai-code-permissions__draft_task']);
+const RISKY_COMMAND = [
+  [/(^|[\s;&|(])(sudo|doas|su)\s/, 'it runs as another user'],
+  [/(^|[\s;&|(])rm\s+(-\S*\s+)*-\S*[rR]/, 'it deletes recursively'],
+  [/(^|[\s;&|(])(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z)?sh\b/, 'it runs a downloaded script'],
+  [/(^|[\s;&|(])(npm|pnpm|yarn|cargo|gem|twine)\s+publish\b/, 'it publishes a package'],
+  [/(^|[\s;&|(])(mkfs|dd|shutdown|reboot|halt|diskutil)\b/, 'it reaches the machine itself'],
+  [/(^|[\s;&|(])(chmod|chown)\s+(-\S*\s+)*-\S*R/, 'it changes permissions recursively'],
+];
+export function autoAllowRefusal(tool, input, root) {
+  if (AUTO_ALWAYS_TOOLS.has(tool)) return null;
+  if (AUTO_WRITE_TOOLS.has(tool)) {
+    const target = input?.file_path || input?.notebook_path || input?.path;
+    if (!target || !root) return 'it does not say which file';
+    const abs = path.resolve(root, String(target));
+    const inside = (dir, f) => f === dir || f.startsWith(dir + path.sep);
+    if (!inside(path.resolve(root), abs)) return 'it writes outside the checkout';
+    // A link in the checkout that points out of it is outside it.
+    let real = null;
+    try {
+      real = fs.realpathSync(abs);
+    } catch {
+      try {
+        real = path.join(fs.realpathSync(path.dirname(abs)), path.basename(abs));
+      } catch {}
+    }
+    let realRoot = root;
+    try {
+      realRoot = fs.realpathSync(root);
+    } catch {}
+    if (real && !inside(realRoot, real)) return 'it writes outside the checkout';
+    if (/(^|[/\\])\.git([/\\]|$)/.test(path.relative(root, abs))) return 'it writes inside .git';
+    return null;
+  }
+  if (tool === 'Bash') {
+    const command = String(input?.command || '');
+    if (!command.trim()) return 'it has no command';
+    const git = gitImpact(command);
+    if (git?.destructive) return 'it rewrites history or deletes';
+    if (git?.level === 'remote') return 'it reaches GitHub or a remote';
+    for (const [re, why] of RISKY_COMMAND) if (re.test(command)) return why;
+    return null;
+  }
+  return `${tool} is not a routine action`;
+}
+
 export function permissionDecision(row) {
   if (row?.status === 'allowed') return { behavior: 'allow', updatedInput: parseJson(row.input) ?? {} };
   const message =
@@ -2377,7 +2440,36 @@ export class Service {
       const holder = this.checkoutHolder(s.project_id, id);
       if (holder) throw Object.assign(new Error(`"${holder.name}" can already edit this project. Switch it to read-only first.`), { code: 'CONFLICT', holder: holder.id });
     }
-    return this.store.updateSession(id, { mode });
+    // Back to read-only takes auto-allow with it, so the next time it can edit it
+    // starts by asking - the switch was a choice about that stretch of editing.
+    return this.store.updateSession(id, mode === 'read' ? { mode, auto_allow: 0 } : { mode });
+  }
+
+  // Auto-allow on or off, for an editing conversation. Turning it on also answers
+  // the prompt already waiting, when the rule covers it: a person who flips the
+  // switch while a routine edit is waiting on them meant that edit too.
+  setSessionAutoAllow(id, on) {
+    const s = this.sessionById(id);
+    if (on && s.mode !== 'edit') throw new Error('Auto-allow is for conversations that can edit');
+    const updated = this.store.updateSession(id, { auto_allow: on ? 1 : 0 });
+    if (on) {
+      const pending = this.store.pendingPermission(id);
+      if (pending && this.autoAnswer(pending.id)) this.resolvePermission(pending.id);
+    }
+    return updated;
+  }
+
+  // Answers a request without a person when its conversation is on auto-allow and
+  // the rule covers it. True when it answered, and the row then says so.
+  autoAnswer(reqId) {
+    const r = this.store.getPermissionRequest(reqId);
+    if (!r || r.status !== 'pending') return false;
+    const s = this.store.getSession(r.session_id);
+    if (!s?.auto_allow || s.mode !== 'edit') return false;
+    const project = this.store.getProject(s.project_id);
+    if (autoAllowRefusal(r.tool, parseJson(r.input), project?.path || null)) return false;
+    this.store.updatePermissionRequest(reqId, { status: 'allowed', answered_at: new Date().toISOString(), auto: 1 });
+    return true;
   }
 
   listSessions(projectId) {

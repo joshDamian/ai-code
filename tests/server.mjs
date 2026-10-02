@@ -2170,3 +2170,21 @@ test('a shared file is served back from the outputs route, and only from this ma
     assert.match((await fetch1('page.html')).headers['content-disposition'],/^attachment/,'HTML downloads');
   }finally{srv.stop()}
 });
+
+test('a conversation on auto-allow gets its routine actions answered at once, over HTTP',async()=>{
+  const root=gitRepo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const session=s.createSession(p.id,'auto',{mode:'edit'});
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const on=await new Promise((res,rej)=>{const r=http.request(`${srv.base}/api/sessions/${session.id}`,{method:'PATCH',headers:{'content-type':'application/json'}},(x)=>{let b='';x.on('data',(c)=>b+=c);x.on('end',()=>res({status:x.statusCode,body:b}))});r.on('error',rej);r.end(JSON.stringify({autoAllow:true}))});
+    assert.equal(on.status,200,on.body);
+    assert.equal(JSON.parse(on.body).auto_allow,1);
+    const r=await post(`${srv.base}/api/sessions/${session.id}/permissions`,{tool:'Bash',input:{command:'npm test'},cwd:root});
+    assert.equal(r.status,200);
+    assert.equal(JSON.parse(r.body).behavior,'allow','answered without anyone being asked');
+    const history=JSON.parse((await get(`${srv.base}/api/sessions/${session.id}/permissions`)).body).history;
+    assert.deepEqual(history.map((h)=>[h.status,h.auto]),[['allowed',1]]);
+  }finally{srv.stop()}
+});
