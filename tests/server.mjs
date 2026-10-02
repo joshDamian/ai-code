@@ -2109,3 +2109,32 @@ test('a conversation switches mode over PATCH, and a second editor is refused wi
     assert.deepEqual(listed.filter((x)=>x.mode==='edit').map((x)=>x.name),['A']);
   }finally{s.stop()}
 });
+
+// A message with files, over HTTP: the files arrive inlined, the transcript names
+// them, and each one is served back by its turn and name - an image inline, anything
+// else as a download, and nothing outside the turn's folder at all.
+test('a session message with attachments is stored and served back',async()=>{
+  const root=gitRepo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'session-provider',name:'Session',kind:'mock',enabled:true,config:{routable:true,chatText:'Saw it.'}});
+  s.addModel({id:'session-m',providerId:'session-provider',name:'session',capabilities:['coding','planning'],speed:10,quality:10,cost:0,contextLength:100000});
+  const session=s.createSession(p.id,'files');
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const r=await post(`${srv.base}/api/sessions/${session.id}/messages`,{message:'',attachments:[{name:'shot.png',type:'image/png',data:'data:image/png;base64,iVBORw0KGgo='},{name:'page.html',type:'text/html',data:Buffer.from('<script>1</script>').toString('base64')}]});
+    assert.equal(r.status,202,r.body);
+    const runId=JSON.parse(r.body).session.pending_run_id;
+    const fetch1=(name)=>new Promise((res,rej)=>http.get(`${srv.base}/api/sessions/${session.id}/attachments/${runId}/${encodeURIComponent(name)}`,(x)=>{let b=[];x.on('data',(c)=>b.push(c));x.on('end',()=>res({status:x.statusCode,headers:x.headers,body:Buffer.concat(b)}))}).on('error',rej));
+    const img=await fetch1('shot.png');
+    assert.equal(img.status,200);
+    assert.equal(img.headers['content-type'],'image/png');
+    assert.match(img.headers['content-disposition'],/^inline/);
+    assert.equal(img.body.toString('base64'),'iVBORw0KGgo=');
+    const page=await fetch1('page.html');
+    assert.match(page.headers['content-disposition'],/^attachment/,'an HTML file is never rendered on this origin');
+    assert.equal((await fetch1('..%2F..%2Fai-code.db')).status,404);
+    assert.equal((await post(`${srv.base}/api/sessions/${session.id}/messages`,{message:''})).status,400,'an empty message with no files is still refused');
+  }finally{srv.stop()}
+});
