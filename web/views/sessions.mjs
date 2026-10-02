@@ -67,6 +67,8 @@ const COMPOSER_MAX_PX = 200;
 // that would be refused is refused here, before it is read into memory and sent.
 const ATTACH = { files: 10, bytes: 10 * 1024 * 1024, total: 25 * 1024 * 1024 };
 const isImage = (type) => /^image\/(png|jpe?g|gif|webp)$/.test(type || '');
+const isVideo = (type) => /^video\/(mp4|webm)$/.test(type || '');
+const isAudio = (type) => /^audio\/(mpeg|wav|ogg|mp4)$/.test(type || '');
 const formatBytes = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
 
 const readAsDataUrl = (file) =>
@@ -179,20 +181,41 @@ function AttachTray({ files, onRemove, disabled }) {
   `;
 }
 
+// One file in the transcript: an image, a player, or a chip that downloads it.
+function FileItem({ f, src }) {
+  if (src && isImage(f.type)) return html`<a href=${src} target="_blank" rel="noopener" title=${f.caption || f.name}><img src=${src} alt=${f.caption || f.name} loading="lazy" /></a>`;
+  if (src && isVideo(f.type)) return html`<video src=${src} controls preload="metadata" title=${f.caption || f.name}></video>`;
+  if (src && isAudio(f.type)) return html`<audio src=${src} controls preload="metadata" title=${f.caption || f.name}></audio>`;
+  return html`<a class="ss-chip" href=${src || undefined} target="_blank" rel="noopener" download=${f.name} title=${`${f.name}${f.size ? ` · ${formatBytes(f.size)}` : ''}`}>
+    <span class="ss-chip-ext">${(f.name.split('.').pop() || 'file').slice(0, 4)}</span><span class="ss-chip-name">${f.name}</span>
+  </a>`;
+}
+
 // The files a sent message carried, under its text. A stored turn links each one to
 // the server's copy; the turn just sent shows the previews it was sent with.
 function SentFiles({ files, sessionId, runId }) {
   if (!files?.length) return null;
   return html`
     <div class="ss-said-files">
-      ${files.map((f) => {
-        const src = f.data || (sessionId && runId ? withToken(api.sessionAttachmentUrl(sessionId, runId, f.name)) : null);
-        return isImage(f.type) && src
-          ? html`<a key=${f.name} href=${src} target="_blank" rel="noopener" title=${f.name}><img src=${src} alt=${f.name} loading="lazy" /></a>`
-          : html`<a key=${f.name} class="ss-chip" href=${src || undefined} target="_blank" rel="noopener" title=${`${f.name}${f.size ? ` · ${formatBytes(f.size)}` : ''}`}>
-              <span class="ss-chip-ext">${(f.name.split('.').pop() || 'file').slice(0, 4)}</span><span class="ss-chip-name">${f.name}</span>
-            </a>`;
-      })}
+      ${files.map((f) => html`<${FileItem} key=${f.name} f=${f} src=${f.data || (sessionId && runId ? withToken(api.sessionAttachmentUrl(sessionId, runId, f.name)) : null)} />`)}
+    </div>
+  `;
+}
+
+// What the agent shared back with its share_file tool, under its reply, each with
+// the caption it gave.
+function SharedFiles({ files, sessionId, runId }) {
+  if (!files?.length || !sessionId || !runId) return null;
+  return html`
+    <div class="ss-shared-files">
+      ${files.map(
+        (f) => html`
+          <figure key=${f.name}>
+            <${FileItem} f=${f} src=${withToken(api.sessionAttachmentUrl(sessionId, runId, f.name, 'outputs'))} />
+            ${f.caption ? html`<figcaption>${f.caption}</figcaption>` : null}
+          </figure>
+        `
+      )}
     </div>
   `;
 }
@@ -639,6 +662,7 @@ function Turn({ t, live, root, sessionId, children }) {
               </button>
               ${open ? html`<${Steps} steps=${steps} root=${root} />` : null}
               ${t.answer ? html`<${Markdown} text=${t.answer} className="md ss-md" />` : null}
+              <${SharedFiles} files=${t.outputs} sessionId=${sessionId} runId=${t.run_id} />
               ${failure ? html`<div class="ss-failure">${failure}</div>` : null}
             </div>
           `}

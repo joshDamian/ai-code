@@ -44,6 +44,12 @@ const TOOL_NAME = 'approve';
 // asked to "create a task" reached for claude's own TaskCreate - a todo list that
 // dies with the turn - and reported a task that never existed.
 const DRAFT_TOOL = 'draft_task';
+// The session's one way to show the person a file rather than describe it: a
+// screenshot it took, a chart it drew, a file it generated. The server copies the
+// file into the turn, and the transcript shows it under the reply. A path written
+// in the reply text is not shown - the dashboard may be a phone, and the path is
+// on this machine.
+const SHARE_TOOL = 'share_file';
 
 // Everything this process writes is diagnostics. stdout is the protocol, so a
 // stray line on it corrupts a frame; stderr is where a person debugging a session
@@ -128,6 +134,27 @@ async function draftTask(args) {
   };
 }
 
+// The file, handed to the server to copy into this turn. The working directory goes
+// with it so a relative path means what the agent meant by it.
+async function shareFile(args) {
+  if (!ENDPOINT || !SESSION) return { ok: false, text: 'This session has no endpoint, so nothing was shared.' };
+  let res;
+  try {
+    res = await fetch(`${ENDPOINT}/api/sessions/${SESSION}/outputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: args?.path, caption: args?.caption, cwd: process.cwd() }),
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch (e) {
+    note(`share: no answer from ${ENDPOINT}: ${e.message}`);
+    return { ok: false, text: 'The ai-code server did not answer, so the file was not shared.' };
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) return { ok: false, text: `The file was not shared: ${body.error || `the server answered ${res.status}`}.` };
+  return { ok: true, text: `Shared ${body.output.name} (${body.output.type}). The person sees it under your reply; do not repeat its path.` };
+}
+
 // A human-readable one-liner for the prompt the dashboard shows. Written here
 // rather than server-side because this is where the tool input is, and the server
 // stores the input verbatim - a summary derived at write time could not be
@@ -193,12 +220,30 @@ async function handle(msg) {
             required: ['title', 'description'],
           },
         },
+        {
+          name: SHARE_TOOL,
+          description:
+            'Show the person a file: an image, screenshot, chart, video, audio clip, PDF or any generated file. It appears under your reply in the dashboard, images and media inline. Use it whenever the answer is something to look at - a file path in your reply is not shown to the person. The file must be in the project checkout, the temp directory, or this conversation\'s attachments, and at most 10 MB. One file per call.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: 'The file to show, absolute or relative to the working directory.' },
+              caption: { type: 'string', description: 'Optional: a short line saying what it shows.' },
+            },
+            required: ['path'],
+          },
+        },
       ],
     });
   }
   if (method === 'tools/call' && params?.name === DRAFT_TOOL) {
     const out = await draftTask(params.arguments || {});
     note(`draft ${out.ok ? 'landed' : 'failed'}`);
+    return reply(id, { content: [{ type: 'text', text: out.text }], isError: !out.ok });
+  }
+  if (method === 'tools/call' && params?.name === SHARE_TOOL) {
+    const out = await shareFile(params.arguments || {});
+    note(`share ${out.ok ? 'landed' : 'failed'}`);
     return reply(id, { content: [{ type: 'text', text: out.text }], isError: !out.ok });
   }
   if (method === 'tools/call') {

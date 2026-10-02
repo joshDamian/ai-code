@@ -1097,11 +1097,12 @@ const server = http.createServer(async (req, res) => {
     // A turn's attached file, for the transcript to show: the session, the turn and
     // the file's name. Its own pattern, because it is the one session route with two
     // segments after the verb.
-    const attachment = u.pathname.match(/^\/api\/sessions\/([^/]+)\/attachments\/([^/]+)\/([^/]+)$/);
+    // `outputs` is the same for what the agent shared back.
+    const attachment = u.pathname.match(/^\/api\/sessions\/([^/]+)\/(attachments|outputs)\/([^/]+)\/([^/]+)$/);
     if (attachment && req.method === 'GET') {
       let file;
       try {
-        file = svc.sessionAttachment(attachment[1], decodeURIComponent(attachment[2]), decodeURIComponent(attachment[3]));
+        file = svc.sessionAttachment(attachment[1], decodeURIComponent(attachment[3]), decodeURIComponent(attachment[4]), attachment[2] === 'outputs' ? 'out' : 'in');
       } catch (e) {
         return json(res, { error: e.message }, 404);
       }
@@ -1109,14 +1110,14 @@ const server = http.createServer(async (req, res) => {
         'content-type': file.type,
         'cache-control': 'private, max-age=86400',
         'x-content-type-options': 'nosniff',
-        // Shown inline only when it is an image; anything else downloads, so an
-        // attached HTML or SVG file is never rendered on this origin.
-        'content-disposition': `${/^image\/(png|jpe?g|gif|webp)$/.test(file.type) ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+        // Shown inline only when it is an image, a video or audio; anything else
+        // downloads, so an HTML or SVG file is never rendered on this origin.
+        'content-disposition': `${/^(image\/(png|jpe?g|gif|webp)|video\/(mp4|webm)|audio\/(mpeg|wav|ogg|mp4))$/.test(file.type) ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.name)}`,
       });
       return fs.createReadStream(file.path).pipe(res);
     }
 
-    const session = u.pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(messages|stream|archive|cancel|resume|permissions|draft-task|drafts|nudge)(?:\/([^/]+))?)?$/);
+    const session = u.pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(messages|stream|archive|cancel|resume|permissions|draft-task|drafts|nudge|outputs)(?:\/([^/]+))?)?$/);
     if (session) {
       const id = session[1];
       const what = session[2] || null;
@@ -1211,6 +1212,19 @@ const server = http.createServer(async (req, res) => {
 
       if (what === 'nudge' && req.method === 'POST') {
         return json(res, svc.dismissNudge(id));
+      }
+
+      // The session agent's `share_file` tool. Local only, like drafts below: the
+      // caller is the MCP process beside the agent, and the path it names is a path
+      // on this machine.
+      if (what === 'outputs' && !rest && req.method === 'POST') {
+        if (!fromLocalhost(req)) return json(res, { error: 'Files can only be shared from this machine.' }, 403);
+        const b = await body(req);
+        try {
+          return json(res, { output: svc.shareFromSession(id, { path: b.path, caption: b.caption, cwd: b.cwd }) }, 201);
+        } catch (e) {
+          return json(res, { error: e.message }, 400);
+        }
       }
 
       // The session agent's `draft_task` tool. Local only, for the reason the

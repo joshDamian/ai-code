@@ -6158,7 +6158,7 @@ test('the session MCP server lists draft_task and posts it to the session drafts
     });
   try {
     const list = await call(1, 'tools/list', {});
-    assert.deepEqual(list.result.tools.map((t) => t.name), ['approve', 'draft_task']);
+    assert.deepEqual(list.result.tools.map((t) => t.name), ['approve', 'draft_task', 'share_file']);
     const done = await call(2, 'tools/call', { name: 'draft_task', arguments: { title: 'Fix email dedupe', description: 'Collation and validator.' } });
     assert.equal(done.result.isError, false);
     assert.match(done.result.content[0].text, /Drafted "Fix email dedupe" into the Novara project's approval queue/);
@@ -6277,7 +6277,11 @@ test('a read-only turn carries the gate and the app tools, still in plan mode', 
   assert.equal(argv.filter((x) => x === '--mcp-config').length, 1);
   // An editing turn gets the app tools beside its gate.
   const edit = claudeArgs({ role: 'session', model: 'm', prompt: 'p', permissionTool: 'mcp__ai-code-permissions__approve', mcpConfig: '/gate.json', appMcp: app });
-  assert.deepEqual(edit.slice(edit.indexOf('--allowedTools') + 1, edit.indexOf('--')), app.tools);
+  assert.deepEqual(edit.slice(edit.indexOf('--allowedTools') + 1, edit.indexOf('--')), [...app.tools, 'mcp__ai-code-permissions__share_file'], 'and share_file beside them, unasked');
+  assert.deepEqual(argv.slice(argv.indexOf('--allowedTools') + 1, argv.indexOf('--')), [...app.tools, 'mcp__ai-code-permissions__share_file'], 'a read-only turn may share too');
+  // Without the gate there is no share_file to allow.
+  const bare = claudeArgs({ role: 'chat', model: 'm', prompt: 'p', appMcp: app });
+  assert.ok(!bare.includes('mcp__ai-code-permissions__share_file'));
   assert.ok(!edit.includes('--dangerously-skip-permissions'));
 });
 
@@ -6980,4 +6984,72 @@ test('claudeArgs grants each extra directory with its own --add-dir',()=>{
   assert.deepEqual(a.filter((x,i)=>a[i-1]==='--add-dir'),['/data/a','/data/b']);
   assert.ok(a.indexOf('--add-dir')<a.indexOf('--'),'before the prompt separator');
   assert.equal(claudeArgs({role:'chat',prompt:'p'}).includes('--add-dir'),false);
+});
+
+// The other direction: the agent shows the person a file. The server copies it into
+// the turn, from the checkout, the temp directory or the conversation's own
+// attachments and nowhere else, and the transcript lists it under the reply.
+test('a session turn can share files back, only from places it may read',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  const c=s.createSession(p.id,'Outputs');
+  fs.writeFileSync(path.join(root,'chart.png'),Buffer.from('89504e47','hex'));
+  assert.throws(()=>s.shareFromSession(c.id,{path:'chart.png'}),/no turn in progress/);
+  const runId=s.askSession(c.id,'draw a chart').pending_run_id;
+  const a=s.shareFromSession(c.id,{path:'chart.png',caption:'Spend by day'});
+  assert.deepEqual(a,{name:'chart.png',type:'image/png',size:4,caption:'Spend by day'});
+  const tmp=path.join(os.tmpdir(),`ai-code-share-${process.pid}.mp4`);fs.writeFileSync(tmp,'video');
+  try{
+    assert.equal(s.shareFromSession(c.id,{path:tmp}).type,'video/mp4','a temp file is fine');
+  }finally{fs.rmSync(tmp,{force:true})}
+  assert.equal(s.shareFromSession(c.id,{path:path.join(root,'chart.png')}).name,'chart-2.png','a second share of a name keeps both');
+  // Outside the checkout and temp: refused, and a link inside the checkout is no way out.
+  const outside=fs.mkdtempSync(path.join(os.homedir(),'.ai-code-share-test-'));
+  try{
+    fs.writeFileSync(path.join(outside,'secret'),'x');
+    assert.throws(()=>s.shareFromSession(c.id,{path:path.join(outside,'secret')}),/Only files in/);
+    fs.symlinkSync(path.join(outside,'secret'),path.join(root,'link'));
+    assert.throws(()=>s.shareFromSession(c.id,{path:'link'}),/Only files in/);
+  }finally{fs.rmSync(outside,{recursive:true,force:true})}
+  assert.throws(()=>s.shareFromSession(c.id,{path:'missing.png'}),/No file/);
+  assert.throws(()=>s.shareFromSession(c.id,{path:'.'}),/not a file/);
+  await s.sessionTurn(c.id);
+  const [turn]=s.sessionTurns(c.id);
+  assert.deepEqual(turn.outputs.map((o)=>o.name),['chart.png','ai-code-share-'+process.pid+'.mp4','chart-2.png']);
+  const served=s.sessionAttachment(c.id,runId,'chart.png','out');
+  assert.equal(served.type,'image/png');
+  assert.deepEqual(fs.readFileSync(served.path),Buffer.from('89504e47','hex'),'a copy, kept after the original changes');
+  assert.throws(()=>s.sessionAttachment(c.id,runId,'chart.png'),/not found/,'an output is not an attachment');
+  assert.match(SESSION_PROMPT,/share_file/);
+});
+
+test('the session MCP server posts share_file to the session outputs route with its working directory', async () => {
+  const http = await import('node:http');
+  const seen = [];
+  const srv = http.createServer((req, res) => {
+    let b = '';
+    req.on('data', (c) => (b += c));
+    req.on('end', () => {
+      seen.push({ url: req.url, body: JSON.parse(b) });
+      res.writeHead(201, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ output: { name: 'shot.png', type: 'image/png' } }));
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const file = fileURLToPath(new URL('../src/permission-mcp.mjs', import.meta.url));
+  const { spawn } = await import('node:child_process');
+  const cwd = fs.realpathSync(os.tmpdir());
+  const child = spawn(process.execPath, [file], { cwd, env: { ...process.env, AI_CODE_PERMISSION_ENDPOINT: `http://127.0.0.1:${srv.address().port}`, AI_CODE_SESSION_ID: 's-1' }, stdio: ['pipe', 'pipe', 'ignore'] });
+  let buf = '';
+  const done = new Promise((r) => child.stdout.on('data', (c) => { buf += c; if (buf.includes('\n')) r(JSON.parse(buf.slice(0, buf.indexOf('\n')))); }));
+  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'share_file', arguments: { path: 'shot.png', caption: 'The bug' } } })}\n`);
+  try {
+    const m = await done;
+    assert.equal(m.result.isError, false);
+    assert.match(m.result.content[0].text, /Shared shot\.png \(image\/png\)/);
+    assert.deepEqual(seen, [{ url: '/api/sessions/s-1/outputs', body: { path: 'shot.png', caption: 'The bug', cwd } }]);
+  } finally {
+    child.kill();
+    srv.close();
+  }
 });
