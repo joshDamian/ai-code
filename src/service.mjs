@@ -5016,7 +5016,10 @@ export class Service {
           for await (const e of runAgent(p, m, {
             role,
             task,
-            project: context.project,
+            // The registered checkout, not context.project: the context reports the
+            // tree it was assembled from, which for most roles is the worktree, and
+            // the memory folder belongs to the checkout.
+            project: { ...context.project, path: (task.project_id && this.store.getProject(task.project_id)?.path) || context.project?.path },
             context,
             worktree: cwd,
             prompt: full,

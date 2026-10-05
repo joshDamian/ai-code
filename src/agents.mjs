@@ -436,22 +436,40 @@ export function claudeArgs(input) {
   } else {
     args.push('--dangerously-skip-permissions');
   }
-  // A workflow run sees the project and nothing of the person who launched the
-  // server. Without these two flags every planner, implementer and reviewer loaded
-  // the user's claude.ai connectors (Gmail, Drive, Calendar - 19 tools, including
-  // Drive's share_file and trash_file under an implementer's skip-permissions) and
-  // their user-level skills and settings. `project,local` keeps the repository's
-  // own .claude configuration, which is part of the project; the user's settings
-  // hold only a default model and effort, and both are passed as flags above.
-  // A chat and a session are conversations with that person, so they keep it.
+  // A workflow run loads no MCP server it was not given: without this, every
+  // planner, implementer and reviewer got the user's claude.ai connectors (Gmail,
+  // Drive, Calendar - 19 tools, including Drive's share_file and trash_file under an
+  // implementer's skip-permissions). Settings and CLAUDE.md files still load,
+  // user-level included: the user's own instructions are part of what makes a
+  // direct session's output better, and `--setting-sources project,local`, which
+  // was here before, dropped them (verified against claude 2.1.289).
+  //
+  // The memory is pointed at the project's, not the worktree's. Claude Code keys
+  // auto-memory by working directory, and a run's directory is a fresh worktree,
+  // so every run started with an empty memory - 67 worktree memory folders on this
+  // machine, none with anything in them - while a session in the checkout read
+  // the project's notes. A chat and a session are conversations with the person,
+  // so they keep everything they had.
   if (input.role !== 'chat' && input.role !== 'session') {
-    args.push('--strict-mcp-config', '--setting-sources', 'project,local');
+    args.push('--strict-mcp-config');
+    const memory = projectMemoryDir(input.project?.path);
+    if (memory) args.push('--settings', JSON.stringify({ autoMemoryDirectory: memory }));
   }
   if (input.subagentModel) args.push('--agents', JSON.stringify(exploreAgent(input.subagentModel)));
   if (input.resumeSession) args.push('--resume', input.resumeSession);
   // `--` so a prompt that starts with a dash is not read as a flag.
   args.push('--', input.prompt);
   return args;
+}
+
+// Where Claude Code keeps auto-memory for a checkout: the path with every
+// character that is not a letter or digit turned into '-', under the config dir.
+// Null when there is no project path or no such folder, so a project nobody has
+// worked in directly gets the CLI's own default rather than a pointer to nothing.
+export function projectMemoryDir(projectPath, home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')) {
+  if (!projectPath) return null;
+  const dir = path.join(home, 'projects', projectPath.replace(/[^A-Za-z0-9]/g, '-'), 'memory');
+  return fs.existsSync(dir) ? dir : null;
 }
 
 // The tree the agent runs in. Every caller in the service names it `worktree` and
