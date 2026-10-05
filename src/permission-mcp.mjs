@@ -119,7 +119,7 @@ async function draftTask(args) {
     res = await fetch(`${ENDPOINT}/api/sessions/${SESSION}/drafts`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: args?.title, description: args?.description }),
+      body: JSON.stringify({ title: args?.title, description: args?.description, engine: args?.engine }),
       signal: AbortSignal.timeout(15000),
     });
   } catch (e) {
@@ -215,6 +215,12 @@ async function handle(msg) {
               description: {
                 type: 'string',
                 description: 'The full brief a planner will work from: what is wrong, where, what done looks like, and anything to check first.',
+              },
+              engine: {
+                type: 'string',
+                enum: ['pipeline', 'session'],
+                description:
+                  "How the task should run. `pipeline` (the default) plans first, implements in a worktree, and reviews the result. `session` starts one supervised conversation in the task's worktree the moment the person approves it, runs the project's tests after each of its turns, and has no separate plan or review - use it for work that needs the person's back-and-forth rather than a plan they approve.",
               },
             },
             required: ['title', 'description'],

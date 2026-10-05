@@ -896,7 +896,14 @@ function parseObject(text) {
 function draftTasks(list) {
   if (!Array.isArray(list)) return [];
   return list
-    .map((t) => ({ title: String(t?.title || '').replace(/\s+/g, ' ').trim(), description: String(t?.description || '').trim() }))
+    .map((t) => ({
+      title: String(t?.title || '').replace(/\s+/g, ' ').trim(),
+      description: String(t?.description || '').trim(),
+      // Only a value the workflow knows counts. Anything else - a model's own
+      // vocabulary, a typo - reads as the default, which is what a proposer who
+      // never meant to choose gets.
+      engine: ENGINES.has(t?.engine) ? t.engine : 'pipeline',
+    }))
     .filter((t) => t.title)
     .map((t) => ({ ...t, description: t.description || t.title }));
 }
@@ -1675,7 +1682,7 @@ export class Service {
   addDrafts(projectId, tasks, source, chatSessionId = null, sessionId = null) {
     const drafts = this.drafts(projectId);
     const at = new Date().toISOString();
-    const added = tasks.map((t) => ({ id: this.store.id(), title: t.title, description: t.description, source, at, chat_session_id: chatSessionId, ...(sessionId ? { session_id: sessionId } : {}) }));
+    const added = tasks.map((t) => ({ id: this.store.id(), title: t.title, description: t.description, engine: t.engine || 'pipeline', source, at, chat_session_id: chatSessionId, ...(sessionId ? { session_id: sessionId } : {}) }));
     this.store.updateProjectDrafts(projectId, [...drafts, ...added]);
     return added;
   }
@@ -1685,12 +1692,23 @@ export class Service {
   // `prepare` a task typed into the dashboard goes through - so an approved draft
   // lands in the normal plan -> approve -> execute flow with nothing special about
   // it, and appears in the task list at the moment it is created.
-  approveDraft(projectId, draftId) {
+  approveDraft(projectId, draftId, engine = null) {
     const drafts = this.drafts(projectId);
     const draft = drafts.find((d) => d.id === draftId);
     if (!draft) throw new Error('Draft not found');
-    const task = this.createTask(projectId, draft.description || draft.title);
+    // The approver's word wins over the proposer's: the person is the one deciding
+    // this task should exist, so the approval call may say how it runs.
+    const wanted = ENGINES.has(engine) ? engine : draft.engine || 'pipeline';
+    const task = this.createTask(projectId, draft.description || draft.title, { engine: wanted });
     this.store.updateProjectDrafts(projectId, drafts.filter((d) => d.id !== draftId));
+    // A session task starts working the moment it is approved: its whole point is
+    // that there is no plan to approve first, and an approval that left it CREATED
+    // would be a second click for no decision. A pipeline task waits - its next
+    // step is a plan the person has not seen.
+    if (wanted === 'session') {
+      this.startSessionTask(task.id);
+      return { task: this.task(task.id), draft };
+    }
     return { task: this.prepare(task.id), draft };
   }
 

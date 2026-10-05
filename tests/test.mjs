@@ -6175,6 +6175,9 @@ test('the session MCP server lists draft_task and posts it to the session drafts
     assert.equal(done.result.isError, false);
     assert.match(done.result.content[0].text, /Drafted "Fix email dedupe" into the Novara project's approval queue/);
     assert.deepEqual(seen, [{ url: '/api/sessions/s-1/drafts', body: { title: 'Fix email dedupe', description: 'Collation and validator.' } }]);
+    // An engine the caller names rides along.
+    await call(3, 'tools/call', { name: 'draft_task', arguments: { title: 'T2', description: 'D2', engine: 'session' } });
+    assert.equal(seen[1].body.engine, 'session');
   } finally {
     child.kill();
     srv.close();
@@ -7546,4 +7549,29 @@ test('the compare view gets each attempt\'s tokens, the models it ran on, and th
   assert.deepEqual({ fresh: rate.fresh, cache_read: rate.cache_read, output: rate.output }, { fresh: 1, cache_read: 0.1, output: 5 });
   assert.ok(Math.abs(priceAt(a.tokens, rate) - a.cost) < 1e-9, 'priced at its own model, the reference price is what it spent');
   assert.ok(!view.rates.some((r) => r.id.startsWith('mock')), 'the mock is not a reference model');
+});
+
+
+test('a draft can ask for the session engine, and approving it starts the task working', () => {
+  const { s, p } = sessionEngine({ writes: [] });
+  const d = s.draftFromSession(s.createSession(p.id, 'D').id, { title: 'Fix the port', description: 'Move dev to 8080.', engine: 'session' });
+  assert.equal(d.draft.engine, 'session');
+  // An engine the proposer never chose reads as the default, in any spelling.
+  for (const engine of [undefined, 'Pipeline', 'vibes']) {
+    const x = s.draftFromSession(s.createSession(p.id, 'D').id, { title: `T ${engine}`, description: 'x', engine });
+    assert.equal(x.draft.engine, 'pipeline', String(engine));
+  }
+  const r = s.approveDraft(p.id, d.draft.id);
+  assert.equal(r.task.engine, 'session');
+  assert.equal(r.task.state, 'WORKING', 'a session task starts at once');
+  assert.ok(r.task.session_id && r.task.worktree, 'in its own worktree and conversation');
+  assert.ok(!s.drafts(p.id).some((x) => x.id === d.draft.id), 'the approved draft left the queue');
+  // A pipeline draft, or an approval that names an engine, behaves as before.
+  const pd = s.draftFromSession(s.createSession(p.id, 'D').id, { title: 'Pipeline one', description: 'x' });
+  const pr = s.approveDraft(p.id, pd.draft.id);
+  assert.equal(pr.task.state, 'PLANNING', 'a pipeline task waits for its planner, as any approved task does');
+  const od = s.draftFromSession(s.createSession(p.id, 'D').id, { title: 'Override', description: 'x', engine: 'session' });
+  const orv = s.approveDraft(p.id, od.draft.id, 'pipeline');
+  assert.equal(orv.task.engine, 'pipeline', 'the approver can override the proposer');
+  assert.equal(orv.task.state, 'PLANNING');
 });

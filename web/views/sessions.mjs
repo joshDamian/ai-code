@@ -688,6 +688,7 @@ function DraftCard({ draft, busy, onApprove, onDrop }) {
       <div class="ss-draft-head">
         ${icon(ICONS.task)}
         <b>${draft.title}</b>
+        ${draft.engine === 'session' ? html`<span class="badge">Session</span>` : null}
         <span class="badge badge-info">Waiting for approval</span>
       </div>
       ${draft.description && draft.description !== draft.title ? html`<p>${draft.description}</p>` : null}

@@ -850,7 +850,8 @@ const server = http.createServer(async (req, res) => {
     const dr = u.pathname.match(/^\/api\/projects\/([^/]+)\/drafts(?:\/([^/]+)\/approve)?$/);
     if (dr) {
       if (!dr[2]) return json(res, svc.drafts(dr[1]));
-      return json(res, svc.approveDraft(dr[1], dr[2]), 201);
+      // A draft carries the engine its proposer asked for, validated in approveDraft.
+      return json(res, svc.approveDraft(dr[1], dr[2], (await body(req))?.engine), 201);
     }
     const dd = u.pathname.match(/^\/api\/projects\/([^/]+)\/drafts\/([^/]+)$/);
     if (dd && req.method === 'DELETE') return json(res, svc.dropDraft(dd[1], dd[2]));
@@ -1291,7 +1292,7 @@ const server = http.createServer(async (req, res) => {
         if (!fromLocalhost(req)) return json(res, { error: 'Drafts can only be proposed from this machine.' }, 403);
         const b = await body(req);
         try {
-          return json(res, svc.draftFromSession(id, { title: b.title, description: b.description }), 201);
+          return json(res, svc.draftFromSession(id, { title: b.title, description: b.description, engine: b.engine }), 201);
         } catch (e) {
           return json(res, { error: e.message }, 400);
         }
