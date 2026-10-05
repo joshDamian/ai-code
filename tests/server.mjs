@@ -568,6 +568,11 @@ test('provider add-claude seeds the anthropic catalog and refuses a re-run',asyn
   assert.equal(fable.context_length,1000000);
   assert.ok(fable.capabilities.includes('planning'));
 
+  const sonnet=at('anthropic:claude-sonnet-5-5');
+  assert.equal(sonnet.input_cost_per_mtok,2);
+  assert.equal(sonnet.output_cost_per_mtok,10);
+  assert.equal(sonnet.context_length,1000000);
+
   for(const id of ['anthropic:claude-opus-5','anthropic:claude-opus-4-8','anthropic:claude-sonnet-4-6'])assert.equal(at(id).context_length,1000000,`${id} carries the window the official table states`);
 
   const dup=await run(['provider','add-claude']);
