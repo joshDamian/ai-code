@@ -672,6 +672,22 @@ export class Store {
     return this.getModel(id);
   }
 
+  // Every priced row of the three run ledgers, for a reprice. Only the columns a
+  // price is computed from, plus where the row lives so it can be written back.
+  pricedRunRows() {
+    return ['runs', 'chat_runs', 'session_runs'].flatMap((table) =>
+      this.db
+        .prepare(`SELECT id,model_id,started_at,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost,cost_basis FROM ${table} WHERE provider_id IS NOT NULL AND model_id IS NOT NULL`)
+        .all()
+        .map((r) => ({ ...r, table }))
+    );
+  }
+
+  setRunCost(table, id, cost, basis) {
+    if (!['runs', 'chat_runs', 'session_runs'].includes(table)) throw new Error(`Not a run table: ${table}`);
+    this.db.prepare(`UPDATE ${table} SET cost=?,cost_basis=? WHERE id=?`).run(cost, basis, id);
+  }
+
   getModel(id) {
     const r = this.db.prepare('SELECT * FROM models WHERE id=?').get(id);
     return r && this.mapModel(r);

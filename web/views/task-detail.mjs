@@ -601,6 +601,11 @@ function PlanTab({ task, runs, busy, run, live, revision, revisedAt, readAction,
         }
         const chosen = registry.all.find((m) => m.id === task.plan_model);
         const open = chosen && registry.health.get(chosen.provider_id) === 'OPEN';
+        // The model that actually wrote the plan on screen. The picker shows the
+        // preference, and a preference skipped for a provider at its limit left a plan
+        // that read as the chosen model's work while awaiting approval.
+        const wrote = [...(runs || [])].reverse().find((r) => r.role === 'planner' && r.status === 'succeeded');
+        const skipped = task.plan_model && wrote?.model_id && wrote.model_id !== task.plan_model;
         return html`
           <div class="row plan-model">
             <${Select}
@@ -613,6 +618,7 @@ function PlanTab({ task, runs, busy, run, live, revision, revisedAt, readAction,
               onChange=${(v) => run(() => api.taskSetPlanModel(task.id, v), 'Planning model saved.')}
             />
             ${open ? html`<span class="muted">this provider is failing, so another model will be used</span>` : null}
+            ${skipped ? html`<span class="warn-text">This plan was written by <span class="mono-sm">${wrote.model_id}</span>: the planning model was unavailable</span>` : null}
           </div>
         `;
       })()
@@ -725,7 +731,14 @@ function PlanTab({ task, runs, busy, run, live, revision, revisedAt, readAction,
         }
         ${choosing
           ? planningModelPicker
-          : html`<span class="muted plan-meta">${planner?.model_id ? html`Planned with <span class="mono-sm">${planner.model_id}</span>` : 'Planned'}${revision?.at ? html` · ${formatWhen(revision.at)}` : null}</span>`}
+          : html`<span class="muted plan-meta">${planner?.model_id ? html`Planned with <span class="mono-sm">${planner.model_id}</span>` : 'Planned'}${
+              // The planning model is a preference: a provider at its limit or in an
+              // open circuit is skipped, and the run note saying so sat one click
+              // away. Said here, where the model is named, it cannot be missed.
+              task.plan_model && planner?.model_id && planner.model_id !== task.plan_model
+                ? html` · <span class="warn-text">${task.plan_model} was unavailable</span>`
+                : null
+            }${revision?.at ? html` · ${formatWhen(revision.at)}` : null}</span>`}
       </div>
 
       ${

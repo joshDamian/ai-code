@@ -100,6 +100,18 @@ function RoleCard({ role, policy, models, onChange }) {
   const preferred = (policy.preferred && policy.preferred[0]) || '';
   const fallback = policy.fallback || [];
 
+  const strategy = policy.strategy || 'balanced';
+  // What Automatic resolves to under the strategy on screen, saved or not. Without
+  // it the toggle is a word whose effect can only be found in a run log.
+  const [picks, setPicks] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api.routingPreview(role, strategy).then((r) => live && setPicks(r), () => live && setPicks(null));
+    return () => {
+      live = false;
+    };
+  }, [role, strategy]);
+
   const option = (m) => ({ value: m.id, label: m.displayName || m.name, hint: m.provider_id });
   const modelOptions = [{ value: '', label: 'Automatic' }, ...eligible.map(option)];
   const fallbackOptions = [{ value: '', label: 'None' }, ...eligible.map(option)];
@@ -111,8 +123,13 @@ function RoleCard({ role, policy, models, onChange }) {
           <h2>${role[0].toUpperCase() + role.slice(1)}</h2>
           <p class="muted">${ROLE_ABOUT[role]}</p>
         </div>
-        <${Seg} label=${`${role} strategy`} value=${policy.strategy || 'balanced'} options=${STRATEGIES} onChange=${(v) => onChange({ strategy: v })} />
+        <${Seg} label=${`${role} strategy`} value=${strategy} options=${STRATEGIES} onChange=${(v) => onChange({ strategy: v })} />
       </div>
+      ${picks?.length
+        ? html`<p class="muted role-picks">
+            Automatic picks <b>${picks[0].name}</b>${picks.length > 1 ? html`, then ${picks.slice(1).map((m) => m.name).join(', then ')}` : null}${preferred ? html` · your preferred model comes first` : null}
+          </p>`
+        : null}
       <div class="role-chain">
         <${Select} label="Preferred model" value=${preferred} onChange=${(v) => onChange({ preferred: v ? [v] : [] })} options=${modelOptions} />
         <span class="role-chain-arrow" aria-hidden="true">→</span>

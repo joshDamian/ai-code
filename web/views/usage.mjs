@@ -104,7 +104,9 @@ export function Usage() {
     { key: 'provider', label: 'Provider', sortable: true, sortValue: (r) => r.provider || r.provider_id },
     { key: 'runs', label: 'Runs', sortable: true, render: (r) => Number(r.runs || 0).toLocaleString() },
     { key: 'tokens', label: 'Tokens', sortable: true, render: (r) => formatTokens(r.tokens) },
-    { key: 'cost', label: 'Cost', sortable: true, render: (r) => formatCost(r.cost) },
+    // List-price-equivalent for a subscription provider, so the column says which
+    // kind of number each row is.
+    { key: 'cost', label: 'Cost', sortable: true, render: (r) => (r.cash || !r.cost ? formatCost(r.cost) : html`${formatCost(r.cost)} <span class="muted">list</span>`) },
     { key: 'failed', label: 'Failed', sortable: true, render: (r) => (r.failed ? html`<span class="error-text">${r.failed}</span>` : '—') },
     // Beside the count rather than in a tile of its own: "which provider's failures
     // cost me" is a question about one row, and a total over all of them cannot answer it.
@@ -177,8 +179,9 @@ export function Usage() {
 
       <div class="metric-grid usage-metrics">
         <div class="card metric-card">
-          <div class="metric-label muted">Total Cost</div>
-          <div class="metric-value">${formatCost(totals.cost)}</div>
+          <div class="metric-label muted">Cash Spent</div>
+          <div class="metric-value">${formatCost(totals.cash)}</div>
+          <div class="metric-note muted">${formatCost(Math.max(0, Number(totals.cost || 0) - Number(totals.cash || 0)))} of subscription use at list price</div>
         </div>
         <div class="card metric-card">
           <div class="metric-label muted">Total Tokens</div>

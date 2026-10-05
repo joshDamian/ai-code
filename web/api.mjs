@@ -170,6 +170,7 @@ export const api = {
 
   routing: () => request('/api/routing'),
   saveRouting: (policies) => request('/api/routing', { method: 'PUT', body: policies }),
+  routingPreview: (role, strategy) => request(`/api/routing/preview?role=${encodeURIComponent(role)}&strategy=${encodeURIComponent(strategy)}`),
 
   runs: (taskId) => request(`/api/runs${taskId ? `?taskId=${encodeURIComponent(taskId)}` : ''}`),
   runEvents: (id) => request(`/api/runs/${id}/events`),

@@ -1344,6 +1344,8 @@ const server = http.createServer(async (req, res) => {
     const mm = u.pathname.match(/^\/api\/models\/([^/]+)$/);
     if (mm && req.method === 'PATCH') return json(res, svc.updateModel(decodeURIComponent(mm[1]), await body(req)));
 
+    if (u.pathname === '/api/routing/preview') return json(res, svc.routingPreview(u.searchParams.get('role'), u.searchParams.get('strategy')));
+
     if (u.pathname === '/api/routing') {
       if (req.method === 'GET') return json(res, svc.getRouting());
       const b = await body(req);

@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig,subagentModel} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig,subagentModel} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {modelFit,blendedRate,loadPolicies} from '../src/policy.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -7120,4 +7120,118 @@ test('a frontier Claude parent hands Explore to Sonnet through --agents, and a p
   assert.equal(agents.Explore.model,'claude-sonnet-5-5');
   assert.ok(!agents.Explore.tools.includes('Edit')&&!agents.Explore.tools.includes('Write'));
   assert.ok(!claudeArgs({role:'planner',model:'m',prompt:'p'}).includes('--agents'));
+});
+
+
+// Three models a strategy has to choose between: a fast cheap one, a strong cash one,
+// and a strong one on the subscription. Automatic, with nothing pinned.
+function strategyFixture(){
+  const root=repo();const s=new Service(root,{allowMock:true});s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'sub',name:'Sub',kind:'claude-code',enabled:true,config:{routable:true}});
+  s.addProvider({id:'cash',name:'Cash',kind:'deepseek',enabled:true,config:{routable:true}});
+  s.addModel({id:'frontier',providerId:'sub',name:'frontier',capabilities:['planning','coding'],speed:6,quality:10,inputCostPerMTok:5,outputCostPerMTok:25,cacheReadCostPerMTok:0.5,cacheWriteCostPerMTok:10,billingMode:'subscription'});
+  s.addModel({id:'quick',providerId:'cash',name:'quick',capabilities:['planning','coding'],speed:10,quality:6,inputCostPerMTok:0.15,outputCostPerMTok:0.6,cacheReadCostPerMTok:0.003,billingMode:'api'});
+  s.addModel({id:'strong',providerId:'cash',name:'strong',capabilities:['planning','coding'],speed:6,quality:10,inputCostPerMTok:5,outputCostPerMTok:25,cacheReadCostPerMTok:0.5,billingMode:'api'});
+  const route=(strategy,extra={})=>{const r=s.getRouting();s.saveRouting({...r,planner:{...r.planner,strategy,preferred:[],fallback:[],...extra}});return s.select('planner').m.id};
+  return {s,route};
+}
+
+test('the strategy on the routing page decides which model Automatic picks',()=>{
+  const {route}=strategyFixture();
+  assert.equal(route('speed'),'quick');
+  assert.equal(route('quality'),'frontier','free at the margin breaks the tie between two equally strong models');
+  assert.equal(route('cost'),'frontier','a subscription model costs nothing to use, which is what Cost is asking about');
+});
+
+test('a pinned model still outranks every strategy',()=>{
+  const {route}=strategyFixture();
+  for(const st of ['quality','balanced','speed','cost']) assert.equal(route(st,{preferred:['cash:strong']}),'strong',st);
+});
+
+test('a subscription model is free in the cost measure and a cash model is priced on its blended rate',()=>{
+  assert.equal(blendedRate({billingMode:'subscription',inputCostPerMTok:4,outputCostPerMTok:20}),0);
+  const ds=blendedRate({billingMode:'api',inputCostPerMTok:0.66,outputCostPerMTok:1.98,cacheReadCostPerMTok:0.022});
+  assert.ok(ds>0.1&&ds<0.13,`v4-pro blends to ~$0.115/M, got ${ds}`);
+  // An unknown strategy reads as balanced rather than throwing in the router.
+  const m={quality:8,speed:8,billingMode:'api',inputCostPerMTok:1,outputCostPerMTok:5};
+  assert.equal(modelFit(m,'nonsense'),modelFit(m,'balanced'));
+});
+
+test('the raw weights a saved routing file carries are dropped, so they cannot override the strategy',()=>{
+  const root=repo();fs.mkdirSync(path.join(root,'.ai-code'),{recursive:true});
+  fs.writeFileSync(path.join(root,'.ai-code','routing.json'),JSON.stringify({planner:{strategy:'speed',quality:1,cost:0.2,speed:0.1},reviewer:{strategy:'bogus'}}));
+  const p=loadPolicies(root);
+  assert.equal(p.planner.strategy,'speed');
+  for(const k of ['quality','cost','speed']) assert.equal(k in p.planner,false,k);
+  assert.equal(p.reviewer.strategy,'quality','an unknown strategy falls back to the role default');
+});
+
+test('the cost ceiling is a cash ceiling: a subscription run over it is not stopped',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'plan',name:'Plan',kind:'mock',enabled:true,config:{routable:true,usage:{input_tokens:800000,output_tokens:0}}});
+  s.addModel({id:'plan-m',providerId:'plan',name:'plan',capabilities:['planning'],speed:10,quality:10,contextLength:2000000,inputCostPerMTok:10,billingMode:'subscription'});
+  const r=s.getRouting();
+  s.saveRouting({...r,planner:{...r.planner,maxRunCost:1}});
+  const t=s.createTask(p.id,'x');s.prepare(t.id);
+  await s.plan(t.id);
+  const run=s.store.listRuns(t.id)[0];
+  assert.equal(run.status,'succeeded');
+  assert.equal(run.cost,8,'the ledger still prices it at list, so usage shows what it would have cost');
+  assert.equal(run.cost_basis,'list-price-equivalent');
+});
+
+test('the routing preview names what each strategy picks, ignoring the role\'s pins',()=>{
+  const {s,route}=strategyFixture();
+  route('quality',{preferred:['cash:quick']});
+  assert.equal(s.select('planner').m.id,'quick','the pin decides the run');
+  assert.equal(s.routingPreview('planner','speed')[0].id,'quick');
+  assert.equal(s.routingPreview('planner','quality')[0].id,'frontier','the preview answers for the strategy, not the pin');
+  assert.ok(s.routingPreview('planner','quality').length<=3);
+  assert.throws(()=>s.routingPreview('nobody','quality'),/Unknown role/);
+});
+
+test('a reprice prices past runs on cache reads and writes, and usage splits cash from subscription use',()=>{
+  const root=repo();const s=new Service(root,{allowMock:true});s.initProject('p',root);
+  s.addProvider({id:'sub',name:'Sub',kind:'claude-code',enabled:true,config:{routable:true}});
+  s.addProvider({id:'cash',name:'Cash',kind:'deepseek',enabled:true,config:{routable:true}});
+  s.addModel({id:'opus',providerId:'sub',name:'opus',capabilities:['review'],speed:7,quality:10,inputCostPerMTok:4,outputCostPerMTok:20,cacheReadCostPerMTok:0.2,cacheWriteCostPerMTok:8,billingMode:'subscription'});
+  s.addModel({id:'ds',providerId:'cash',name:'ds',capabilities:['review'],speed:7,quality:8,inputCostPerMTok:0.66,outputCostPerMTok:1.98,cacheReadCostPerMTok:0.022,billingMode:'api'});
+  const at=new Date().toISOString();
+  const add=(id,providerId,modelId,u)=>{s.store.addRun({id,taskId:null,role:'reviewer',providerId,modelId,status:'running',startedAt:at});s.store.updateRun(id,{status:'succeeded',ended_at:at,...u,cost:0.0725,cost_basis:'list-price-equivalent'})};
+  // The reviewer run of 2026-10-05 the CLI priced at $0.774 and the ledger at $0.0725.
+  add('r1','sub','opus',{input_tokens:8,cache_read_tokens:236490,cache_write_tokens:81779,output_tokens:3625});
+  add('r2','cash','ds',{input_tokens:1000000,cache_read_tokens:0,cache_write_tokens:0,output_tokens:0});
+  const run=(id)=>s.store.listRuns().find((x)=>x.id===id);
+  const r=s.repriceRuns();
+  assert.equal(r.changed,2);
+  assert.ok(Math.abs(run('r1').cost-0.774)<0.001,`matches the CLI, got ${run('r1').cost}`);
+  assert.equal(run('r2').cost_basis.startsWith('published-api-rate'),true);
+  assert.equal(s.repriceRuns().changed,0,'a second reprice changes nothing');
+  const u=s.usage('all');
+  assert.ok(Math.abs(u.totals.cash-run('r2').cost)<1e-9,'cash is the API-rate runs and nothing else');
+  assert.ok(u.totals.cost>u.totals.cash);
+});
+
+test('usage is tallied per message, a subagent is added on top of the result, and a repeat frame counts once',()=>{
+  const s=new Service(repo(),{allowMock:true});
+  const t=s.usageTally();
+  const msg=(id,u,parent)=>({type:'assistant',message:{id,usage:u},...(parent?{parent_tool_use_id:parent}:{})});
+  t.add(msg('m1',{input_tokens:1,cache_read_input_tokens:1000,output_tokens:5}));
+  t.add(msg('m1',{input_tokens:1,cache_read_input_tokens:1000,output_tokens:40}),'the same message again, later in its stream');
+  let u=t.add(msg('m2',{input_tokens:1,cache_read_input_tokens:2000,output_tokens:10}));
+  assert.equal(u.cacheReadTokens,3000,'two calls, each once');
+  assert.equal(u.outputTokens,50,'the larger of a message\'s figures');
+  u=t.add(msg('s1',{cache_read_input_tokens:500,cache_creation_input_tokens:100,output_tokens:7},'toolu_1'));
+  assert.equal(u.cacheReadTokens,3500,'a subagent call is spend the run made');
+  u=t.add({type:'result',usage:{input_tokens:2,cache_read_input_tokens:3000,output_tokens:60}});
+  assert.equal(u.cacheReadTokens,3500,'the result replaces the main thread and keeps the subagent');
+  assert.equal(u.outputTokens,67);
+  assert.equal(u.cacheWriteTokens,100);
+  // A provider with no message ids keeps the last frame's figure, as before.
+  const o=s.usageTally();
+  o.add({usage:{input_tokens:5}});
+  assert.equal(o.add({usage:{input_tokens:9}}).inputTokens,9);
 });

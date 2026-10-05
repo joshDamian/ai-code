@@ -11,7 +11,7 @@ import {
   landingCommit, commitRef, git, createPlanWorktree, removePlanWorktree, planWorktreeIds, planWorktreeDir,
 } from './git.mjs';
 import { runAgent, classify, permissionMcpConfig, appMcpConfig, removeMcpConfig, DISCUSSION_OPENS } from './agents.mjs';
-import { loadPolicies, savePolicies } from './policy.mjs';
+import { loadPolicies, savePolicies, modelFit } from './policy.mjs';
 import { isTransient, healthThresholds, effectiveHealth } from './health.mjs';
 import { unifiedDiff, sessionSteps, toolTarget, gitImpact } from './format.mjs';
 
@@ -1152,7 +1152,7 @@ function taskSubject(task) {
 // subagent's calls stream in after it is already running.
 //
 // Delegation is still bounded, by the run's cost. A subagent's frames carry usage
-// and usageFrom reads them, so maxRunCost sees every token spent below the parent -
+// and usageTally adds them, so maxRunCost sees every token spent below the parent -
 // 88% of that planner's input tokens were its subagents'. That ceiling was written
 // for exactly this case (AUDIT-PLANNER-SPIRAL.md, Fix 4) and could never fire while
 // the tool-call budget counted the same work first.
@@ -4330,9 +4330,9 @@ export class Service {
   // Each rejection is the first filter that ruled the provider out, which is the one
   // worth naming. The second return value is not an error path: `select` needs it to
   // explain a dead chain, and `eligible` ignores it.
-  #candidates(role, excluded = [], { ignoreHealth = false } = {}) {
+  #candidates(role, excluded = [], { ignoreHealth = false, policy: override = null } = {}) {
     const cap = capability[role];
-    const policy = this.policies[role] || {};
+    const policy = override || this.policies[role] || {};
     // Preferred entries outrank fallbacks, and either may be written as a bare
     // model id or as provider:model. The first position found wins.
     const pref = [...(policy.preferred || []), ...(policy.fallback || [])];
@@ -4388,10 +4388,7 @@ export class Service {
         const prefIndex = byModel >= 0 ? byModel : pref.indexOf(`${p.id}:${m.id}`);
         const providerIndex = pref.indexOf(p.id);
         const preference = prefIndex >= 0 ? 100000 - prefIndex * 1000 : providerIndex >= 0 ? 50000 - providerIndex * 1000 : 0;
-        // Cost is a rough per-token expectation: output is billed once, input is
-        // weighted at a quarter to stand in for the usual prompt/output ratio.
-        const expected = (m.outputCostPerMTok ?? 0) + (m.inputCostPerMTok ?? 0) * 0.25;
-        const base = preference + m.quality * (policy.quality ?? 1) + m.speed * (policy.speed ?? 0.3) - expected * (policy.cost ?? 0.1);
+        const base = preference + modelFit(m, policy.strategy);
         // The penalty is multiplicative so it scales with a model's own score
         // rather than flattening the ranking to a constant subtraction.
         const score = base * (1 - (h?.penalty || 0));
@@ -4575,6 +4572,46 @@ export class Service {
     for (const v of this.active.values()) v.controller.abort(reason);
   }
 
+  // What a run has spent so far, from the frames as they arrive. Each frame's usage
+  // used to replace the running figure, and a frame's usage is not a running figure:
+  // an assistant message carries one API call's usage, repeated on every frame of
+  // that message, and the closing `result` carries the main thread's total and none
+  // of its subagents'. So the cost ceiling saw one call at a time until the result,
+  // and the ledger never saw a subagent at all - 24 of 174 Claude runs in this
+  // install's store, a Sonnet planner among them recorded at 168K cache reads of
+  // the 941K it read.
+  //
+  // So: each message is counted once, at the largest figure any of its frames gave,
+  // the main thread's messages give way to `result` when it arrives, and a
+  // subagent's messages are added on top. `modelUsage` on the result looks like the
+  // total and is not one to trust: on a resumed session it also carries the session
+  // before this run. A frame with usage and no message id is a provider that
+  // reports some other way, and keeps the last-one-wins reading it always had.
+  usageTally() {
+    const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const keys = Object.keys(zero);
+    const plus = (a, b) => Object.fromEntries(keys.map((k) => [k, (a[k] || 0) + (b[k] || 0)]));
+    const sum = (map) => [...map.values()].reduce(plus, zero);
+    const main = new Map();
+    const sub = new Map();
+    let result = null;
+    let other = null;
+    return {
+      add: (data) => {
+        const u = this.usageFrom(data);
+        if (!u) return null;
+        const id = data?.message?.id;
+        if (data?.type === 'result') result = u;
+        else if (id) {
+          const map = data.parent_tool_use_id ? sub : main;
+          const seen = map.get(id) || zero;
+          map.set(id, Object.fromEntries(keys.map((k) => [k, Math.max(seen[k] || 0, u[k] || 0)])));
+        } else other = u;
+        return plus(result || (main.size ? sum(main) : other || zero), sum(sub));
+      },
+    };
+  }
+
   // The provider may report usage in any of several shapes, or not at all.
   usageFrom(data) {
     const u = data?.usage || data?.result?.usage || data?.message?.usage || data?.metadata?.usage;
@@ -4756,6 +4793,7 @@ export class Service {
       let approxTokens = 0;
       let toolCalls = 0;
       let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+      const tally = this.usageTally();
 
       const controller = new AbortController();
       // providerId is carried so the concurrency gate can count what a provider is
@@ -4979,8 +5017,7 @@ export class Service {
           })) {
             this.store.addEvent({ runId: run.id, type: e.type, data: e.data });
             noteWait(e);
-            const u = this.usageFrom(e.data);
-            if (u) usage = { ...usage, ...u };
+            usage = tally.add(e.data) || usage;
             const txt = this.extractText(e.data);
             approxTokens += Math.ceil(txt.length / 4);
             // Every frame carrying work arms the budget and only tool_progress
@@ -5000,7 +5037,12 @@ export class Service {
             if (toolCalls > maxToolCalls) {
               throw this.#stopRun(controller, 'TOOL_CALL_LIMIT', `${role} made ${toolCalls} tool calls, over its budget of ${maxToolCalls}`);
             }
-            const spent = this.price(m, usage, new Date(started).toISOString()).cost;
+            // A cash ceiling. A subscription run's price is list-price-equivalent -
+            // a measure of quota, not money - and priced correctly (cache reads and
+            // writes included) a median Opus planner or reviewer run is $0.85, so the
+            // $1 ceiling would kill four in ten of the runs that succeed. Those runs
+            // are bounded by the tool-call and wall-clock budgets instead.
+            const spent = m.billingMode === 'subscription' ? 0 : this.price(m, usage, new Date(started).toISOString()).cost;
             if (spent > maxRunCost) {
               throw this.#stopRun(controller, 'COST_LIMIT', `${role} spent $${spent.toFixed(2)}, over its ceiling of $${maxRunCost}`);
             }
@@ -5320,6 +5362,36 @@ export class Service {
 
   // -- usage ----------------------------------------------------------------
 
+  // Re-prices every run from the tokens it recorded and the model's current rates.
+  // The ledger is priced once, when a run ends, so a rate that was missing or wrong
+  // at the time stays wrong in every report afterwards - which is what happened to
+  // every Claude run before the catalog carried cache rates: priced on its output
+  // alone, about a tenth of what the CLI said it cost. A run whose model has since
+  // left the registry is left alone, because there is nothing to price it with.
+  repriceRuns() {
+    const models = new Map(this.store.listModels().map((m) => [m.id, m]));
+    let changed = 0;
+    let before = 0;
+    let after = 0;
+    let skipped = 0;
+    for (const r of this.store.pricedRunRows()) {
+      const m = models.get(r.model_id);
+      if (!m) {
+        skipped++;
+        continue;
+      }
+      const usage = { inputTokens: r.input_tokens, outputTokens: r.output_tokens, cacheReadTokens: r.cache_read_tokens, cacheWriteTokens: r.cache_write_tokens };
+      const { cost, basis } = this.price(m, usage, r.started_at);
+      before += Number(r.cost || 0);
+      after += cost;
+      if (Math.abs(cost - Number(r.cost || 0)) > 1e-9 || basis !== r.cost_basis) {
+        this.store.setRunCost(r.table, r.id, cost, basis);
+        changed++;
+      }
+    }
+    return { changed, skipped, before: Math.round(before * 100) / 100, after: Math.round(after * 100) / 100 };
+  }
+
   usage(period = '7d') {
     const spans = { '24h': 86400000, '7d': 604800000, '30d': 2592000000 };
     if (period !== 'all' && !spans[period]) period = '7d';
@@ -5356,7 +5428,13 @@ export class Service {
     // A repair that hit the ceiling is not counted in either repair total: it is a
     // provider-less row, and every sum here walks `priced`, which is the same filter
     // that keeps the test command out of a model spend report.
-    const totals = { runs: priced.length, tokens: 0, context_tokens: 0, cost: 0, succeeded: 0, failed: 0, fallbacks: 0, failed_cost: 0, fallback_cost: 0, repair_runs: 0, repair_cost: 0 };
+    //
+    //   cash           what was actually billed: every run priced at a published API
+    //                  rate. `cost` minus this is subscription runs at list price - a
+    //                  measure of quota, not money - and adding the two together made
+    //                  the subscription look like the expensive half of a bill that
+    //                  was all API spend.
+    const totals = { runs: priced.length, tokens: 0, context_tokens: 0, cost: 0, cash: 0, succeeded: 0, failed: 0, fallbacks: 0, failed_cost: 0, fallback_cost: 0, repair_runs: 0, repair_cost: 0 };
     const byProvider = new Map();
     const byRole = new Map();
     const byDay = new Map();
@@ -5370,6 +5448,8 @@ export class Service {
       totals.tokens += tokens;
       totals.context_tokens += Number(r.context_tokens || 0);
       totals.cost += cost;
+      const cash = String(r.cost_basis || '').startsWith('list-price-equivalent') ? 0 : cost;
+      totals.cash += cash;
       const failed = r.status === 'failed';
       const fallback = Boolean(r.fallback_from);
       const repair = r.role === 'repair';
@@ -5388,10 +5468,11 @@ export class Service {
       }
 
       const pk = r.provider_id || 'unknown';
-      const pv = byProvider.get(pk) || { provider_id: pk, provider: names.get(pk) || pk, runs: 0, tokens: 0, cost: 0, failed: 0, failed_cost: 0 };
+      const pv = byProvider.get(pk) || { provider_id: pk, provider: names.get(pk) || pk, runs: 0, tokens: 0, cost: 0, cash: 0, failed: 0, failed_cost: 0 };
       pv.runs++;
       pv.tokens += tokens;
       pv.cost += cost;
+      pv.cash += cash;
       if (failed) {
         pv.failed++;
         pv.failed_cost += cost;
@@ -5399,11 +5480,12 @@ export class Service {
       byProvider.set(pk, pv);
 
       const rk = r.role || 'unknown';
-      const rv = byRole.get(rk) || { role: rk, runs: 0, tokens: 0, context_tokens: 0, cost: 0, failed_cost: 0 };
+      const rv = byRole.get(rk) || { role: rk, runs: 0, tokens: 0, context_tokens: 0, cost: 0, cash: 0, failed_cost: 0 };
       rv.runs++;
       rv.tokens += tokens;
       rv.context_tokens += Number(r.context_tokens || 0);
       rv.cost += cost;
+      rv.cash += cash;
       if (failed) rv.failed_cost += cost;
       byRole.set(rk, rv);
 
@@ -5449,6 +5531,18 @@ export class Service {
 
   getRouting() {
     return this.policies;
+  }
+
+  // What Automatic would pick for a role under a strategy, right now: the same
+  // ranking select() reads, with the role's pins left out because the question is
+  // what the strategy chooses. The Routing page asks it as the toggle moves, before
+  // anything is saved, so a person sees the consequence of the setting they are on.
+  routingPreview(role, strategy) {
+    if (!capability[role]) throw new Error(`Unknown role '${role}'`);
+    const policy = { ...(this.policies[role] || {}), strategy, preferred: [], fallback: [] };
+    return this.#candidates(role, [], { policy })
+      .rows.slice(0, 3)
+      .map(({ p, m, health }) => ({ id: m.id, name: m.displayName || m.name, providerId: p.id, health }));
   }
 
   saveRouting(p) {

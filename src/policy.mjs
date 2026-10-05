@@ -6,9 +6,8 @@ import path from 'node:path';
 // rather than Object.keys, or it will treat `health` as a fifth role.
 const ROLES = ['planner', 'implementer', 'reviewer', 'repair', 'session'];
 
-// Per-role routing policy. The four weights are only meaningful relative to each
-// other: scoring multiplies each model's quality/speed/cost by the policy's own
-// weight, so a role that cares about speed sets a high speed weight.
+// Per-role routing policy. `strategy` decides which model Automatic picks - see
+// STRATEGIES below for what each one weighs.
 //
 // timeout is in seconds. maxToolCalls and maxRunCost (USD) are budgets rather
 // than schedules: a wall clock does not stop an agent that is busy the whole
@@ -67,10 +66,10 @@ const ROLES = ['planner', 'implementer', 'reviewer', 'repair', 'session'];
 // in routing.json is itself the way out (see repairLimitError in src/service.mjs).
 // Non-positive or absent means no ceiling, like the other budgets here.
 const defaults = {
-  planner: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.2, speed: 0.1, effort: 'high', timeout: 900, stall: 120, maxToolCalls: 40, maxRunCost: 1, subagentWait: 600 },
-  implementer: { strategy: 'balanced', preferred: [], fallback: [], quality: 0.5, cost: 0.2, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5, subagentWait: 600 },
-  reviewer: { strategy: 'quality', preferred: [], fallback: [], quality: 1, cost: 0.1, speed: 0.3, effort: 'high', timeout: 900, stall: 120, maxToolCalls: 40, maxRunCost: 1, subagentWait: 600 },
-  repair: { strategy: 'speed', preferred: [], fallback: [], quality: 0.2, cost: 0.4, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5, subagentWait: 600, maxRepairs: 5 },
+  planner: { strategy: 'quality', preferred: [], fallback: [], effort: 'high', timeout: 900, stall: 120, maxToolCalls: 40, maxRunCost: 1, subagentWait: 600 },
+  implementer: { strategy: 'balanced', preferred: [], fallback: [], effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5, subagentWait: 600 },
+  reviewer: { strategy: 'quality', preferred: [], fallback: [], effort: 'high', timeout: 900, stall: 120, maxToolCalls: 40, maxRunCost: 1, subagentWait: 600 },
+  repair: { strategy: 'speed', preferred: [], fallback: [], effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 200, maxRunCost: 5, subagentWait: 600, maxRepairs: 5 },
   // A supervised session is budgeted where a chat deliberately is not. A chat is a
   // person asking and reading, and the person is the loop that stops it; a session
   // is an agent acting in the user's checkout, and its loop is its own. So it takes
@@ -88,7 +87,7 @@ const defaults = {
   // together may spend in a day - the machine's, not one session's, because a cap
   // read per session would let five of them spend five times it. Absent or
   // non-positive means the per-run budget is the only bound.
-  session: { strategy: 'balanced', preferred: [], fallback: [], quality: 0.5, cost: 0.3, speed: 1, effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 100, maxRunCost: 2, subagentWait: 600, permissionTimeoutMs: 120, dailyCap: 0 },
+  session: { strategy: 'balanced', preferred: [], fallback: [], effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 100, maxRunCost: 2, subagentWait: 600, permissionTimeoutMs: 120, dailyCap: 0 },
   // Circuit-breaker thresholds. Absent means the defaults in src/health.mjs apply.
   health: {},
   // Prompt budget for the context assembler. Absent means the defaults in
@@ -111,6 +110,11 @@ function normalize(p) {
     // A role absent from the saved file falls back to its default rather than
     // becoming undefined.
     out[role] = { ...defaults[role], ...out[role] };
+    // The raw weights the router used to read in place of the strategy. Every saved
+    // file has them, and honouring them would let a stale number override the
+    // strategy the page shows; the strategy is now the whole of the setting.
+    for (const key of ['quality', 'speed', 'cost']) delete out[role][key];
+    if (!STRATEGIES[out[role].strategy]) out[role].strategy = defaults[role].strategy;
     for (const key of ['preferred', 'fallback']) {
       out[role][key] = (out[role][key] || []).map((x) => RENAMED[x] || x);
     }
@@ -146,4 +150,51 @@ export function savePolicies(root, p) {
   return merged;
 }
 
-export { defaults, ROLES };
+// What each strategy on the Routing page means, as weights over three measures that
+// are each on a 0-1 scale (see modelFit). The strategy is the setting a person
+// chooses; these numbers are how the router reads it, for the role's first pick and
+// for every slot of its chain left on Automatic. Until 2026-10-05 the router read
+// three raw weights stored beside the strategy and never the strategy itself, so the
+// toggle on the page changed nothing.
+const STRATEGIES = {
+  quality: { quality: 1, speed: 0.1, cost: 0.1 },
+  balanced: { quality: 0.6, speed: 0.4, cost: 0.4 },
+  speed: { quality: 0.3, speed: 1, cost: 0.2 },
+  cost: { quality: 0.3, speed: 0.2, cost: 1 },
+};
+
+// The share of an agent run's tokens in each billing class, measured over every
+// priced run on 2026-10-05: cache reads dominate, writes (or, on a provider with no
+// write premium, uncached input) are most of the rest, and output is a sliver that
+// is nevertheless priced 5-50x a read.
+const TOKEN_MIX = { cacheRead: 0.88, write: 0.1, output: 0.015 };
+
+// A blended dollar rate per million tokens of agent traffic. A subscription model
+// is free at the margin - the plan is paid for whether or not it is used - so it is
+// priced at zero here. Its list price still prices the run in the ledger.
+export function blendedRate(m) {
+  if (m.billingMode === 'subscription') return 0;
+  const input = m.inputCostPerMTok ?? 0;
+  const read = m.cacheReadCostPerMTok ?? input;
+  const write = m.cacheWriteCostPerMTok ?? input;
+  return TOKEN_MIX.cacheRead * read + TOKEN_MIX.write * write + TOKEN_MIX.output * (m.outputCostPerMTok ?? 0);
+}
+
+// A blended rate at or above this scores zero on cost. It is Fable's list rate,
+// the most expensive model in any catalog, so the scale does not move when a
+// cheaper model is enabled or disabled.
+const RATE_CEILING = 3.7;
+
+// How well a model suits a strategy, on a fixed scale. Quality and speed are the
+// registry's own 0-10 ratings. Cost is logarithmic, because the gap between $0.03
+// and $0.12 a million matters to someone choosing Cost as much as the gap between
+// $1 and $4 - a linear scale reads every non-Claude model as equally free.
+export function modelFit(m, strategy) {
+  const w = STRATEGIES[strategy] || STRATEGIES.balanced;
+  const quality = (m.quality ?? 5) / 10;
+  const speed = (m.speed ?? 5) / 10;
+  const cost = 1 - Math.min(1, Math.log1p(blendedRate(m)) / Math.log1p(RATE_CEILING));
+  return w.quality * quality + w.speed * speed + w.cost * cost;
+}
+
+export { defaults, ROLES, STRATEGIES };
