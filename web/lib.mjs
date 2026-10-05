@@ -11,7 +11,7 @@ export * from 'preact/hooks';
 // The CLI, the TUI and the dashboard render the same events, so they render them
 // with the same functions. `ai-code/format` is mapped to src/format.mjs by the
 // import map in index.html and served from there by src/server.mjs.
-export { describeEvent, formatEvent, formatDuration, formatTokens, formatCost, formatState, formatWhen, shortId, bodyKind, diffLines, diffSides, diffFiles, diffLanguage, splitHighlighted, unifiedDiff, decisionView, sessionSteps, gitImpact } from 'ai-code/format';
+export { describeEvent, formatEvent, formatDuration, formatTokens, formatCost, formatState, formatWhen, shortId, bodyKind, diffLines, diffSides, diffFiles, diffLanguage, splitHighlighted, unifiedDiff, decisionView, sessionSteps, gitImpact, priceAt } from 'ai-code/format';
 
 // Per-browser memory for conveniences: where a person was, what they had filtered,
 // what they had typed and not sent. localStorage throws in some privacy modes and

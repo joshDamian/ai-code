@@ -1111,3 +1111,29 @@ export function gitImpact(command) {
     items,
   };
 }
+
+// A model's rates for re-pricing another model's tokens: a token-count profile
+// priced as if this model had run it. Shared with the dashboard, which prices a
+// comparison's attempts at whichever model the person picks.
+//
+// Fresh input is the one class the providers report differently. Claude Code
+// writes a new prefix to the cache and bills it as a cache write; DeepSeek and
+// Fireworks report it as plain input and charge no write premium. So the two are
+// pooled as `fresh` and priced at what this model charges for a new prefix: its
+// cache-write rate where it has one, its input rate where it does not.
+export function referenceRates(m) {
+  const input = m.inputCostPerMTok ?? 0;
+  return {
+    fresh: m.cacheWriteCostPerMTok ?? input,
+    cache_read: m.cacheReadCostPerMTok ?? input,
+    output: m.outputCostPerMTok ?? 0,
+  };
+}
+
+// Prices a token profile ({input, cache_read, cache_write, output}) at a set of
+// referenceRates.
+export function priceAt(tokens, rates) {
+  if (!tokens || !rates) return 0;
+  const fresh = (tokens.input || 0) + (tokens.cache_write || 0);
+  return (fresh * rates.fresh + (tokens.cache_read || 0) * rates.cache_read + (tokens.output || 0) * rates.output) / 1e6;
+}

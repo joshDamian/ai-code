@@ -13,7 +13,7 @@ import {
 import { runAgent, classify, permissionMcpConfig, appMcpConfig, removeMcpConfig, DISCUSSION_OPENS } from './agents.mjs';
 import { loadPolicies, savePolicies, modelFit } from './policy.mjs';
 import { isTransient, healthThresholds, effectiveHealth } from './health.mjs';
-import { unifiedDiff, sessionSteps, toolTarget, gitImpact } from './format.mjs';
+import { unifiedDiff, sessionSteps, toolTarget, gitImpact, referenceRates } from './format.mjs';
 
 const exec = promisify(execFile);
 
@@ -2086,7 +2086,11 @@ export class Service {
   attemptMetrics(t) {
     const runs = this.store.listRuns(t.id);
     const turns = t.session_id ? this.store.listSessionRuns(t.session_id) : [];
-    const agents = [...runs.filter((r) => r.role !== 'tester'), ...turns];
+    // The attempt's own work: not the test command, and not the decision record a
+    // completed pipeline task drafts afterwards (a `chat` run on the task), which a
+    // session attempt has no counterpart for and which would be counted as part of
+    // how the pipeline worked.
+    const agents = [...runs.filter((r) => r.role !== 'tester' && r.role !== 'chat'), ...turns];
     const sum = (rows, k) => rows.reduce((n, r) => n + (Number(r[k]) || 0), 0);
     let toolCalls = 0;
     for (const r of agents) for (const e of this.store.listEvents(r.id)) toolCalls += countToolCalls(e);
@@ -2114,7 +2118,19 @@ export class Service {
       state: t.state,
       pick: t.pick || null,
       running,
-      cost: sum([...runs, ...turns], 'cost'),
+      cost: sum(agents, 'cost'),
+      // The tokens behind that cost, so the page can price every attempt at one
+      // model's rates. What each attempt actually spent depends on the model it ran
+      // on as much as on how it worked, and two attempts on different models - or one
+      // that fell back - cannot be compared on spend alone.
+      tokens: {
+        input: sum(agents, 'input_tokens'),
+        cache_read: sum(agents, 'cache_read_tokens'),
+        cache_write: sum(agents, 'cache_write_tokens'),
+        output: sum(agents, 'output_tokens'),
+      },
+      // Every model the attempt actually ran on, so a fallback is visible.
+      models_used: [...new Set(agents.map((r) => r.model_id).filter(Boolean))],
       active_ms: sum([...runs, ...turns], 'duration_ms'),
       tool_calls: toolCalls,
       interventions,
@@ -2128,7 +2144,14 @@ export class Service {
   attempts(group) {
     const tasks = this.store.listAttempts(group);
     if (!tasks.length) throw Object.assign(new Error('Comparison not found'), { code: 'NOT_FOUND' });
-    return { group, title: tasks[0].title, description: tasks[0].description, base_commit: tasks[0].base_commit, attempts: tasks.map((t) => this.attemptMetrics(t)) };
+    // The models an attempt's tokens can be priced at: every enabled one with a
+    // published rate. The page does the arithmetic, so switching the reference
+    // model costs no request.
+    const rates = this.store
+      .listModels()
+      .filter((m) => m.enabled && m.providerId !== 'mock' && m.inputCostPerMTok != null)
+      .map((m) => ({ id: m.id, name: m.displayName || m.name, ...referenceRates(m) }));
+    return { group, title: tasks[0].title, description: tasks[0].description, base_commit: tasks[0].base_commit, attempts: tasks.map((t) => this.attemptMetrics(t)), rates };
   }
 
   // The person's choice. The winner stays as it is, to be landed like any task; the
@@ -4808,9 +4831,15 @@ export class Service {
     return { rows, rejections };
   }
 
-  select(role, excluded = [], preferredModelId = null) {
+  // `policyKey` names the policy the pick is scored on when it is not the role's
+  // own. A task session runs as `session` for its permissions and on `taskSession`
+  // for everything else, and until this argument existed the pick read `session` -
+  // so a model pinned or a strategy set for task sessions was ignored, while their
+  // budgets and effort were honoured.
+  select(role, excluded = [], preferredModelId = null, policyKey = null) {
     const cap = capability[role];
-    const first = this.#candidates(role, excluded);
+    const policy = policyKey ? this.policies[policyKey] : null;
+    const first = this.#candidates(role, excluded, { policy });
     // A per-task preference, and only a preference: it wins the first pass by
     // being picked from the rows that already survived every gate - enabled,
     // routable, not in an OPEN circuit, not at capacity - so a model that would
@@ -4827,7 +4856,7 @@ export class Service {
     // The preference is deliberately absent here: this pass is the one that runs
     // when nothing is healthy, and pinning it would turn "try the best of a bad
     // lot" into "try this one again".
-    const forced = this.#candidates(role, excluded, { ignoreHealth: true });
+    const forced = this.#candidates(role, excluded, { ignoreHealth: true, policy });
     if (forced.rows[0]) return { ...forced.rows[0], healthForced: true };
     // Mock providers are excluded from routing above (a real install must never
     // route to them by accident), so they are only reachable as a last resort,
@@ -5146,7 +5175,7 @@ export class Service {
       // preference mid-run is asking for the next attempt to see it.
       const preferred = options.preferredModelId || task.model_id || (role === 'planner' && task.plan_model ? task.plan_model : null);
       try {
-        ({ p, m, healthForced } = this.select(role, excluded, preferred));
+        ({ p, m, healthForced } = this.select(role, excluded, preferred, options.policyKey || null));
       } catch (selErr) {
         // Nothing left to route to, and two facts are worth reporting: the failure
         // that emptied the chain by one, and why nothing was left after it. Only the
@@ -5985,9 +6014,11 @@ export class Service {
   // what the strategy chooses. The Routing page asks it as the toggle moves, before
   // anything is saved, so a person sees the consequence of the setting they are on.
   routingPreview(role, strategy) {
-    if (!capability[role]) throw new Error(`Unknown role '${role}'`);
+    // A policy key that is not itself a role is previewed as the role that runs it.
+    const runsAs = role === 'taskSession' ? 'session' : role;
+    if (!capability[runsAs]) throw new Error(`Unknown role '${role}'`);
     const policy = { ...(this.policies[role] || {}), strategy, preferred: [], fallback: [] };
-    return this.#candidates(role, [], { policy })
+    return this.#candidates(runsAs, [], { policy })
       .rows.slice(0, 3)
       .map(({ p, m, health }) => ({ id: m.id, name: m.displayName || m.name, providerId: p.id, health }));
   }

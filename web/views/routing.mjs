@@ -4,8 +4,10 @@ import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { Select } from '../components/form.mjs';
 
-const ROLES = ['planner', 'implementer', 'reviewer', 'repair'];
-const ROLE_CAPABILITY = { planner: 'planning', implementer: 'coding', reviewer: 'review', repair: 'repair' };
+const ROLES = ['planner', 'implementer', 'reviewer', 'repair', 'taskSession'];
+const ROLE_CAPABILITY = { planner: 'planning', implementer: 'coding', reviewer: 'review', repair: 'repair', taskSession: 'coding' };
+// The heading a role key is shown under, where the key itself is not a word.
+const ROLE_TITLE = { taskSession: 'Task session' };
 const STRATEGIES = ['quality', 'balanced', 'speed', 'cost'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -78,6 +80,7 @@ const ROLE_ABOUT = {
   implementer: 'Carries out the approved plan in the task’s worktree.',
   reviewer: 'Reads the diff and judges it against the plan.',
   repair: 'Fixes what the tests or the review found.',
+  taskSession: 'Does a whole task as one conversation in its own worktree, when a task runs on the session engine.',
 };
 
 function Seg({ value, options, onChange, label }) {
@@ -120,7 +123,7 @@ function RoleCard({ role, policy, models, onChange }) {
     <section class="card role-card">
       <div class="role-card-head">
         <div class="role-card-title">
-          <h2>${role[0].toUpperCase() + role.slice(1)}</h2>
+          <h2>${ROLE_TITLE[role] || role[0].toUpperCase() + role.slice(1)}</h2>
           <p class="muted">${ROLE_ABOUT[role]}</p>
         </div>
         <${Seg} label=${`${role} strategy`} value=${strategy} options=${STRATEGIES} onChange=${(v) => onChange({ strategy: v })} />

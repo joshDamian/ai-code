@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,withBudget,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig,subagentModel,projectMemoryDir,userInstructionsFile} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {modelFit,blendedRate,loadPolicies} from '../src/policy.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,withBudget,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig,subagentModel,projectMemoryDir,userInstructionsFile} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {modelFit,blendedRate,loadPolicies} from '../src/policy.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact,referenceRates,priceAt} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -7502,4 +7502,48 @@ test('a tool list holds only tool names: settings and memory never land inside o
       }
     }
   }finally{if(saved===undefined)delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR=saved}
+});
+
+
+test('a task session is routed on the taskSession policy, not the session policy it runs under',()=>{
+  const {s}=strategyFixture();
+  const r=s.getRouting();
+  s.saveRouting({...r,session:{...r.session,strategy:'speed',preferred:[]},taskSession:{...r.taskSession,strategy:'quality',preferred:['cash:strong']}});
+  // The fixture's models carry `coding`, which is what a session asks for.
+  assert.equal(s.select('session').m.id,'quick','a conversation still reads session');
+  assert.equal(s.select('session',[],null,'taskSession').m.id,'strong','a task session reads taskSession, pins included');
+  s.saveRouting({...s.getRouting(),taskSession:{...s.getRouting().taskSession,preferred:[]}});
+  assert.equal(s.select('session',[],null,'taskSession').m.id,'frontier','and its strategy');
+  assert.equal(s.routingPreview('taskSession','speed')[0].id,'quick','the Routing page can preview it');
+});
+
+test('a token profile is priced at another model\'s rates, pooling fresh input across reporting styles',()=>{
+  const opus=referenceRates({inputCostPerMTok:4,outputCostPerMTok:20,cacheReadCostPerMTok:0.2,cacheWriteCostPerMTok:8});
+  const flash=referenceRates({inputCostPerMTok:0.15,outputCostPerMTok:0.6,cacheReadCostPerMTok:0.003});
+  assert.deepEqual(flash,{fresh:0.15,cache_read:0.003,output:0.6},'no write premium: fresh is priced as input');
+  // The two attempts of comparison 1030dcda on 2026-10-05. Claude reports fresh
+  // input as cache writes, DeepSeek as input; both are the same kind of token.
+  const pipeline={input:30,cache_read:903549,cache_write:212384,output:7035};
+  const session={input:38357,cache_read:487168,cache_write:0,output:8186};
+  assert.ok(Math.abs(priceAt(pipeline,opus)-2.021)<0.001);
+  assert.ok(Math.abs(priceAt(session,opus)-0.568)<0.001);
+  assert.ok(Math.abs(priceAt(session,flash)-0.0121)<0.0005);
+  assert.equal(priceAt(null,opus),0);
+});
+
+test('the compare view gets each attempt\'s tokens, the models it ran on, and the rates to price them at', async () => {
+  const { s, p } = sessionEngine();
+  s.updateProvider('agent', { config: { ...s.store.getProvider('agent').config, usage: { input_tokens: 1000, cache_read_input_tokens: 50000, cache_creation_input_tokens: 0, output_tokens: 2000 } } });
+  s.updateModel('agent-m', { inputCostPerMTok: 1, outputCostPerMTok: 5, cacheReadCostPerMTok: 0.1, billingMode: 'api' });
+  const { group, tasks } = s.createAttempts(p.id, 'Add a feature file.', [{ engine: 'session', modelId: 'agent-m' }, { engine: 'session', modelId: 'agent-m' }]);
+  const { session } = s.startSessionTask(tasks[0].id);
+  await s.sessionTurn(session.id);
+  const view = s.attempts(group);
+  const a = view.attempts.find((x) => x.id === tasks[0].id);
+  assert.deepEqual(a.tokens, { input: 1000, cache_read: 50000, cache_write: 0, output: 2000 });
+  assert.deepEqual(a.models_used, ['agent-m']);
+  const rate = view.rates.find((r) => r.id === 'agent-m');
+  assert.deepEqual({ fresh: rate.fresh, cache_read: rate.cache_read, output: rate.output }, { fresh: 1, cache_read: 0.1, output: 5 });
+  assert.ok(Math.abs(priceAt(a.tokens, rate) - a.cost) < 1e-9, 'priced at its own model, the reference price is what it spent');
+  assert.ok(!view.rates.some((r) => r.id.startsWith('mock')), 'the mock is not a reference model');
 });

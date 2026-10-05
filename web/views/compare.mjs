@@ -10,7 +10,7 @@
 // Blind by default until decided. Knowing which attempt is the expensive model is
 // the easiest way to prefer it, so the engine and model are hidden behind the
 // letters until you choose to show them or you pick.
-import { html, useState, useEffect, useCallback, formatCost, formatDuration, recall, remember } from '../lib.mjs';
+import { html, useState, useEffect, useCallback, formatCost, formatDuration, recall, remember, priceAt } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
@@ -18,9 +18,14 @@ import { Spinner } from '../components/spinner.mjs';
 import { DiffViewer } from '../components/diff-viewer.mjs';
 import { confirmAction } from '../components/confirm.mjs';
 import { SkeletonRows } from '../components/skeleton.mjs';
-import { Toggle } from '../components/form.mjs';
+import { Toggle, Select } from '../components/form.mjs';
 
 const REVEALED = 'ai-code:compare-revealed';
+const REFERENCE = 'ai-code:compare-reference';
+// The model every attempt's tokens are priced at until you choose another. A fixed
+// default rather than one of the attempts' own models, which would say which
+// attempt ran on what while the page is meant to be blind.
+const DEFAULT_REFERENCE = 'anthropic:claude-opus-5-5';
 // States an attempt can still move out of on its own.
 const MOVING = new Set(['CREATED', 'CONTEXT_READY', 'PLANNING', 'APPROVED', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING', 'WORKING']);
 const ENGINE_LABEL = { pipeline: 'Pipeline', session: 'Session' };
@@ -43,6 +48,22 @@ export function Compare({ group, navigate, onTitle }) {
       return false;
     }
   });
+
+  const [reference, setReference] = useState(() => {
+    try {
+      return recall(REFERENCE, null) || DEFAULT_REFERENCE;
+    } catch {
+      return DEFAULT_REFERENCE;
+    }
+  });
+  function chooseReference(id) {
+    setReference(id);
+    try {
+      remember(REFERENCE, id);
+    } catch {
+      /* applied for this visit even if it cannot be saved */
+    }
+  }
 
   const load = useCallback(async () => {
     try {
@@ -135,6 +156,14 @@ export function Compare({ group, navigate, onTitle }) {
   if (!data) return html`<div class="view-compare"><${SkeletonRows} count=${4} /></div>`;
 
   const winner = data.attempts.find((a) => a.pick === 'won');
+  const rates = data.rates || [];
+  const ref = rates.find((r) => r.id === reference) || rates.find((r) => r.id === DEFAULT_REFERENCE) || rates[0] || null;
+  const atRef = (a) => (ref ? priceAt(a.tokens, ref) : null);
+  const cheapest = ref ? Math.min(...data.attempts.filter((a) => a.tokens).map(atRef)) : null;
+  // Spend is only comparable between attempts that ran on the same model. Said
+  // once the models are shown, so the warning cannot unblind the page.
+  const modelSets = data.attempts.map((a) => (a.models_used || []).join(','));
+  const mixed = new Set(modelSets.filter(Boolean)).size > 1 || data.attempts.some((a) => (a.models_used || []).length > 1);
 
   return html`
     <div class="view-compare">
@@ -148,6 +177,23 @@ export function Compare({ group, navigate, onTitle }) {
           ? null
           : html`<${Toggle} checked=${revealed} onChange=${reveal} label="Show engines and models" />`}
       </div>
+
+      ${ref
+        ? html`<div class="compare-reference">
+            <${Select}
+              label="Price every attempt at"
+              inline
+              size="sm"
+              value=${ref.id}
+              options=${rates.map((r) => ({ value: r.id, label: r.name, hint: r.id.split(':')[0] }))}
+              onChange=${chooseReference}
+            />
+            <span class="muted">The same tokens priced at one model's rates, so the difference is how each attempt worked, not which model it ran on.</span>
+          </div>`
+        : null}
+      ${show && mixed
+        ? html`<p class="notice compare-mixed">These attempts ran on different models, so "Spent" mixes the engine with the model. Compare them on the reference price instead.</p>`
+        : null}
 
       ${winner
         ? html`<div class="notice compare-decided">
@@ -173,6 +219,15 @@ export function Compare({ group, navigate, onTitle }) {
                 <div><dt>Checks</dt><dd>${a.checks ? html`<${StatusBadge} status=${a.checks} />` : html`<span class="muted">${a.running || MOVING.has(a.state) ? 'Not yet' : 'Not run'}</span>`}</dd></div>
                 <div><dt>Changes</dt><dd>${a.changes ? (a.changes.files ? html`${a.changes.files} file${a.changes.files === 1 ? '' : 's'} <span class="good">+${a.changes.added}</span> <span class="bad">−${a.changes.removed}</span>` : 'None') : '—'}</dd></div>
                 <div><dt>Spent</dt><dd class="mono-sm">${formatCost(a.cost)}</dd></div>
+                ${ref && a.tokens
+                  ? html`<div title=${`This attempt's tokens priced at ${ref.name} rates: ${(a.tokens.input + a.tokens.cache_write).toLocaleString()} fresh input, ${a.tokens.cache_read.toLocaleString()} cache reads, ${a.tokens.output.toLocaleString()} output`}>
+                      <dt>At ${ref.name}</dt>
+                      <dd class="mono-sm">${formatCost(atRef(a))}${cheapest > 0 && atRef(a) > cheapest * 1.05 ? html` <span class="muted">${(atRef(a) / cheapest).toFixed(1)}×</span>` : null}</dd>
+                    </div>`
+                  : null}
+                ${show && (a.models_used || []).length > 1
+                  ? html`<div><dt>Models</dt><dd class="mono-sm warn-text">${a.models_used.map((m) => m.split(':').pop()).join(', ')}</dd></div>`
+                  : null}
                 <div><dt>Run time</dt><dd class="mono-sm">${a.active_ms ? formatDuration(a.active_ms) : '—'}</dd></div>
                 <div><dt>Tool calls</dt><dd class="mono-sm">${a.tool_calls}</dd></div>
                 <div title="How often you had to act: approvals and replies for a session, plan approvals and re-plans for a pipeline"><dt>Your inputs</dt><dd class="mono-sm">${a.interventions}</dd></div>
