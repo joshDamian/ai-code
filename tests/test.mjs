@@ -7256,3 +7256,16 @@ test('an agent is told its tool-call budget, and an unbounded one is told nothin
   assert.match(withBudget('Plan.',40),/subagent you spawn do not count/);
   assert.equal(withBudget('Plan.',Infinity),'Plan.');
 });
+
+test('a worktree\'s node_modules link is ignored by git even where the project ignores only the directory',()=>{
+  const root=repo();
+  fs.writeFileSync(path.join(root,'.gitignore'),'node_modules/\n');
+  execFileSync('git',['add','.gitignore'],{cwd:root});execFileSync('git',['-c','user.email=t@e','-c','user.name=t','commit','-qm','ignore'],{cwd:root});
+  fs.mkdirSync(path.join(root,'node_modules','dep'),{recursive:true});
+  const wt=createWorktree(root,'nm-task');
+  assert.ok(fs.lstatSync(path.join(wt.dir,'node_modules')).isSymbolicLink(),'the link is made');
+  const status=execFileSync('git',['status','--porcelain','--untracked-files=all'],{cwd:wt.dir,encoding:'utf8'});
+  assert.equal(status.includes('node_modules'),false,`git sees the link: ${status}`);
+  execFileSync('git',['add','-A'],{cwd:wt.dir});
+  assert.equal(execFileSync('git',['diff','--cached','--name-only'],{cwd:wt.dir,encoding:'utf8'}).includes('node_modules'),false,'and add -A does not stage it');
+});

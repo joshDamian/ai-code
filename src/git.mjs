@@ -70,7 +70,17 @@ export function planWorktreeIds(root){
 // A worktree shares the repo's package.json but not its node_modules (gitignored).
 // Without this, every test step and every implementer that imports a dependency
 // fails on ERR_MODULE_NOT_FOUND. A symlink is instant and always in sync.
-function linkDeps(root,dir){const nm=path.join(root,'node_modules');const target=path.join(dir,'node_modules');if(fs.existsSync(nm)&&!fs.existsSync(target)){try{fs.symlinkSync(nm,target,'junction')}catch{/* race or permission — the install step will catch it */}}}
+//
+// The link must also be invisible to git. A project's `node_modules/` ignore rule
+// matches directories only, and a symlink is not one, so the link showed up as an
+// untracked file and port committed it: a dangling absolute path in kron, novara and
+// ai-code branches, and in novara's history. `/node_modules` in the repository's own
+// exclude file matches the link too, and that file is never part of a diff. It is
+// written before the link, so no moment exists in which the link is unignored.
+function linkDeps(root,dir){const nm=path.join(root,'node_modules');const target=path.join(dir,'node_modules');if(fs.existsSync(nm)&&!fs.existsSync(target)){excludeLine(root,'/node_modules');try{fs.symlinkSync(nm,target,'junction')}catch{/* race or permission — the install step will catch it */}}}
+// Appends one pattern to the repository's .git/info/exclude unless it is there. The
+// exclude file lives in the common git directory, so every worktree reads it.
+export function excludeLine(root,line){const f=path.join(root,'.git','info','exclude');try{fs.mkdirSync(path.dirname(f),{recursive:true});const s=fs.existsSync(f)?fs.readFileSync(f,'utf8'):'';if(s.split('\n').some((x)=>x.trim()===line))return;fs.appendFileSync(f,(s.endsWith('\n')||!s?'':'\n')+line+'\n')}catch{/* a .git file (a worktree root) has no info dir to write; nothing to protect here */}}
 // Against a ref, not against the index. `git diff` alone compares the worktree to
 // the index, so staging or committing the work makes it empty - which hands the
 // reviewer a blank page, and a blank page is a PASS. Against a ref it reads the
