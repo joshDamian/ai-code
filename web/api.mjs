@@ -118,7 +118,13 @@ export const api = {
   },
   // `parentId` is optional: a task created without one is a task with no parent,
   // which is what every task was before the field existed.
-  createTask: (projectId, title, parentId) => request('/api/tasks', { method: 'POST', body: { projectId, title, parentId } }),
+  // `opts` says how it runs: `engine` ('pipeline' or 'session'), `modelId`, `planFirst`,
+  // or `variants` - two or more {engine, modelId} - for a side-by-side comparison,
+  // whose reply is `{group, tasks}` instead of a task.
+  createTask: (projectId, title, parentId, opts = {}) => request('/api/tasks', { method: 'POST', body: { projectId, title, parentId, ...opts } }),
+  attempts: (group) => request(`/api/attempts/${encodeURIComponent(group)}`),
+  pickAttempt: (group, taskId) => request(`/api/attempts/${encodeURIComponent(group)}/pick`, { method: 'POST', body: { taskId } }),
+  scoreboard: () => request('/api/scoreboard'),
   taskShow: (id) => request(`/api/tasks/${id}/show`),
   // Without `before` this returns the newest window; with it, the window ending
   // just before that event id. Callers that render the result must bound it.

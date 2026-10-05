@@ -16,7 +16,9 @@ export function protectAiCode(root){const f=path.join(root,'.git','info','exclud
 export function head(root){return git(root,['rev-parse','HEAD'])}
 // Where every worktree cut from this repository lives, a task's and a plan's alike.
 export function worktreeRoot(root){return process.env.AI_CODE_WORKTREE_ROOT||path.join(path.dirname(root),`.ai-code-worktrees-${path.basename(root)}`)}
-export function createWorktree(root,id){ensureGit(root);const base=head(root);const dir=path.join(worktreeRoot(root),id);const branch=`ai-code/${id}`;fs.mkdirSync(path.dirname(dir),{recursive:true});if(!fs.existsSync(dir))git(root,['worktree','add','-b',branch,dir,base]);linkDeps(root,dir);return {dir,branch,base}}
+// `at` pins the commit the branch is cut from: the attempts of one comparison all
+// start from the same one, whatever lands on the main branch while they are created.
+export function createWorktree(root,id,at=null){ensureGit(root);const base=at||head(root);const dir=path.join(worktreeRoot(root),id);const branch=`ai-code/${id}`;fs.mkdirSync(path.dirname(dir),{recursive:true});if(!fs.existsSync(dir))git(root,['worktree','add','-b',branch,dir,base]);linkDeps(root,dir);return {dir,branch,base}}
 // The planner's disposable copy of the repository. It sits beside the task's own
 // worktree under a `plan-` name, detached rather than on a branch: nothing made in
 // it is ever kept, so a branch would be one more ref to clean up for no reader.

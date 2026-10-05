@@ -50,6 +50,18 @@ export const transitions = {
   CANCELLED: [],
 };
 
+// A session-engine task's states. It has no plan to approve and no review to pass,
+// so it moves between working and waiting on the person until its checks pass:
+// WORKING while a turn runs, TESTING while the project's test command runs on what
+// it left, COMPLETE when there are changes and the checks pass, WAITING when a turn
+// ended without changing anything (a question, or a plan-first proposal), FAILED
+// when the checks still fail after the fixes it is allowed. Any of those but
+// CANCELLED takes a new message, which is what makes it a conversation.
+export const SESSION_TASK_STATES = ['WORKING', 'TESTING', 'WAITING', 'COMPLETE', 'FAILED', 'CANCELLED'];
+export const ENGINES = new Set(['pipeline', 'session']);
+// The letters attempts are shown under, which is also how many can be compared.
+const ATTEMPT_LABELS = ['A', 'B', 'C', 'D'];
+
 // Which capability a role requires a model to declare.
 //
 // `chat` asks for `planning` rather than a capability of its own. The catalog's
@@ -637,22 +649,22 @@ export const SESSION_PROMPT =
 export const READ_TURN_PROMPT =
   `${CHAT_PROMPT} This conversation is read-only right now. If the person asks you to change files or run commands, say what you would change and tell them to switch the conversation to Can edit. When the person asks for a task, or the work you found is task-shaped, propose it with the draft_task tool: it lands in this project's approval queue and becomes a task only when the person approves it. The built-in Task tools (TaskCreate, TaskList, TaskUpdate) are a private todo list for this turn, not this project's tasks: never report their output as a task. ${SHARE_CLAUSE}`;
 
-// The instruction is the `TASK` half of the prompt runRole builds, so only what
-// came before it belongs here. `head` is the mode's preamble; `app` names where the
-// person is asking from when the AI Code tools are available.
-function sessionPrompt(history, { head = SESSION_PROMPT, app = null } = {}) {
-  const top = app ? `${head}\n\n${appToolsNote(app)}` : head;
-  return history ? `${top}\n\nWHAT HAS HAPPENED SO FAR, oldest first:\n\n${history}` : top;
-}
-
-// What a session's turn is about, as the prompt's APPROVED PLAN slot.
+// What a task's session is told beside the person's words, and nothing more than
+// the facts it cannot find for itself: where it is, what happens to its work, and
+// which tools are this harness's. The rules that matter are enforced by the gate
+// rather than stated - a push asks the person whatever this says - so there is no
+// paragraph here pleading with the agent not to do things.
 //
-// A session has no plan and will never have one - that is what makes it a session
-// rather than a task, and the slot is not optional in the shape runRole builds.
-// The honest text is what it gets, because a model handed a plan that does not
-// exist would plan against it.
-const SESSION_NO_PLAN =
-  'No plan: this is a supervised session, not a task. Nothing here has been approved for implementation, and the person watching approves each action as it happens rather than a plan in advance.';
+// `plan_first` is the one behavioural line, and only when the task asks for it.
+export function taskSessionPrompt(task, s) {
+  const lines = [
+    `You are working on a task in a git worktree at ${s.cwd}, on branch ${task.branch || 'its own branch'}. It is a separate checkout of the project, so change whatever the task needs here.`,
+    'When you are done, say so and summarise what you changed. The person reviews the branch and lands it themselves, so do not push, merge, or open pull requests. Commit if it helps you work; the person sees the whole branch either way.',
+    "If the task is ambiguous in a way that changes the result, ask before building the wrong thing. Use share_file to show an image or file, and draft_task to propose follow-up work for this project's queue.",
+  ];
+  if (task.plan_first) lines.push('This task asks for a plan first: before changing any file, propose your approach and stop. Continue only when the person replies.');
+  return lines.join(' ');
+}
 
 // The file-modifying tools, as the task-shape check below counts them. Named as a
 // set rather than a pattern because the question is "did this change files", and a
@@ -1888,9 +1900,15 @@ export class Service {
     return writeContext(this.project(projectId));
   }
 
-  createTask(projectId, text, { parentId } = {}) {
+  // `engine` says how the task is run (ENGINES), `modelId` pins one model for all of
+  // it, and `planFirst` asks a session to propose before it changes anything. The
+  // last three are the comparison's: the group the attempt belongs to, the letter
+  // it is shown under, and the commit every attempt of the group starts from.
+  createTask(projectId, text, { parentId, engine = 'pipeline', modelId = null, planFirst = false, attemptGroup = null, attemptLabel = null, baseCommit = null } = {}) {
     this.project(projectId);
     if (parentId) this.#checkParent(projectId, parentId);
+    if (!ENGINES.has(engine)) throw new Error(`Unknown engine: ${engine}`);
+    if (modelId && !this.store.listModels().some((m) => m.id === modelId)) throw new Error(`Unknown model: ${modelId}`);
     const now = new Date().toISOString();
     return this.store.addTask({
       id: this.store.id(),
@@ -1901,7 +1919,308 @@ export class Service {
       parentId: parentId || null,
       createdAt: now,
       updatedAt: now,
+      engine,
+      modelId: modelId || null,
+      planFirst: !!planFirst,
+      attemptGroup,
+      attemptLabel,
+      baseCommit,
     });
+  }
+
+  // -- session-engine tasks ---------------------------------------------------
+  //
+  // A task run as one conversation: an agent in the task's own worktree, given the
+  // person's description as its first message, working until it says it is done.
+  // It is a supervised session in every way that matters - the transcript, the
+  // permission gate, attachments, share_file and resume are all the session's -
+  // with two differences. It works in a worktree, not the project's checkout, so
+  // its routine actions are allowed from the start (the worktree is the sandbox,
+  // and a push or anything risky still asks). And the harness checks its work at
+  // the end of every turn: the project's test command, handed back to the agent
+  // when it fails, so a task ends COMPLETE only with its checks passing.
+
+  // The worktree, the conversation, and the first message. The turn itself is the
+  // caller's to queue, as every session turn is.
+  startSessionTask(id) {
+    const t = this.task(id);
+    if (t.engine !== 'session') throw new Error('This task runs as a pipeline');
+    if (t.session_id) return { task: t, session: this.sessionById(t.session_id) };
+    if (t.state !== 'CREATED') throw new Error(`Cannot start a session for a task that is ${t.state}`);
+    const p = this.project(t.project_id);
+    const at = t.base_commit && revParse(p.path, t.base_commit) ? t.base_commit : null;
+    const wt = createWorktree(p.path, t.id, at);
+    const session = this.store.createSession({ id: this.store.id(), projectId: p.id, name: t.title, providerId: null, modelId: t.model_id || null, mode: 'edit' });
+    this.store.updateSession(session.id, { task_id: t.id, cwd: wt.dir, auto_allow: 1 });
+    this.store.updateTask(id, { worktree: wt.dir, branch: wt.branch, base_commit: at || wt.base, session_id: session.id, state: 'WORKING' });
+    this.askSession(session.id, t.description || t.title);
+    return { task: this.task(id), session: this.sessionById(session.id) };
+  }
+
+  // One turn of a task's session and what follows it. The follow-up is the checks,
+  // and when they fail, the failure handed back as the next message - up to
+  // taskSession.maxFixes times - before the task is marked failed. Run in the same
+  // job as the turn, so nothing else can start a turn in between.
+  async #taskSessionTurn(s) {
+    const taskId = s.task_id;
+    let fixes = 0;
+    for (;;) {
+      const result = await this.#taskTurn(taskId, s.id);
+      const t = this.task(taskId);
+      if (t.state === 'CANCELLED') return result;
+      if (!this.#taskChanged(t)) {
+        this.store.updateTask(taskId, { state: 'WAITING' });
+        return result;
+      }
+      this.store.updateTask(taskId, { state: 'TESTING' });
+      let failure = null;
+      try {
+        await this.test(t, t.worktree);
+      } catch (e) {
+        if (e.code === 'CANCELLED') {
+          this.store.updateTask(taskId, { state: 'WAITING' });
+          throw e;
+        }
+        failure = e.message;
+      }
+      if (!failure) {
+        this.store.updateTask(taskId, { state: 'COMPLETE' });
+        return result;
+      }
+      const max = Math.max(0, Number(this.policies.taskSession?.maxFixes ?? 2));
+      if (fixes >= max) {
+        this.store.updateTask(taskId, { state: 'FAILED' });
+        return result;
+      }
+      fixes++;
+      this.askSession(s.id, `The project's test command failed on your changes. Find the cause, fix it, and say when it passes.\n\n${String(failure).replace(/^TEST_FAILED:\s*/, '').slice(-4000)}`, [], { from: 'harness' });
+    }
+  }
+
+  // A turn, with the task's state kept in step: WORKING while it runs, WAITING when
+  // a person stopped it, FAILED when it failed.
+  async #taskTurn(taskId, sessionId) {
+    this.store.updateTask(taskId, { state: 'WORKING' });
+    try {
+      return await this.#sessionTurnOnce(sessionId);
+    } catch (e) {
+      const t = this.store.getTask(taskId);
+      if (t && t.state !== 'CANCELLED') this.store.updateTask(taskId, { state: e.code === 'CANCELLED' ? 'WAITING' : 'FAILED' });
+      throw e;
+    }
+  }
+
+  // Whether the task's branch differs from where it started: committed work, edits,
+  // or new files. The question the state after a turn rests on.
+  #taskChanged(t) {
+    return this.taskChangeStat(t).files > 0;
+  }
+
+  // What a task changed against the commit it started from, counted: files, lines
+  // added and removed. Committed and uncommitted work together, new files included,
+  // because an agent may leave its work either way and both are what would land.
+  taskChangeStat(t) {
+    const zero = { files: 0, added: 0, removed: 0 };
+    if (!t.worktree || !fs.existsSync(t.worktree) || !t.base_commit) return zero;
+    try {
+      const out = { ...zero };
+      for (const row of git(t.worktree, ['diff', '--numstat', t.base_commit]).split('\n').filter(Boolean)) {
+        const [a, r] = row.split('\t');
+        out.files++;
+        out.added += Number(a) || 0;
+        out.removed += Number(r) || 0;
+      }
+      // A new file is all additions. Counted by its lines, and skipped past a size
+      // where reading it would cost more than the number is worth.
+      for (const f of git(t.worktree, ['ls-files', '--others', '--exclude-standard']).split('\n').filter(Boolean)) {
+        out.files++;
+        try {
+          const full = path.join(t.worktree, f);
+          if (fs.statSync(full).size > 1024 * 1024) continue;
+          const text = fs.readFileSync(full, 'utf8');
+          if (text.includes('\0')) continue;
+          out.added += text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+        } catch {}
+      }
+      return out;
+    } catch {
+      return zero;
+    }
+  }
+
+  // -- attempts: one task, run several ways side by side -----------------------
+  //
+  // A comparison is several tasks with the same description, each an attempt: an
+  // engine on a model. They share a group id and a base commit, so each starts from
+  // the same tree in a worktree of its own, and they run under the same budgets the
+  // engine always has. The person compares what came back and picks one; the
+  // others are discarded. Every pick is kept, and the scoreboard is built from them.
+  createAttempts(projectId, text, variants, { parentId = null, planFirst = false } = {}) {
+    const p = this.project(projectId);
+    if (!Array.isArray(variants) || variants.length < 2) throw new Error('A comparison needs at least two attempts');
+    if (variants.length > ATTEMPT_LABELS.length) throw new Error(`At most ${ATTEMPT_LABELS.length} attempts can be compared`);
+    const group = this.store.id();
+    const base = head(p.path);
+    const tasks = variants.map((v, i) =>
+      this.createTask(projectId, text, {
+        parentId,
+        engine: v?.engine || 'pipeline',
+        modelId: v?.modelId || null,
+        planFirst: (v?.engine || 'pipeline') === 'session' && !!planFirst,
+        attemptGroup: group,
+        attemptLabel: ATTEMPT_LABELS[i],
+        baseCommit: base,
+      })
+    );
+    return { group, tasks };
+  }
+
+  // What one attempt did, in the measures the comparison and the scoreboard read.
+  //
+  // `active_ms` is time spent running - agents and the test command - and not the
+  // wall clock, because a pipeline waits on a person to approve its plan and that
+  // wait is not the engine's. `interventions` is how often the person had to act:
+  // for a session, the messages they sent after the first and the approvals they
+  // answered themselves (auto-allowed ones are not counted); for a pipeline, the
+  // plan approval and every re-plan after the first.
+  attemptMetrics(t) {
+    const runs = this.store.listRuns(t.id);
+    const turns = t.session_id ? this.store.listSessionRuns(t.session_id) : [];
+    const agents = [...runs.filter((r) => r.role !== 'tester'), ...turns];
+    const sum = (rows, k) => rows.reduce((n, r) => n + (Number(r[k]) || 0), 0);
+    let toolCalls = 0;
+    for (const r of agents) for (const e of this.store.listEvents(r.id)) toolCalls += countToolCalls(e);
+    let interventions = 0;
+    if (t.engine === 'session' && t.session_id) {
+      const said = turns.flatMap((r) => this.store.listEvents(r.id).filter((e) => e.type === 'instruction' && !e.data?.from));
+      interventions += Math.max(0, said.length - 1);
+      interventions += this.store.listPermissionRequests(t.session_id).filter((q) => (q.status === 'allowed' || q.status === 'denied') && !q.auto).length;
+    } else {
+      const planners = runs.filter((r) => r.role === 'planner' && r.status === 'succeeded').length;
+      const approved = runs.some((r) => r.role === 'implementer');
+      interventions += (approved ? 1 : 0) + Math.max(0, planners - 1);
+    }
+    const tester = runs.filter((r) => r.role === 'tester' && r.status !== 'running').pop();
+    const lastAgent = agents.filter((r) => r.model_id).sort((a, b) => String(a.started_at).localeCompare(String(b.started_at))).pop();
+    const modelId = t.model_id || lastAgent?.model_id || null;
+    const model = modelId ? this.store.listModels().find((m) => m.id === modelId) : null;
+    const running = agents.some((r) => r.status === 'running') || runs.some((r) => r.status === 'running');
+    return {
+      id: t.id,
+      label: t.attempt_label,
+      engine: t.engine || 'pipeline',
+      model_id: modelId,
+      model_name: model ? model.display_name || model.name : modelId,
+      state: t.state,
+      pick: t.pick || null,
+      running,
+      cost: sum([...runs, ...turns], 'cost'),
+      active_ms: sum([...runs, ...turns], 'duration_ms'),
+      tool_calls: toolCalls,
+      interventions,
+      checks: tester ? (tester.status === 'succeeded' ? 'passed' : tester.status === 'failed' ? 'failed' : tester.status) : null,
+      changes: t.state === 'CANCELLED' ? null : this.taskChangeStat(t),
+      session_id: t.session_id || null,
+      branch: t.branch || null,
+    };
+  }
+
+  attempts(group) {
+    const tasks = this.store.listAttempts(group);
+    if (!tasks.length) throw Object.assign(new Error('Comparison not found'), { code: 'NOT_FOUND' });
+    return { group, title: tasks[0].title, description: tasks[0].description, base_commit: tasks[0].base_commit, attempts: tasks.map((t) => this.attemptMetrics(t)) };
+  }
+
+  // The person's choice. The winner stays as it is, to be landed like any task; the
+  // others are discarded - their worktrees removed, their conversations archived -
+  // because a comparison's losing branches are what nobody wants to clean up later.
+  // Refused while any attempt is still running: removing a worktree from under a
+  // live agent would be pulling the floor out from under it.
+  pickAttempt(group, winnerId) {
+    const tasks = this.store.listAttempts(group);
+    const winner = tasks.find((t) => t.id === winnerId);
+    if (!winner) throw new Error('That task is not an attempt of this comparison');
+    if (tasks.some((t) => t.pick)) throw new Error('This comparison has already been decided');
+    const busy = tasks.filter((t) => this.attemptMetrics(t).running || (t.session_id && this.store.getSession(t.session_id)?.pending_run_id));
+    if (busy.length) throw new Error(`Attempt ${busy.map((t) => t.attempt_label).join(', ')} is still running. Stop it or wait for it to finish first.`);
+    for (const t of tasks) {
+      if (t.id === winnerId) {
+        this.store.updateTask(t.id, { pick: 'won' });
+        continue;
+      }
+      this.#discardAttempt(t);
+      this.store.updateTask(t.id, { pick: 'lost' });
+    }
+    return this.attempts(group);
+  }
+
+  // A losing attempt, put away whatever state it reached. Not closeTask: a pipeline
+  // that passed its review is COMPLETE, which closeTask will not leave, and here that
+  // is exactly the work being thrown away.
+  #discardAttempt(t) {
+    if (t.state === 'CANCELLED') return;
+    if (t.session_id) this.store.updateSession(t.session_id, { status: 'archived' });
+    if (t.worktree && fs.existsSync(t.worktree)) {
+      try {
+        removeWorktree(this.project(t.project_id).path, t.worktree);
+      } catch {
+        /* already gone */
+      }
+    }
+    // Through the same release a transition does: a pipeline attempt still at its
+    // plan holds a planning copy of the repository, which goes with it.
+    this.#releasePlanTree(this.store.updateTask(t.id, { state: 'CANCELLED' }));
+  }
+
+  // The record of every decided comparison, by engine and model: how often each
+  // won, what it cost, and how much of the person it took. Only decided
+  // comparisons count, because an undecided one has no winner to count.
+  scoreboard() {
+    const groups = new Map();
+    for (const t of this.store.listAllAttempts()) {
+      if (!groups.has(t.attempt_group)) groups.set(t.attempt_group, []);
+      groups.get(t.attempt_group).push(t);
+    }
+    const rows = new Map();
+    let decided = 0;
+    for (const tasks of groups.values()) {
+      if (!tasks.some((t) => t.pick === 'won')) continue;
+      decided++;
+      for (const t of tasks) {
+        const m = this.attemptMetrics(t);
+        const key = `${m.engine}::${m.model_id || ''}`;
+        const r = rows.get(key) || { engine: m.engine, model_id: m.model_id, model_name: m.model_name, attempts: 0, wins: 0, cost: 0, won_cost: 0, interventions: 0, tool_calls: 0, active_ms: 0, checks_passed: 0 };
+        r.attempts++;
+        r.cost += m.cost;
+        r.interventions += m.interventions;
+        r.tool_calls += m.tool_calls;
+        r.active_ms += m.active_ms;
+        if (m.checks === 'passed') r.checks_passed++;
+        if (t.pick === 'won') {
+          r.wins++;
+          r.won_cost += m.cost;
+        }
+        rows.set(key, r);
+      }
+    }
+    const out = [...rows.values()].map((r) => ({
+      ...r,
+      win_rate: r.attempts ? r.wins / r.attempts : 0,
+      avg_cost: r.attempts ? r.cost / r.attempts : 0,
+      avg_interventions: r.attempts ? r.interventions / r.attempts : 0,
+      avg_active_ms: r.attempts ? r.active_ms / r.attempts : 0,
+    }));
+    out.sort((a, b) => b.win_rate - a.win_rate || b.wins - a.wins || a.avg_cost - b.avg_cost);
+    return { decided, rows: out };
+  }
+
+  // Stops the turn in flight, if there is one. The conversation stays open: the
+  // person who stopped it is usually about to say what to do instead.
+  stopTaskSession(id) {
+    const t = this.task(id);
+    if (!t.session_id) return t;
+    this.cancelSessionRun(t.session_id);
+    return this.task(id);
   }
 
   // The task a task builds on, set after the fact as well as at creation. A
@@ -1970,12 +2289,14 @@ export class Service {
 
   // -- planning -------------------------------------------------------------
 
-  async plan(id) {
+  // `fromJob` is the runner's call: the job running this is the task's active job,
+  // and the idle check below would otherwise refuse it for being itself.
+  async plan(id, { fromJob = false } = {}) {
     const t = this.task(id);
     if (t.state !== 'PLANNING') throw new Error('Task must be in PLANNING');
     // The state above stays PLANNING for the whole run - it moves only at the end,
     // once the plan has been written - so nothing else here refuses a second planner.
-    this.#assertIdle(id, 'planning');
+    this.#assertIdle(id, 'planning', { job: !fromJob });
     const p = this.project(t.project_id);
     // The planner must not touch the repo, so its effect on the working tree is
     // measured around the run and any change is treated as a violation. What it
@@ -2437,7 +2758,8 @@ export class Service {
   // `exceptId`. Closed ones do not hold it: a stopped conversation cannot start a
   // turn until it is resumed.
   checkoutHolder(projectId, exceptId = null) {
-    return this.store.listSessions(projectId).find((x) => x.id !== exceptId && x.mode === 'edit' && x.status !== 'stopped' && x.status !== 'archived') || null;
+    // A task's session works in its own worktree, so it holds nothing here.
+    return this.store.listSessions(projectId).find((x) => x.id !== exceptId && !x.task_id && x.mode === 'edit' && x.status !== 'stopped' && x.status !== 'archived') || null;
   }
 
   // Read-only <-> can edit. A conversation edits the project's own checkout, not a
@@ -2448,6 +2770,7 @@ export class Service {
     const s = this.sessionById(id);
     if (!SESSION_MODES.has(mode)) throw new Error(`Unknown conversation mode: ${mode}`);
     if (s.mode === mode) return s;
+    if (s.task_id) throw new Error("A task's session always edits its own worktree");
     if (s.pending_run_id) throw Object.assign(new Error('Wait for the current turn to finish before switching mode'), { code: 'CONFLICT' });
     if (mode === 'edit') {
       const holder = this.checkoutHolder(s.project_id, id);
@@ -2480,7 +2803,7 @@ export class Service {
     const s = this.store.getSession(r.session_id);
     if (!s?.auto_allow || s.mode !== 'edit') return false;
     const project = this.store.getProject(s.project_id);
-    if (autoAllowRefusal(r.tool, parseJson(r.input), project?.path || null)) return false;
+    if (autoAllowRefusal(r.tool, parseJson(r.input), s.cwd || project?.path || null)) return false;
     this.store.updatePermissionRequest(reqId, { status: 'allowed', answered_at: new Date().toISOString(), auto: 1 });
     return true;
   }
@@ -2580,7 +2903,7 @@ export class Service {
     } catch {
       throw new Error(`No file at ${wanted}`);
     }
-    const roots = [project.path, os.tmpdir(), '/tmp', this.sessionAttachmentsDir(sessionId)].map(realDir).filter(Boolean);
+    const roots = [project.path, s.cwd, os.tmpdir(), '/tmp', this.sessionAttachmentsDir(sessionId)].filter(Boolean).map(realDir).filter(Boolean);
     if (!roots.some((r) => real === r || real.startsWith(r + path.sep))) {
       throw new Error('Only files in the project checkout, the temp directory, or this conversation\'s attachments can be shared');
     }
@@ -2644,7 +2967,9 @@ export class Service {
   // the same call. Cloned from askChat for the one reason that method gives: the
   // instruction carries the id of the run that will answer it, so "still waiting"
   // is answered from the database rather than from one process's memory.
-  askSession(sessionId, text, attachments = []) {
+  // `from` is who wrote the instruction when it was not the person: 'harness' for
+  // the checks a task session is handed back, so the transcript can say so.
+  askSession(sessionId, text, attachments = [], { from = null } = {}) {
     const s = this.sessionById(sessionId);
     const hasFiles = Array.isArray(attachments) && attachments.length > 0;
     // Files alone are an instruction too: "what is wrong here" is often a screenshot
@@ -2659,7 +2984,7 @@ export class Service {
     if (s.pending_run_id) throw new Error('This session is already working on an instruction');
     const runId = this.store.id();
     const saved = this.#saveAttachments(sessionId, runId, hasFiles ? attachments : []);
-    this.store.addEvent({ runId, type: 'instruction', data: saved.length ? { text: instruction, attachments: saved } : { text: instruction } });
+    this.store.addEvent({ runId, type: 'instruction', data: { text: instruction, ...(saved.length ? { attachments: saved } : {}), ...(from ? { from } : {}) } });
     if (s.name === DEFAULT_SESSION_NAME) this.store.updateSession(sessionId, { name: generateTitle(instruction) });
     // The cancel of a previous turn is spent by the time a new instruction is
     // accepted; left set it would abort this one the moment it started.
@@ -2689,6 +3014,12 @@ export class Service {
   // already in the events - and the shape is `chat()`'s for the same reasons.
   async sessionTurn(sessionId) {
     const s = this.sessionById(sessionId);
+    // A task's session runs its checks after the turn, in the same job.
+    return s.task_id ? this.#taskSessionTurn(s) : this.#sessionTurnOnce(sessionId);
+  }
+
+  async #sessionTurnOnce(sessionId) {
+    const s = this.sessionById(sessionId);
     const pending = this.#pendingInstruction(sessionId);
     if (!pending) throw new Error('This session has no instruction waiting for an answer');
     if (this.sessionBusy.has(sessionId)) throw new Error('This session is already working on an instruction');
@@ -2696,7 +3027,9 @@ export class Service {
     try {
       const project = this.project(s.project_id);
       const policy = this.policies.session || {};
-      const cap = Number(policy.dailyCap) || 0;
+      // The daily cap is the conversations' ceiling; a task's session is budgeted
+      // per run like the pipeline it stands beside.
+      const cap = s.task_id ? 0 : Number(policy.dailyCap) || 0;
       if (cap > 0) {
         const spent = this.store.sessionSpendSince(startOfDayIso());
         if (spent >= cap) {
@@ -2713,41 +3046,43 @@ export class Service {
       // added to it. Read here rather than compared against a stored baseline: the
       // question is "did this turn change files", and the only tree that can answer
       // it is the one the turn ran in.
-      const before = changedInCheckout(project.path);
+      const before = changedInCheckout(s.cwd || project.path);
       // The mode decides the role, and the role decides the permissions: a read-only
       // turn runs as a chat (plan mode, no writing tools), an editing one as a
       // session. Both are recorded in this conversation's session_runs, so the history
       // either reads is the whole conversation whichever mode wrote it.
       const editing = s.mode !== 'read';
+      // Where the turn runs: a task session works in its task's worktree, every
+      // other conversation in the project's own checkout.
+      const cwd = s.cwd || project.path;
       const app = this.permissionEndpoint ? { project, task: null } : null;
       let result;
       try {
         result = await this.runRole(
           // A session's run belongs to no task, and `runRole` writes it to
           // `session_runs` rather than to `runs` - see the sessionId option below.
-          // So this is not a task row and is not read as one: it is what runRole
-          // reads for the prompt, which is the instruction as the task text.
-          {
-            id: null,
-            project_id: s.project_id,
-            title: s.name,
-            description: withAttachments(pending.text, pending.attachments),
-            plan: editing ? SESSION_NO_PLAN : 'No plan: this is a read-only turn of a conversation, not a task. Nothing here has been approved for implementation.',
-          },
+          // The row is what runRole reads for routing and bookkeeping; the prompt is
+          // the `message` option, which is the person's words and nothing else.
+          { id: null, project_id: s.project_id, title: s.name, description: pending.text, plan: null },
           editing ? 'session' : 'chat',
-          sessionPrompt(this.#sessionHistory(sessionId, pending.runId), { head: editing ? SESSION_PROMPT : READ_TURN_PROMPT, app }),
-          // The project root, named explicitly. This is the one role that may write
-          // there, and it is why the prompt spends two clauses on the gate: nothing
-          // below this line confines it to a worktree, so the permission round trip
-          // is the whole of the confinement.
-          project.path,
+          '',
+          // The project root, or a task session's worktree. In the project root this
+          // is the one role that may write there, and the permission round trip is
+          // the whole of the confinement.
+          cwd,
           [],
           {
             runId: pending.runId,
             sessionId,
-            // The model picked when the conversation was started. A preference, like
-            // a task's planning model: routing still skips it when it is unhealthy.
-            preferredModelId: s.model_id || null,
+            message: withAttachments(pending.text, pending.attachments),
+            ...this.#turnPrompts(s, sessionId, pending.runId, { editing, app, project }),
+            // The model picked when the conversation was started, else the one the
+            // previous turn ran on - so an Automatic conversation stays on the model
+            // whose session it can continue. A preference: routing still skips it
+            // when it is unhealthy, and the turn then starts fresh.
+            preferredModelId: s.model_id || this.#resumePoint(sessionId, pending.runId)?.modelId || null,
+            resume: this.#resumePoint(sessionId, pending.runId),
+            ...(s.task_id ? { policyKey: 'taskSession' } : {}),
             appTools: true,
             // Read access to this session's attachments, which sit outside the
             // checkout. Every turn gets it, so a file attached earlier can still be
@@ -2779,7 +3114,7 @@ export class Service {
         // COST_LIMIT). The nudge itself filters for runs that actually succeeded,
         // but the changed_paths and task_shaped flags are set here.
         if (pending?.runId) {
-          this.#recordShape(sessionId, pending.runId, run, project.path, before);
+          this.#recordShape(sessionId, pending.runId, run, s.cwd || project.path, before);
         }
         this.#settleSession(sessionId);
       }
@@ -2827,6 +3162,32 @@ export class Service {
   // are the two things replayed. The tool calls are not: they are already in the
   // checkout, which is the context this role actually has and the reason it can get
   // away with a history this thin.
+  // The claude session the next turn can continue: the last turn's, when it left
+  // one. A cancelled turn counts - stopping a turn and then saying what to do
+  // instead is a continuation, as it is in claude itself. A failed one does not:
+  // its session may be the state that failed.
+  #resumePoint(sessionId, runId) {
+    const prior = this.store
+      .listSessionRuns(sessionId)
+      .filter((r) => r.id !== runId && r.resume_session_id && (r.status === 'succeeded' || r.status === 'cancelled'))
+      .pop();
+    return prior ? { sessionId: prior.resume_session_id, providerId: prior.provider_id, modelId: prior.model_id } : null;
+  }
+
+  // What the harness says beside the person's message, as system prompt. `system`
+  // goes with every turn: the mode's rules, the app tools, and for a task session
+  // where it is working. `freshSystem` goes only with a turn that starts a new
+  // claude session - the first, or one that could not continue the last - and
+  // carries the conversation so far, which a resumed session already has.
+  #turnPrompts(s, sessionId, runId, { editing, app, project }) {
+    const rules = s.task_id ? taskSessionPrompt(this.task(s.task_id), s) : editing ? SESSION_PROMPT : READ_TURN_PROMPT;
+    const history = this.#sessionHistory(sessionId, runId);
+    return {
+      system: app ? `${rules}\n\n${appToolsNote(app)}` : rules,
+      freshSystem: history ? `THE CONVERSATION SO FAR, oldest first. You are continuing it; the person's newest message is the prompt.\n\n${history}` : null,
+    };
+  }
+
   #sessionHistory(sessionId, runId) {
     const prior = this.store.listSessionRuns(sessionId).filter((r) => r.id !== runId);
     const lines = [];
@@ -2870,6 +3231,7 @@ export class Service {
         // transcript can mark where the conversation changed mode.
         role: run.role || null,
         instruction: instruction?.data?.text || '',
+        from: instruction?.data?.from || null,
         // Name, type and size only: the path is this server's, and the transcript
         // fetches a file by its turn and name.
         attachments: (instruction?.data?.attachments || []).map(({ name, type, size }) => ({ name, type, size })),
@@ -2889,7 +3251,8 @@ export class Service {
   // said. Read per row rather than joined, because each half lives in a different
   // table and the list is a person's sessions in one project - tens, not thousands.
   sessionSummaries(projectId) {
-    return this.store.listSessions(projectId).map((s) => {
+    // A task's session is listed with its task, not among the conversations.
+    return this.store.listSessions(projectId).filter((s) => !s.task_id).map((s) => {
       const runs = this.store.listSessionRuns(s.id);
       const pending = this.permissionFor(s.id);
       let activity = null;
@@ -2916,7 +3279,7 @@ export class Service {
   // person's are the same kind of change to the same tree.
   sessionChanges(sessionId) {
     const s = this.sessionById(sessionId);
-    const root = this.project(s.project_id).path;
+    const root = s.cwd || this.project(s.project_id).path;
     let lines;
     try {
       lines = statusPaths(root);
@@ -3127,6 +3490,8 @@ export class Service {
   // not said they are not drafting it. Both are read from the session row, so a
   // reload and a second tab agree.
   nudgeFor(sessionId) {
+    // A task's session already is a task; there is nothing to draft it into.
+    if (this.store.getSession(sessionId)?.task_id) return null;
     const s = this.sessionById(sessionId);
     if (!s.task_shaped || s.nudge_dismissed) return null;
     return { changedPaths: parseJson(s.changed_paths) || [] };
@@ -3249,7 +3614,8 @@ export class Service {
         );
       }
     }
-    const wt = createWorktree(p.path, t.id);
+    // An attempt of a comparison starts from the commit its group was created on.
+    const wt = createWorktree(p.path, t.id, t.base_commit && !t.worktree && revParse(p.path, t.base_commit) ? t.base_commit : null);
     // A reused worktree is still on the commit it was cut from, while createWorktree
     // returns today's HEAD for the base. Rewriting the recorded cut to HEAD is not a
     // refresh: the reviewer's diff is taken against this field, so every commit that
@@ -4239,7 +4605,9 @@ export class Service {
   // -- cancellation ---------------------------------------------------------
 
   cancelTask(id) {
-    this.task(id);
+    // A session task's turn is a run of its conversation; stopping it leaves the
+    // task waiting on the person rather than cancelled.
+    if (this.task(id).engine === 'session') return this.stopTaskSession(id);
     // Durable first. This row is the only channel to a run owned by another
     // process, and that process notices within one tick. Aborting a controller we
     // own below is just the fast path on top of it.
@@ -4266,6 +4634,7 @@ export class Service {
 
   closeTask(id) {
     const t = this.task(id);
+    if (t.engine === 'session') return this.#closeSessionTask(t);
     if (!transitions[t.state]?.includes('CANCELLED')) {
       throw new Error(`Cannot close a task that is already ${t.state}`);
     }
@@ -4274,6 +4643,27 @@ export class Service {
     }
     if (t.worktree) removeWorktree(this.project(t.project_id).path, t.worktree);
     return this.transition(id, 'CANCELLED');
+  }
+
+  // A session task closes from any state but CANCELLED, COMPLETE included: there is
+  // no review it passed that closing would throw away, and a finished attempt the
+  // person did not pick is exactly what gets closed. Its conversation is archived
+  // rather than deleted, so the transcript stays readable.
+  #closeSessionTask(t) {
+    if (t.state === 'CANCELLED') throw new Error('This task is already cancelled');
+    const s = t.session_id ? this.store.getSession(t.session_id) : null;
+    if ((s && (s.pending_run_id || this.sessionBusy.has(s.id))) || this.store.taskHasLiveRun(t.id)) {
+      throw new Error('This task is still running. Stop it first.');
+    }
+    if (s) this.store.updateSession(s.id, { status: 'archived' });
+    if (t.worktree && fs.existsSync(t.worktree)) {
+      try {
+        removeWorktree(this.project(t.project_id).path, t.worktree);
+      } catch {
+        /* a worktree git no longer knows about is already gone */
+      }
+    }
+    return this.store.updateTask(t.id, { state: 'CANCELLED' });
   }
 
   // -- routing --------------------------------------------------------------
@@ -4528,7 +4918,10 @@ export class Service {
   // whole length, so a runTests() that counted jobs would refuse the very job that
   // called it.
   #assertIdle(id, verb, { job = true } = {}) {
-    if (this.store.taskHasLiveRun(id) || (job && this.store.activeJobs().some((j) => j.task_id === id))) {
+    // A session task's turns are jobs and runs of its conversation, not of the task.
+    const sid = this.store.getTask(id)?.session_id;
+    const talking = sid && (this.store.getSession(sid)?.pending_run_id || this.store.activeJobs().some((j) => j.task_id === sid));
+    if (talking || this.store.taskHasLiveRun(id) || (job && this.store.activeJobs().some((j) => j.task_id === id))) {
       throw new Error(`This task is still running. Wait for it to finish before ${verb}.`);
     }
   }
@@ -4739,6 +5132,11 @@ export class Service {
     // The run the conversation's waiting question names, kept current as one
     // attempt hands the turn to the next.
     let turnRunId = chat ? options.runId || null : null;
+    // A conversation turn that continues the previous turn's claude session rather
+    // than starting a new one. Usable only on the provider and model that session
+    // was held on - a session cannot move between them - and only once: a resume
+    // that fails is retried fresh, with the history in the system prompt instead.
+    let resumeBroken = false;
 
     for (let attempt = 0; attempt < 8; attempt++) {
       let p, m, healthForced;
@@ -4746,7 +5144,7 @@ export class Service {
       // task's own planning-model preference, honoured for the planner only. It is
       // read on every attempt rather than hoisted: a caller that changes the task's
       // preference mid-run is asking for the next attempt to see it.
-      const preferred = options.preferredModelId || (role === 'planner' && task.plan_model ? task.plan_model : null);
+      const preferred = options.preferredModelId || task.model_id || (role === 'planner' && task.plan_model ? task.plan_model : null);
       try {
         ({ p, m, healthForced } = this.select(role, excluded, preferred));
       } catch (selErr) {
@@ -4756,7 +5154,9 @@ export class Service {
         // the key was missing when the real dead end was a busy sibling provider.
         throw last ? chainExhausted(last, selErr) : selErr;
       }
-      const policy = this.policies[role] || {};
+      // A caller may hold a run to another role's budgets: a task's session runs as
+      // `session` for its permissions, and on the task-session budgets for its size.
+      const policy = this.policies[options.policyKey || role] || {};
       const timeoutMs = (policy.timeout || 600) * 1000;
       // The budgets are per attempt, like the timeout: a fallback starts a fresh
       // agent with a fresh context, and a budget failure does not fall back at all.
@@ -4816,6 +5216,16 @@ export class Service {
       // this run immediately rather than only after the first tick.
       this.#beat(run.id, task.id);
 
+      // A message is the person's words, sent as they are: no preamble, no context
+      // bundle, no plan slot. Whatever the harness has to say goes in the system
+      // prompt beside it. The agent reads the repository itself, as it would if the
+      // person had typed into claude directly - which is the point.
+      const raw = typeof options.message === 'string';
+      const resumable = raw && options.resume?.sessionId && !resumeBroken && p.id === options.resume.providerId && m.id === options.resume.modelId;
+      const resumeThis = resumable ? options.resume.sessionId : resumeSession;
+      const system = raw
+        ? [options.system, resumable ? null : options.freshSystem, withBudget('', maxToolCalls).trim() || null].filter(Boolean).join('\n\n')
+        : null;
       try {
         // Assembled against `cwd`, the tree the agent actually runs in - the
         // worktree for implementer, reviewer and repair, and the project root for
@@ -4831,16 +5241,23 @@ export class Service {
         // which knows nothing about the service's prompt shape. Summing the two
         // estimates can only overshoot the estimate of the sum, so the derived
         // budget stays conservative.
-        const { head, tail } = promptFrame({ role, taskText, planned, prompt: withBudget(prompt, maxToolCalls) });
-        const fixed = estimateTokens(head) + estimateTokens(tail);
-        const context = this.#ranked(task, { role, cwd, store: this.store, window: m.contextLength, fixed, config: this.contextConfig() });
-        const full = head + JSON.stringify(context) + tail;
+        let context;
+        let full;
+        if (raw) {
+          context = { project: this.project(task.project_id), manifest: { files: [], budget: 0, state: 'NONE' } };
+          full = options.message;
+        } else {
+          const { head, tail } = promptFrame({ role, taskText, planned, prompt: withBudget(prompt, maxToolCalls) });
+          const fixed = estimateTokens(head) + estimateTokens(tail);
+          context = this.#ranked(task, { role, cwd, store: this.store, window: m.contextLength, fixed, config: this.contextConfig() });
+          full = head + JSON.stringify(context) + tail;
+        }
 
         // The context-length check lives here rather than in select(), because
         // this is the first point at which the real size is known: a pre-filter
         // would have to guess at a number measured a few lines later, before any
         // process is spawned. The 85% headroom is for the model's own output.
-        const needTokens = Math.ceil(full.length / 4);
+        const needTokens = Math.ceil((full.length + (system ? system.length : 0)) / 4);
         if (m.contextLength && needTokens > m.contextLength * 0.85) {
           throw Object.assign(new Error(`${needTokens} tokens exceeds ${m.contextLength} for ${m.displayName || m.name}`), { code: 'CONTEXT_TOO_LARGE' });
         }
@@ -5022,7 +5439,8 @@ export class Service {
             prompt: full,
             effort: policy.effort || p.config?.effort || undefined,
             signal: controller.signal,
-            resumeSession,
+            resumeSession: resumeThis,
+            ...(system ? { appendSystemPrompt: system } : {}),
             ...(role === 'planner' && options.sandbox ? { sandbox: options.sandbox } : {}),
             ...(gate ? { permissionTool: gate.permissionTool, mcpConfig: gate.configPath, env: gateEnv } : {}),
             ...(app ? { appMcp: app } : {}),
@@ -5146,6 +5564,16 @@ export class Service {
         // asked - handing the same agent to the next provider would spend the same
         // budget to reach the same place.
         if (BUDGET_CODES.has(code)) throw e;
+        // A resume that failed - the session was pruned, or its file is unreadable -
+        // is the session's failure, not the provider's: the same model is tried
+        // again from scratch, with the history it would have had in the system prompt.
+        if (resumable) {
+          resumeBroken = true;
+          previous = p.id;
+          this.store.addEvent({ runId: run.id, type: 'note', data: { content: 'Could not continue the previous turn\'s session; starting a fresh one with the conversation so far.' } });
+          if (attempt < 7) continue;
+          throw e;
+        }
         // Only a transient failure is worth resuming a session for; anything else
         // means the session itself is in a bad state.
         resumeSession = isTransient(code) ? e.sessionId || resumeSession : null;

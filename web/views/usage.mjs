@@ -1,4 +1,4 @@
-import { html, useState, useEffect, useMemo, formatTokens, formatCost } from '../lib.mjs';
+import { html, useState, useEffect, useMemo, formatTokens, formatCost, formatDuration } from '../lib.mjs';
 import { api } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
@@ -288,6 +288,8 @@ export function Usage() {
         }
       </section>
 
+      <${Scoreboard} />
+
       <section class="section card">
         <h2>By provider</h2>
         ${
@@ -297,5 +299,42 @@ export function Usage() {
         }
       </section>
     </div>
+  `;
+}
+
+// Every decided comparison, by engine and model: how often each won the pick, what
+// an attempt cost on average, and how often it needed you. Not filtered by the
+// period above, because comparisons are few and each one is worth counting.
+function Scoreboard() {
+  const [board, setBoard] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .scoreboard()
+      .then((d) => !cancelled && setBoard(d))
+      .catch(() => !cancelled && setBoard({ decided: 0, rows: [] }));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const columns = [
+    { key: 'engine', label: 'Engine', sortable: true, render: (r) => (r.engine === 'session' ? 'Session' : 'Pipeline') },
+    { key: 'model_name', label: 'Model', sortable: true, render: (r) => html`<span class="mono-sm">${r.model_name || 'Automatic'}</span>` },
+    { key: 'win_rate', label: 'Won', sortable: true, render: (r) => html`<b>${Math.round(r.win_rate * 100)}%</b> <span class="muted">${r.wins} of ${r.attempts}</span>` },
+    { key: 'avg_cost', label: 'Avg spent', sortable: true, render: (r) => formatCost(r.avg_cost) },
+    { key: 'avg_active_ms', label: 'Avg run time', sortable: true, render: (r) => (r.avg_active_ms ? formatDuration(r.avg_active_ms) : '—') },
+    { key: 'avg_interventions', label: 'Avg inputs', sortable: true, render: (r) => r.avg_interventions.toFixed(1) },
+    { key: 'checks_passed', label: 'Checks passed', sortable: true, render: (r) => `${r.checks_passed} of ${r.attempts}` },
+  ];
+  return html`
+    <section class="section card">
+      <h2>Engines and models, from your comparisons</h2>
+      <p class="muted">Each time you run a task several ways and pick one, the pick is counted here. ${board ? `${board.decided} comparison${board.decided === 1 ? '' : 's'} decided so far.` : ''}</p>
+      ${!board
+        ? html`<${Spinner} />`
+        : board.rows.length
+          ? html`<div class="table-scroll"><${DataTable} columns=${columns} rows=${board.rows} rowKey=${(r) => `${r.engine}:${r.model_id || ''}`} /></div>`
+          : html`<${EmptyState} message="No comparisons decided yet." hint="Create a task with Run as: Compare, then pick the attempt you prefer." />`}
+    </section>
   `;
 }

@@ -139,6 +139,21 @@ function tokenMatches(presented) {
 // repo a task's branch lands on has to ask for it here.
 const repoOf = (task) => svc.project(task.project_id).path;
 
+// A new task, set going the way its engine goes. A pipeline is prepared, and a
+// comparison's pipeline attempt is planned straight away so every attempt is under
+// way at once; a lone pipeline task waits on its Plan button, as it always has. A
+// session task gets its worktree and conversation, and its first turn is queued.
+function startTask(t) {
+  if (t.engine === 'session') {
+    const { task, session } = svc.startSessionTask(t.id);
+    runner.enqueue(session.id, 'session');
+    return task;
+  }
+  const prepared = svc.prepare(t.id);
+  if (t.attempt_group) runner.enqueue(t.id, 'plan');
+  return prepared;
+}
+
 // No `access-control-allow-origin`. The dashboard is same-origin, the TUI and the CLI
 // are not browsers, and a wildcard on an API that starts agent runs - and, before the
 // gate below, on one that did not even ask for a token - let any page the user happened
@@ -883,9 +898,43 @@ const server = http.createServer(async (req, res) => {
         return json(res, tasks);
       }
       const b = await body(req);
-      const t = svc.createTask(b.projectId, b.title, { parentId: b.parentId });
-      return json(res, svc.prepare(t.id), 201);
+      // Several variants is a comparison: one task per variant, each started its
+      // own way. One is an ordinary task on the engine it names.
+      if (Array.isArray(b.variants) && b.variants.length > 1) {
+        let made;
+        try {
+          made = svc.createAttempts(b.projectId, b.title, b.variants, { parentId: b.parentId, planFirst: !!b.planFirst });
+        } catch (e) {
+          return json(res, { error: e.message }, 400);
+        }
+        const tasks = made.tasks.map(startTask);
+        return json(res, { group: made.group, tasks }, 201);
+      }
+      let t;
+      try {
+        t = svc.createTask(b.projectId, b.title, { parentId: b.parentId, engine: b.engine || 'pipeline', modelId: b.modelId || null, planFirst: !!b.planFirst });
+      } catch (e) {
+        return json(res, { error: e.message }, 400);
+      }
+      return json(res, startTask(t), 201);
     }
+
+    // A comparison: its attempts measured side by side, and the person's pick.
+    const attemptsMatch = u.pathname.match(/^\/api\/attempts\/([^/]+)(?:\/(pick))?$/);
+    if (attemptsMatch) {
+      const group = attemptsMatch[1];
+      try {
+        if (attemptsMatch[2] === 'pick' && req.method === 'POST') {
+          const b = await body(req);
+          return json(res, svc.pickAttempt(group, b.taskId));
+        }
+        if (req.method === 'GET') return json(res, svc.attempts(group));
+      } catch (e) {
+        return json(res, { error: e.message }, e.code === 'NOT_FOUND' ? 404 : 409);
+      }
+    }
+
+    if (u.pathname === '/api/scoreboard' && req.method === 'GET') return json(res, svc.scoreboard());
 
     // Queued work, answered with the job row. `enqueue` throws when the task
     // already has a job, which the error handler turns into a 400 that says so.
@@ -922,7 +971,12 @@ const server = http.createServer(async (req, res) => {
         // id the task carries into that title would render the link as a uuid for
         // one round trip every time. Null when there is no link, and null when the
         // linked row has since been deleted, which the view reads as "no parent".
-        return json(res, { task, runs: svc.store.listRuns(id), branches: svc.destinations(id), revision: svc.revision(task), live: svc.liveRun(id), ported: svc.ported(id), parent: task.parent_id ? svc.store.getTask(task.parent_id) || null : null, terminal: { enabled: terminalEnabled, targets: terminalTargets(task, repoOf(task)) } });
+        // The other attempts of its comparison, for the switcher in the header.
+        const siblings = task.attempt_group
+          ? svc.store.listAttempts(task.attempt_group).map((x) => ({ id: x.id, label: x.attempt_label, engine: x.engine, model_id: x.model_id, state: x.state, pick: x.pick }))
+          : [];
+        const changes = task.engine === 'session' ? svc.taskChangeStat(task) : null;
+        return json(res, { task, runs: svc.store.listRuns(id), branches: svc.destinations(id), revision: svc.revision(task), live: svc.liveRun(id), ported: svc.ported(id), parent: task.parent_id ? svc.store.getTask(task.parent_id) || null : null, siblings, changes, terminal: { enabled: terminalEnabled, targets: terminalTargets(task, repoOf(task)) } });
       }
       if (op === 'refine') {
         const b = await body(req);
