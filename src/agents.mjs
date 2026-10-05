@@ -393,6 +393,13 @@ export function claudeArgs(input) {
   const memory = projectMemoryDir(input.project?.path);
   const away = agentCwd(input) && input.project?.path && path.resolve(agentCwd(input)) !== path.resolve(input.project.path);
   if (memory && away) args.push('--settings', JSON.stringify({ autoMemoryDirectory: memory }));
+  // A conversation's turn ends with the CLI's guess at what the person will type
+  // next - a `prompt_suggestion` frame, the same guess the TUI shows greyed out in
+  // its input. The composer shows it as its placeholder. A workflow role has nobody
+  // typing to it, so it would be a paid guess nobody reads. Here, before the role
+  // branches: `true` is a bare value, and after a variadic --allowedTools it would
+  // be read as a tool name.
+  if (input.role === 'chat' || input.role === 'session') args.push('--prompt-suggestions', 'true');
   // The system prompt is assembled and passed as one flag, so a role's notice and
   // the caller's own instructions arrive together and nothing depends on how the
   // CLI treats a repeated --append-system-prompt. It is spliced in here, ahead of

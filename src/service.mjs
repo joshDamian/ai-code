@@ -3279,6 +3279,10 @@ export class Service {
         // What the agent shared back with share_file, in the order it shared them.
         outputs: events.filter((e) => e.type === 'output').map((e) => e.data),
         answer: run.status === 'succeeded' ? (this.finalText(run.id) || '').trim() : '',
+        // The CLI's guess at the next message, from the frame that closed the turn.
+        // On the turn rather than read off the live stream, so a conversation opened
+        // after its last turn finished - which never opens a stream - still has it.
+        suggestion: String(events.filter((e) => e.type === 'prompt_suggestion').pop()?.data?.suggestion || '').trim(),
         steps: markRefused(
           sessionSteps(events),
           answered.filter((r) => r.run_id === run.id)

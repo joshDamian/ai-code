@@ -7593,3 +7593,38 @@ test('a sync refreshes a router row but keeps the rates it was given', () => {
   assert.equal(got('fw:router').quality, 9, 'everything else is refreshed');
   assert.equal(got('fw:plain').inputCostPerMTok, 1, 'a published rate is reconciled to the catalog');
 });
+
+test('a conversation turn asks the CLI for its next-message suggestion, and a workflow role does not', () => {
+  const chat = claudeArgs({ role: 'chat', model: 'm', prompt: 'p' });
+  assert.equal(chat[chat.indexOf('--prompt-suggestions') + 1], 'true');
+  const session = claudeArgs({ role: 'session', model: 'm', prompt: 'p', permissionTool: 'mcp__g__a', mcpConfig: '/g.json' });
+  assert.ok(session.includes('--prompt-suggestions'));
+  for (const role of ['planner', 'implementer', 'reviewer', 'repair']) {
+    assert.ok(!claudeArgs({ role, model: 'm', prompt: 'p' }).includes('--prompt-suggestions'), role);
+  }
+});
+
+test('a prompt_suggestion frame passes through the stream as an event of its own', async () => {
+  // The frame as claude 2.1.289 writes it after a turn's result.
+  async function* frames() {
+    yield { type: 'result', data: { type: 'result', result: 'add() subtracts.' } };
+    yield { type: 'prompt_suggestion', data: { type: 'prompt_suggestion', suggestion: 'fix it', uuid: 'u', session_id: 's' } };
+  }
+  const out = [];
+  for await (const f of collapseStream(frames())) out.push(f);
+  const s = out.find((f) => f.type === 'prompt_suggestion');
+  assert.ok(s, 'not swallowed by the stream');
+  assert.equal(s.data.suggestion, 'fix it');
+});
+
+test('a conversation turn carries the suggestion that closed it, so a reopened conversation still has it', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const c = s.createSession(p.id, 'S');
+  const id = s.store.id();
+  s.store.addSessionRun({ id, taskId: null, role: 'session', providerId: 'mock', modelId: 'm', status: 'running', startedAt: new Date().toISOString() }, c.id);
+  s.store.updateSessionRun(id, { status: 'succeeded', ended_at: new Date().toISOString() });
+  s.store.addEvent({ runId: id, type: 'prompt_suggestion', data: { type: 'prompt_suggestion', suggestion: '  fix it ' } });
+  assert.equal(s.sessionTurns(c.id).pop().suggestion, 'fix it');
+});

@@ -1076,6 +1076,23 @@ export function Sessions({ id, navigate, onTitle }) {
   const session = detail?.session || null;
   const composerDrop = useDropTarget(attach.add, busy || working || !!permission || session?.status === 'stopped' || session?.status === 'archived');
   const events = useMemo(() => createEventBuffer(), [sessionId]);
+  // The CLI's guess at the person's next message, from the `prompt_suggestion`
+  // frame that closes a turn. Two sources: the live buffer, for a turn watched to
+  // its end, and the loaded turns, for a conversation opened afterwards - which
+  // never opens a stream, so its buffer stays empty. The buffer wins, being newer.
+  const [liveSuggestion, setLiveSuggestion] = useState('');
+  useEffect(() => {
+    const read = () => {
+      const list = events.events;
+      for (let i = list.length - 1; i >= 0; i--) {
+        const d = list[i]?.data;
+        if (d?.type === 'prompt_suggestion') return setLiveSuggestion(String(d.suggestion || '').trim());
+      }
+      setLiveSuggestion('');
+    };
+    read();
+    return events.on(read);
+  }, [events]);
   const project = projects.find((p) => p.id === (session?.project_id || projectId)) || null;
 
   useEffect(() => {
@@ -1508,15 +1525,18 @@ export function Sessions({ id, navigate, onTitle }) {
   // which is polled, so a switch in another tab shows here within a few seconds.
   const holder = !editing ? (sessions || []).find((x) => x.id !== sessionId && x.mode === 'edit' && x.status !== 'stopped' && x.status !== 'archived') || null : null;
   const drafts = (project?.drafts || []).filter((d) => d.session_id === sessionId);
+  const suggestion = liveSuggestion || turns[turns.length - 1]?.suggestion || '';
   const placeholder = permission
     ? 'Paused on the approval above.'
     : working
       ? 'Working… send the next message when it replies.'
       : closed
         ? 'Resume this conversation to send a message.'
-        : editing
-          ? session?.auto_allow ? 'Tell it what to change next.' : 'Tell it what to change. Each write asks you first.'
-          : 'Ask about the code, tasks, runs or spend…';
+        : suggestion
+          ? `${suggestion}  (Tab to use)`
+          : editing
+            ? session?.auto_allow ? 'Tell it what to change next.' : 'Tell it what to change. Each write asks you first.'
+            : 'Ask about the code, tasks, runs or spend…';
 
   return html`
     <div class="ss-shell ss-shell-open ${railOpen ? 'rail-open' : ''}">
@@ -1658,6 +1678,15 @@ export function Sessions({ id, navigate, onTitle }) {
                 writeUnsent(sessionId, e.target.value);
               }}
               onKeyDown=${(e) => {
+                // Tab takes the suggestion into an empty composer, where it can be
+                // edited or sent. Only into an empty one: Tab in a draft is the
+                // browser's focus move, and a suggestion is never sent unread.
+                if (e.key === 'Tab' && !e.shiftKey && !input && suggestion && !composerLocked) {
+                  e.preventDefault();
+                  setInput(suggestion);
+                  writeUnsent(sessionId, suggestion);
+                  return;
+                }
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
                   send();
