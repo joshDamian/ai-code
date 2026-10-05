@@ -209,6 +209,16 @@ A wall clock does not stop an agent that stays busy the whole time, which is how
 
 Set either budget to a non-positive value to remove the limit.
 
+`maxRunCost` is a cash ceiling: it applies to runs billed at a published API rate (DeepSeek, OpenRouter). A run on the Claude subscription is priced at list in the ledger, which measures quota rather than money, and is bounded by its tool-call and time budgets instead. Each agent is told its tool-call budget in its prompt.
+
+### Routing strategy
+
+Each role's strategy on the Routing page — Quality, Balanced, Speed or Cost — decides which model Automatic picks, for the first choice and for any fallback slot left on Automatic. A pinned preferred model, a task's planning model and a conversation's chosen model still come first while they are healthy. The strategy weighs three measures on fixed scales: the model's quality and speed ratings, and its blended price per million tokens of agent traffic, log-scaled. A subscription model is priced at zero, because the plan is paid for either way. The Routing page names the model each strategy currently picks.
+
+### Cost accounting
+
+Runs are priced from the tokens they report, cache reads and writes included; a typical agent run is about 88% cache reads by token. Subagent usage is added to the run that spawned it. Usage reports cash spent separately from subscription use at list price. After a catalog change, `ai-code provider sync` refreshes the model rates and `ai-code usage reprice` reprices past runs from their stored tokens.
+
 ### Porting the work onto a branch
 
 A task's work lives in a worktree cut from `HEAD`, and nothing commits there. When the task finishes, `ai-code/<id>` still points at the base commit and the change exists only as uncommitted edits in a directory — nothing you can merge, review or safely delete. Porting is the other half.
