@@ -1208,6 +1208,19 @@ function budgetOf(value) {
   return Number.isFinite(value) && value > 0 ? value : Infinity;
 }
 
+// The tool-call budget, told to the agent it bounds. A planner that does not know it
+// has 40 calls finds out at the 41st, and is stopped with nothing to show: six
+// planner runs in this install's stores ended at TOOL_CALL_LIMIT, every one of them
+// a full run's spend for no plan, while no successful planner used more than 26. An
+// agent told the number can budget its reading and answer with what it has.
+export function withBudget(prompt, maxToolCalls) {
+  if (!Number.isFinite(maxToolCalls)) return prompt;
+  return (
+    `${prompt}\n\nYou have a budget of ${maxToolCalls} tool calls for this run; calls made inside a subagent you spawn do not count against it. ` +
+    'The run is stopped, and everything in it lost, at the first call over the budget. Read selectively, and when most of it is spent, finish with the answer the evidence you have supports.'
+  );
+}
+
 // One provider's reason for not being a candidate. Kept as data rather than as a
 // sentence at the point of rejection, because whether it is worth printing depends on
 // what else happened in the chain, and only the caller knows that.
@@ -4818,7 +4831,7 @@ export class Service {
         // which knows nothing about the service's prompt shape. Summing the two
         // estimates can only overshoot the estimate of the sum, so the derived
         // budget stays conservative.
-        const { head, tail } = promptFrame({ role, taskText, planned, prompt });
+        const { head, tail } = promptFrame({ role, taskText, planned, prompt: withBudget(prompt, maxToolCalls) });
         const fixed = estimateTokens(head) + estimateTokens(tail);
         const context = this.#ranked(task, { role, cwd, store: this.store, window: m.contextLength, fixed, config: this.contextConfig() });
         const full = head + JSON.stringify(context) + tail;

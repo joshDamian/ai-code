@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig,subagentModel} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {modelFit,blendedRate,loadPolicies} from '../src/policy.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,withBudget,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig,subagentModel} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {modelFit,blendedRate,loadPolicies} from '../src/policy.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -7234,4 +7234,25 @@ test('usage is tallied per message, a subagent is added on top of the result, an
   const o=s.usageTally();
   o.add({usage:{input_tokens:5}});
   assert.equal(o.add({usage:{input_tokens:9}}).inputTokens,9);
+});
+
+test('a second process writing the store waits for a lock rather than failing on it',async()=>{
+  const root=repo();const s=new Service(root,{allowMock:true});
+  assert.equal(s.store.db.prepare('PRAGMA busy_timeout').get().timeout,5000);
+  const dbPath=path.join(root,'.ai-code','ai-code.db');
+  const {spawn}=await import('node:child_process');
+  // Another process takes the write lock and holds it for 600ms.
+  const holder=spawn(process.execPath,['--no-warnings','-e',`const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(${JSON.stringify(dbPath)});d.exec('BEGIN IMMEDIATE');process.stdout.write('locked');const t=Date.now();while(Date.now()-t<600);d.exec('COMMIT');`]);
+  await new Promise((resolve,reject)=>{holder.stdout.once('data',resolve);holder.once('error',reject)});
+  const t0=Date.now();
+  s.store.setSetting('probe','1');
+  assert.equal(s.store.getSetting('probe'),'1','the write went through');
+  assert.ok(Date.now()-t0>=300,'after waiting for the other writer');
+  await new Promise((r)=>holder.once('exit',r));
+});
+
+test('an agent is told its tool-call budget, and an unbounded one is told nothing',()=>{
+  assert.match(withBudget('Plan.',40),/budget of 40 tool calls/);
+  assert.match(withBudget('Plan.',40),/subagent you spawn do not count/);
+  assert.equal(withBudget('Plan.',Infinity),'Plan.');
 });

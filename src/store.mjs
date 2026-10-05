@@ -33,6 +33,12 @@ export class Store {
     this.dir = path.join(root, '.ai-code');
     fs.mkdirSync(this.dir, { recursive: true });
     this.db = new DatabaseSync(path.join(this.dir, 'ai-code.db'));
+    // More than one process writes this file - the server, a CLI command, the MCP
+    // helpers a session spawns - and without a busy timeout SQLite answers a write
+    // that meets another's lock with SQLITE_BUSY at once rather than waiting. Two
+    // implementer runs failed outright that way on 2026-09-27, 474s and 188s in,
+    // on "database is locked". Five seconds covers any write this store makes.
+    this.db.exec('PRAGMA busy_timeout=5000');
     this.db.exec(`PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT UNIQUE NOT NULL,created_at TEXT NOT NULL,language TEXT,framework TEXT,commands TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,title TEXT NOT NULL,state TEXT NOT NULL,plan TEXT,context TEXT,review TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,worktree TEXT,branch TEXT,base_commit TEXT);
