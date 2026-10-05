@@ -436,6 +436,18 @@ export function claudeArgs(input) {
   } else {
     args.push('--dangerously-skip-permissions');
   }
+  // A workflow run sees the project and nothing of the person who launched the
+  // server. Without these two flags every planner, implementer and reviewer loaded
+  // the user's claude.ai connectors (Gmail, Drive, Calendar - 19 tools, including
+  // Drive's share_file and trash_file under an implementer's skip-permissions) and
+  // their user-level skills and settings. `project,local` keeps the repository's
+  // own .claude configuration, which is part of the project; the user's settings
+  // hold only a default model and effort, and both are passed as flags above.
+  // A chat and a session are conversations with that person, so they keep it.
+  if (input.role !== 'chat' && input.role !== 'session') {
+    args.push('--strict-mcp-config', '--setting-sources', 'project,local');
+  }
+  if (input.subagentModel) args.push('--agents', JSON.stringify(exploreAgent(input.subagentModel)));
   if (input.resumeSession) args.push('--resume', input.resumeSession);
   // `--` so a prompt that starts with a dash is not read as a flag.
   args.push('--', input.prompt);
@@ -875,6 +887,37 @@ export function providerEnv(provider, model) {
   return { AI_CODE_PROVIDER: provider.id };
 }
 
+// On the subscription a subagent runs on its parent's model, so a planner on Opus
+// spent Opus quota on every file an Explore subagent read (32 Opus runs, no second
+// model in any of them). Reading is not where the judgment is, so a frontier parent
+// hands Explore to Sonnet. CLAUDE_CODE_SUBAGENT_MODEL looks like the switch and is
+// not one: verified against claude 2.1.289, the Explore subagent stayed on the
+// parent's model with it set, and moved only when Explore was redefined through
+// --agents with a model of its own. `subagentModel` in the provider config
+// overrides the default, and an empty string turns it off. A Sonnet or Haiku parent
+// keeps its own model: handing its subagents Sonnet would be an upgrade, not a saving.
+export function subagentModel(provider, model) {
+  if (provider.kind !== 'claude-code') return null;
+  if (provider.config?.subagentModel != null) return provider.config.subagentModel || null;
+  const id = model?.invocationModelId || model?.providerModelId || model?.name || '';
+  return /^claude-(opus|fable|mythos)/.test(id) ? 'claude-sonnet-5-5' : null;
+}
+
+// Explore, as the built-in describes itself, on the model named. Defining an agent
+// under a built-in's name replaces the built-in for that run.
+export function exploreAgent(model) {
+  return {
+    Explore: {
+      description: 'Fast read-only agent for exploring codebases: find files by pattern, search code for keywords, and answer questions about how the code works.',
+      prompt:
+        'You are a read-only codebase explorer. Search and read files to answer the question you were given. ' +
+        'Do not create, edit or delete anything. Report what you found concisely, naming the file paths and line numbers it rests on.',
+      tools: ['Read', 'Grep', 'Glob', 'Bash'],
+      model,
+    },
+  };
+}
+
 export async function* runAgent(provider, model, input) {
   if (provider.kind === 'mock') {
     // Through collapseStream like a real provider, so a test can drive the streaming
@@ -922,6 +965,7 @@ export async function* runAgent(provider, model, input) {
       ...input,
       model: model.invocationModelId || model.providerModelId || model.name,
       effort: input.effort,
+      subagentModel: subagentModel(provider, model),
       // The provider's own routing first, then the caller's environment over it.
       // That order is the whole point: a session's permission endpoint is an extra
       // variable beside ANTHROPIC_BASE_URL rather than a replacement for it, and

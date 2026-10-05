@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig,subagentModel} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -7090,4 +7090,34 @@ test('auto-allow answers only in an editing conversation that has it on, and tur
   // Read-only takes it away, so editing again starts by asking.
   s.setSessionMode(c.id,'read');
   assert.equal(s.sessionById(c.id).auto_allow,0);
+});
+
+test('a workflow run loads neither the user\'s MCP connectors nor their settings, and a conversation keeps both',()=>{
+  for(const role of ['planner','implementer','reviewer','repair']){
+    const a=claudeArgs({role,model:'m',prompt:'p'});
+    assert.ok(a.includes('--strict-mcp-config'),role);
+    assert.equal(a[a.indexOf('--setting-sources')+1],'project,local',role);
+    assert.ok(a.indexOf('--strict-mcp-config')<a.indexOf('--'),`${role}: before the prompt separator`);
+  }
+  assert.ok(claudeArgs({role:'planner',model:'m',prompt:'p',sandbox:{checkout:'/r'}}).includes('--strict-mcp-config'));
+  assert.ok(!claudeArgs({role:'chat',model:'m',prompt:'p'}).includes('--strict-mcp-config'));
+  const session=claudeArgs({role:'session',model:'m',prompt:'p',permissionTool:'mcp__g__a',mcpConfig:'/g.json'});
+  assert.ok(!session.includes('--strict-mcp-config')&&!session.includes('--setting-sources'));
+});
+
+test('a frontier Claude parent hands Explore to Sonnet through --agents, and a provider can say otherwise',()=>{
+  const cc=(config={})=>({id:'anthropic-claude-code',kind:'claude-code',config});
+  assert.equal(subagentModel(cc(),{name:'claude-opus-5-5',invocationModelId:'claude-opus-5-5'}),'claude-sonnet-5-5');
+  assert.equal(subagentModel(cc(),{name:'claude-fable-5-1'}),'claude-sonnet-5-5');
+  assert.equal(subagentModel(cc(),{name:'claude-sonnet-5-5'}),null,'a Sonnet parent keeps its own model');
+  assert.equal(subagentModel(cc(),{name:'claude-haiku-4-5-20251001'}),null);
+  assert.equal(subagentModel(cc({subagentModel:'claude-haiku-4-5-20251001'}),{name:'claude-opus-5-5'}),'claude-haiku-4-5-20251001');
+  assert.equal(subagentModel(cc({subagentModel:''}),{name:'claude-opus-5-5'}),null,'an empty setting turns it off');
+  // DeepSeek routes every tier to one model through its env already.
+  assert.equal(subagentModel({kind:'deepseek',config:{}},{name:'claude-opus-5-5'}),null);
+  const a=claudeArgs({role:'planner',model:'claude-opus-5-5',prompt:'p',subagentModel:'claude-sonnet-5-5'});
+  const agents=JSON.parse(a[a.indexOf('--agents')+1]);
+  assert.equal(agents.Explore.model,'claude-sonnet-5-5');
+  assert.ok(!agents.Explore.tools.includes('Edit')&&!agents.Explore.tools.includes('Write'));
+  assert.ok(!claudeArgs({role:'planner',model:'m',prompt:'p'}).includes('--agents'));
 });
