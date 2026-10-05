@@ -612,7 +612,13 @@ test('provider add-fireworks seeds the fireworks catalog and refuses a re-run',a
   const flash=at('fireworks:accounts/fireworks/models/glm-5p3-flash');
   assert.deepEqual(flash.capabilities.sort(),['coding','repair']);
   assert.equal(flash.output_cost_per_mtok,0.5);
-  assert.equal(models.filter(m=>m.provider_id==='fireworks').length,6,'the whole catalog lands');
+  // FireRouter: a router, not a model, carrying every capability so Automatic can
+  // place it in any role, at a pooled estimate it says is one.
+  const router=at('fireworks:accounts/fireworks/routers/firerouter');
+  assert.equal(router.invocation_model_id,'accounts/fireworks/routers/firerouter');
+  assert.deepEqual(router.capabilities.sort(),['coding','planning','repair','review']);
+  assert.match(router.pricing_source,/^FireRouter/);
+  assert.equal(models.filter(m=>m.provider_id==='fireworks').length,7,'the whole catalog lands');
 
   const dup=await run(['provider','add-fireworks']);
   assert.equal(dup.code,1);

@@ -7575,3 +7575,21 @@ test('a draft can ask for the session engine, and approving it starts the task w
   assert.equal(orv.task.engine, 'pipeline', 'the approver can override the proposer');
   assert.equal(orv.task.state, 'PLANNING');
 });
+
+test('a sync refreshes a router row but keeps the rates it was given', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  s.initProject('p', root);
+  s.addProvider({ id: 'fw', name: 'FW', kind: 'fireworks', enabled: true, config: { routable: true } });
+  const router = { id: 'fw:router', name: 'router', capabilities: ['coding'], speed: 7, quality: 8, inputCostPerMTok: 0.8, outputCostPerMTok: 4, billingMode: 'api', pricingSource: 'FireRouter - varies by routed model (pooled estimate)' };
+  const plain = { id: 'fw:plain', name: 'plain', capabilities: ['coding'], speed: 7, quality: 8, inputCostPerMTok: 1, outputCostPerMTok: 5, billingMode: 'api', pricingSource: 'published' };
+  s.syncProviderModels('fw', [router, plain]);
+  // A person corrects the router's estimate; the published row's rates also drift.
+  s.updateModel('fw:router', { inputCostPerMTok: 0.5 });
+  s.updateModel('fw:plain', { inputCostPerMTok: 9 });
+  s.syncProviderModels('fw', [{ ...router, quality: 9 }, plain]);
+  const got = (id) => s.store.listModels('fw').find((m) => m.id === id);
+  assert.equal(got('fw:router').inputCostPerMTok, 0.5, 'the estimate a person set survives');
+  assert.equal(got('fw:router').quality, 9, 'everything else is refreshed');
+  assert.equal(got('fw:plain').inputCostPerMTok, 1, 'a published rate is reconciled to the catalog');
+});

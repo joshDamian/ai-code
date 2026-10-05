@@ -6086,7 +6086,13 @@ export class Service {
     let removed = 0;
     for (const m of catalog) {
       const old = existing.get(m.id);
-      this.store.addModel(old ? { ...m, providerId, enabled: old.enabled } : { ...m, providerId });
+      // A row whose pricing is an estimate is refreshed but never re-priced: its
+      // rates stand in for a router that bills at the serving model's own, so
+      // overwriting them from a catalog entry would look like precision.
+      const rates = m.pricingSource?.startsWith('FireRouter')
+        ? { inputCostPerMTok: old?.inputCostPerMTok, cacheReadCostPerMTok: old?.cacheReadCostPerMTok, cacheWriteCostPerMTok: old?.cacheWriteCostPerMTok, outputCostPerMTok: old?.outputCostPerMTok, peakInputCostPerMTok: old?.peakInputCostPerMTok }
+        : {};
+      this.store.addModel(old ? { ...m, ...rates, providerId, enabled: old.enabled } : { ...m, providerId });
       if (old) updated++;
       else added++;
     }
