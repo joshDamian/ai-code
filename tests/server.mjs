@@ -2244,3 +2244,34 @@ test('usage reads its period from the second word, and reprice is a word of its 
   const r=JSON.parse((await run(['usage','reprice'])).out);
   assert.equal(r.changed,0);
 });
+
+test('creating a comparison over HTTP starts every attempt and reads back side by side',async()=>{
+  const root=gitRepo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  const p=s.initProject('p',root);
+  s.updateProvider('mock',{enabled:false});
+  s.addProvider({id:'agent',name:'Agent',kind:'mock',enabled:true,config:{routable:true,writes:['f.txt']}});
+  s.addModel({id:'agent-m',providerId:'agent',name:'agent',capabilities:['coding','planning','review','repair'],speed:10,quality:10,cost:0,contextLength:100000});
+  const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});
+  try{
+    const r=await post(`${srv.base}/api/tasks`,{projectId:p.id,title:'Add f.',variants:[{engine:'session',modelId:'agent-m'},{engine:'pipeline',modelId:'agent-m'}]});
+    assert.equal(r.status,201,r.body);
+    const made=JSON.parse(r.body);
+    assert.equal(made.tasks.length,2);
+    assert.equal(made.tasks[0].state,'WORKING','the session attempt is started');
+    assert.equal(made.tasks[1].state,'PLANNING','the pipeline attempt is prepared and its plan queued');
+    let view;
+    for(let i=0;i<100;i++){
+      view=JSON.parse((await get(`${srv.base}/api/attempts/${made.group}`)).body);
+      if(view.attempts[0].state==='COMPLETE'&&view.attempts[1].state==='AWAITING_APPROVAL')break;
+      await new Promise((r)=>setTimeout(r,100));
+    }
+    assert.deepEqual(view.attempts.map((a)=>[a.label,a.engine,a.state]),[['A','session','COMPLETE'],['B','pipeline','AWAITING_APPROVAL']]);
+    const show=JSON.parse((await get(`${srv.base}/api/tasks/${made.tasks[0].id}/show`)).body);
+    assert.deepEqual(show.siblings.map((x)=>x.label),['A','B']);
+    assert.equal(show.changes.files,1);
+    const single=await post(`${srv.base}/api/tasks`,{projectId:p.id,title:'One.',engine:'nope'});
+    assert.equal(single.status,400);
+    assert.equal(JSON.parse((await get(`${srv.base}/api/scoreboard`)).body).decided,0);
+  }finally{srv.stop()}
+});

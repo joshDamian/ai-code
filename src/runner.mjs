@@ -133,6 +133,9 @@ export class Runner {
       case 'intake': return this.service.draftIntake(job.task_id);
       case 'proposals': return this.service.proposeTasks(job.task_id);
       case 'infer-spec': return this.service.inferSpec(job.task_id);
+      // A comparison's pipeline attempts start planning on their own, so every
+      // attempt is under way at once rather than waiting on a click each.
+      case 'plan': return this.service.plan(job.task_id, { fromJob: true });
       case 'implement': return this.service.implement(job.task_id);
       case 'test': return this.service.runTests(job.task_id);
       case 'review': return this.service.review(job.task_id);

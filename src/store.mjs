@@ -227,6 +227,22 @@ export class Store {
         // are one value: a question is read with the comments about it or not at all,
         // and nothing queries an individual option.
         ['decision', 'TEXT'],
+        // How a task is run, and the attempt it is when several run side by side.
+        // `engine` is 'pipeline' (plan, approve, implement, test, review) or 'session'
+        // (one agent in a worktree, end to end). Every task written before the column
+        // existed was a pipeline. `model_id` pins one model for every role of the task,
+        // which is what makes "this engine on this model" an attempt. `attempt_group`
+        // is the id shared by the attempts of one comparison, `attempt_label` the
+        // letter each is shown under, and `pick` what the person decided between them:
+        // 'won', 'lost', or null while undecided. `session_id` is a session-engine
+        // task's conversation.
+        ['engine', "TEXT NOT NULL DEFAULT 'pipeline'"],
+        ['model_id', 'TEXT'],
+        ['plan_first', 'INTEGER NOT NULL DEFAULT 0'],
+        ['attempt_group', 'TEXT'],
+        ['attempt_label', 'TEXT'],
+        ['pick', 'TEXT'],
+        ['session_id', 'TEXT'],
       ],
       models: [
         ['provider_model_id', 'TEXT'],
@@ -291,6 +307,11 @@ export class Store {
       // other conversation out of editing, and a read-only turn only asks first.
       sessions: [
         ['mode', "TEXT NOT NULL DEFAULT 'read'"],
+        // The task a conversation is the agent of, and the worktree it works in.
+        // Null for every conversation a person started, which work in the project's
+        // own checkout.
+        ['task_id', 'TEXT'],
+        ['cwd', 'TEXT'],
         // Whether an editing conversation's routine actions are approved without a
         // prompt. Off for every row written before it existed, and off by default:
         // it is a person's choice for one conversation, never a default.
@@ -554,14 +575,27 @@ export class Store {
   addTask(t) {
     this.db
       .prepare(
-        'INSERT INTO tasks(id,project_id,title,description,state,plan,context,review,created_at,updated_at,worktree,branch,base_commit,parent_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+        'INSERT INTO tasks(id,project_id,title,description,state,plan,context,review,created_at,updated_at,worktree,branch,base_commit,parent_id,engine,model_id,plan_first,attempt_group,attempt_label) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
       )
-      .run(t.id, t.projectId, t.title, t.description ?? null, t.state, t.plan ?? null, t.context ?? null, t.review ?? null, t.createdAt, t.updatedAt, null, null, null, t.parentId ?? null);
+      .run(
+        t.id, t.projectId, t.title, t.description ?? null, t.state, t.plan ?? null, t.context ?? null, t.review ?? null, t.createdAt, t.updatedAt, null, null, t.baseCommit ?? null, t.parentId ?? null,
+        t.engine || 'pipeline', t.modelId ?? null, t.planFirst ? 1 : 0, t.attemptGroup ?? null, t.attemptLabel ?? null
+      );
     return this.getTask(t.id);
   }
 
   getTask(id) {
     return this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
+  }
+
+  // The attempts of one comparison, in the order they are shown.
+  listAttempts(group) {
+    return this.db.prepare('SELECT * FROM tasks WHERE attempt_group=? ORDER BY attempt_label, created_at').all(group);
+  }
+
+  // Every task that was an attempt of some comparison, for the scoreboard.
+  listAllAttempts() {
+    return this.db.prepare('SELECT * FROM tasks WHERE attempt_group IS NOT NULL ORDER BY created_at').all();
   }
 
   listTasks(pid, state) {
@@ -583,8 +617,12 @@ export class Store {
     const task = this.getTask(id);
     const n = { ...task, ...patch, updated_at: new Date().toISOString() };
     this.db
-      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=?,plan_prev=?,plan_at=?,plan_model=?,parent_id=?,feedback=?,decision=? WHERE id=?')
-      .run(n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, n.plan_prev ?? null, n.plan_at ?? null, n.plan_model ?? null, n.parent_id ?? null, n.feedback ?? null, n.decision ?? null, id);
+      .prepare('UPDATE tasks SET state=?,plan=?,context=?,review=?,updated_at=?,worktree=?,branch=?,base_commit=?,description=?,plan_base=?,plan_prev=?,plan_at=?,plan_model=?,parent_id=?,feedback=?,decision=?,engine=?,model_id=?,plan_first=?,attempt_group=?,attempt_label=?,pick=?,session_id=? WHERE id=?')
+      .run(
+        n.state, n.plan ?? null, n.context ?? null, n.review ?? null, n.updated_at, n.worktree ?? null, n.branch ?? null, n.base_commit ?? null, n.description ?? null, n.plan_base ?? null, n.plan_prev ?? null, n.plan_at ?? null, n.plan_model ?? null, n.parent_id ?? null, n.feedback ?? null, n.decision ?? null,
+        n.engine || 'pipeline', n.model_id ?? null, n.plan_first ? 1 : 0, n.attempt_group ?? null, n.attempt_label ?? null, n.pick ?? null, n.session_id ?? null,
+        id
+      );
     return this.getTask(id);
   }
 
@@ -1240,7 +1278,7 @@ export class Store {
     if (!s) return null;
     const n = { ...s, ...patch };
     this.db
-      .prepare('UPDATE sessions SET name=?,status=?,provider_id=?,model_id=?,budget_tally=?,cancel_requested=?,pending_run_id=?,task_shaped=?,nudge_dismissed=?,changed_paths=?,mode=?,auto_allow=?,updated_at=? WHERE id=?')
+      .prepare('UPDATE sessions SET name=?,status=?,provider_id=?,model_id=?,budget_tally=?,cancel_requested=?,pending_run_id=?,task_shaped=?,nudge_dismissed=?,changed_paths=?,mode=?,auto_allow=?,task_id=?,cwd=?,updated_at=? WHERE id=?')
       .run(
         n.name,
         n.status,
@@ -1254,6 +1292,8 @@ export class Store {
         n.changed_paths ?? null,
         n.mode || 'read',
         n.auto_allow ? 1 : 0,
+        n.task_id ?? null,
+        n.cwd ?? null,
         // Touched rather than stamped, for the reason `#touch` exists: a session
         // created and first written to inside one millisecond would otherwise
         // sort by creation order in the list it is meant to be moving in.

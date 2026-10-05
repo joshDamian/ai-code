@@ -11,10 +11,10 @@ import { html } from '../lib.mjs';
 import { formatState } from '../lib.mjs';
 
 // Waiting on a person. The pipeline is stopped rather than broken.
-const INFO = new Set(['AWAITING_APPROVAL', 'AWAITING_DECISION']);
+const INFO = new Set(['AWAITING_APPROVAL', 'AWAITING_DECISION', 'WAITING']);
 // Work in flight. These get the pulsing dot, because the state is not a verdict -
 // it is a placeholder for one that is coming.
-const WORKING = new Set(['PLANNING', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING', 'running', 'CREATED', 'CONTEXT_READY', 'APPROVED']);
+const WORKING = new Set(['WORKING', 'PLANNING', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING', 'running', 'CREATED', 'CONTEXT_READY', 'APPROVED']);
 const GOOD = new Set(['COMPLETE', 'APPROVED', 'succeeded', 'ok', 'Enabled', 'good', 'HEALTHY']);
 const BAD = new Set(['FAILED', 'failed', 'bad', 'error', 'OPEN']);
 

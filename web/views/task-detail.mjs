@@ -344,6 +344,17 @@ export function TaskDetail({ id, navigate, onTitle }) {
     }
   }
 
+  // A session task's turns are its conversation's runs, which the task stream does not
+  // carry, so the page polls instead: briskly while a turn or its checks are running,
+  // slowly otherwise, to catch a reply sent from the conversation itself.
+  const sessionEngine = data?.task?.engine === 'session';
+  const sessionBusy = sessionEngine && ['WORKING', 'TESTING'].includes(data.task.state);
+  useEffect(() => {
+    if (!sessionEngine) return undefined;
+    const timer = setInterval(load, sessionBusy ? 2000 : 8000);
+    return () => clearInterval(timer);
+  }, [sessionEngine, sessionBusy, load]);
+
   if (error) {
     return html`
       <div class="card">
@@ -471,7 +482,7 @@ export function TaskDetail({ id, navigate, onTitle }) {
             label="Task actions"
             items=${[
               { label: 'Copy task id', onSelect: () => copyId(task.id) },
-              task.state !== 'COMPLETE' && task.state !== 'CANCELLED' && !live
+              (task.engine === 'session' || task.state !== 'COMPLETE') && task.state !== 'CANCELLED' && !live
                 ? { label: 'Close task…', danger: true, disabled: busy, onSelect: () => confirmClose(task) }
                 : null,
             ]}
@@ -479,6 +490,10 @@ export function TaskDetail({ id, navigate, onTitle }) {
         </div>
       </div>
 
+      ${data.siblings?.length ? html`<${AttemptStrip} task=${task} siblings=${data.siblings} />` : null}
+      ${task.engine === 'session'
+        ? html`<${SessionTaskBody} task=${task} data=${data} busy=${busy} run=${run} buffer=${buffer} tab=${tab} setTab=${setTab} />`
+        : html`
       <${NextStepBar}
         task=${task}
         runs=${runs}
@@ -531,6 +546,7 @@ export function TaskDetail({ id, navigate, onTitle }) {
         ${tab === 'stats' ? html`<${StatsTab} runs=${runs} live=${data.live} />` : null}
         ${tab === 'activity' ? html`<${ActivityTab} taskId=${task.id} store=${buffer} runs=${runs} root=${task.worktree} />` : null}
       <//>
+        `}
     </div>
   `;
 }
@@ -2385,4 +2401,139 @@ function ActivityTab({ taskId, store, runs, root }) {
 function clockOf(iso) {
   const at = new Date(iso);
   return Number.isNaN(at.getTime()) ? '' : at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+// The other attempts of this task's comparison, as a row of letters to switch
+// between, and the way to the side-by-side view.
+function AttemptStrip({ task, siblings }) {
+  return html`
+    <nav class="attempt-strip" aria-label="Attempts of this comparison">
+      <span class="muted">Attempt</span>
+      ${siblings.map(
+        (x) => html`<a key=${x.id} href=${`#/tasks/${x.id}`} class="attempt-chip ${x.id === task.id ? 'current' : ''} ${x.pick === 'won' ? 'won' : ''}" aria-current=${x.id === task.id ? 'page' : undefined} title=${`Attempt ${x.label} · ${x.engine}${x.pick ? ` · ${x.pick}` : ''}`}>${x.label}</a>`
+      )}
+      <a class="link" href=${`#/compare/${task.attempt_group}`}>Compare side by side</a>
+    </nav>
+  `;
+}
+
+// What each state of a session task means to the person reading it.
+const SESSION_TASK_COPY = {
+  CREATED: 'Starting.',
+  WORKING: 'Working on it.',
+  TESTING: "Running the project's checks on what it changed.",
+  WAITING: 'Waiting on you: it replied without changing anything.',
+  COMPLETE: 'Ready to land: it changed files and the checks passed.',
+  FAILED: 'Stopped: the checks still failed after its fixes, or the run failed.',
+  CANCELLED: 'Closed.',
+};
+
+// A task run as one session: where it stands, its latest reply with a box to answer
+// it, and the same Land, Terminal and Activity tabs a pipeline task has. The
+// conversation itself - every turn, every step, approvals - is one click away.
+function SessionTaskBody({ task, data, busy, run, buffer, tab, setTab }) {
+  const [convo, setConvo] = useState(null);
+  const [reply, setReply] = useState('');
+  const [sending, setSending] = useState(false);
+  useEffect(() => {
+    if (!task.session_id) return;
+    let cancelled = false;
+    api
+      .session(task.session_id)
+      .then((d) => !cancelled && setConvo(d))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [task.session_id, task.state, task.updated_at]);
+  useEffect(() => {
+    if (!['land', 'terminal', 'activity'].includes(tab)) setTab('land');
+  }, [tab, setTab]);
+
+  const turns = convo?.turns || [];
+  const last = [...turns].reverse().find((t) => t.answer || t.error);
+  const cost = turns.reduce((n, t) => n + (t.cost || 0), 0);
+  const model = task.model_id || [...turns].reverse().find((t) => t.model_id)?.model_id || 'Automatic';
+  const tester = [...(data.runs || [])].reverse().find((r) => r.role === 'tester' && r.status !== 'running');
+  const changes = data.changes;
+  const working = task.state === 'WORKING' || task.state === 'TESTING';
+  const closed = task.state === 'CANCELLED';
+  const waiting = !!convo?.permission;
+
+  async function send() {
+    const text = reply.trim();
+    if (!text || sending) return;
+    setSending(true);
+    try {
+      await api.sendSessionMessage(task.session_id, text);
+      setReply('');
+      await run(async () => null);
+    } catch (e) {
+      showToast(e.message, 'error');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return html`
+    <section class="card session-task">
+      <div class="session-task-status">
+        ${working ? html`<${Spinner} />` : null}
+        <span>${waiting ? 'Waiting on you: it needs an approval in the conversation.' : SESSION_TASK_COPY[task.state] || task.state}</span>
+        <span class="session-task-actions">
+          ${working ? html`<button class="btn secondary sm" type="button" disabled=${busy} onClick=${() => run(() => api.taskCancel(task.id), 'Stopped.')}>Stop</button>` : null}
+          ${task.session_id ? html`<a class="btn ${waiting ? 'primary' : 'secondary'} sm" href=${`#/sessions/${task.session_id}`}>Open conversation</a>` : null}
+        </span>
+      </div>
+      <dl class="session-task-facts">
+        <div><dt>Model</dt><dd class="mono-sm">${model}</dd></div>
+        <div><dt>Branch</dt><dd class="mono-sm">${task.branch || '—'}</dd></div>
+        <div><dt>Changes</dt><dd>${changes && changes.files ? html`${changes.files} file${changes.files === 1 ? '' : 's'} <span class="good">+${changes.added}</span> <span class="bad">−${changes.removed}</span>` : 'None yet'}</dd></div>
+        <div><dt>Checks</dt><dd>${tester ? html`<${StatusBadge} status=${tester.status === 'succeeded' ? 'passed' : tester.status} />` : html`<span class="muted">Not run yet</span>`}</dd></div>
+        <div><dt>Spent</dt><dd class="mono-sm">${formatCost(cost)}</dd></div>
+        <div><dt>Turns</dt><dd>${turns.length}</dd></div>
+      </dl>
+      ${last
+        ? html`<div class="session-task-reply">
+            <div class="muted session-task-reply-head">Latest reply</div>
+            ${last.answer ? html`<${Markdown} text=${last.answer} className="md" />` : html`<p class="error-text">${last.error}</p>`}
+          </div>`
+        : null}
+      ${closed
+        ? null
+        : html`<div class="session-task-composer">
+            <${TextArea}
+              label="Reply"
+              value=${reply}
+              onInput=${setReply}
+              rows=${2}
+              placeholder=${working ? 'It is working; you can reply when the turn ends.' : 'Answer it, or tell it what to change next'}
+              disabled=${working || sending}
+              onKeyDown=${(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+            />
+            <button class="btn primary" type="button" disabled=${working || sending || !reply.trim()} onClick=${send}>${sending ? 'Sending…' : 'Send'}</button>
+          </div>`}
+    </section>
+
+    <${Tabs}
+      tabs=${[
+        { id: 'land', label: 'Land' },
+        { id: 'terminal', label: 'Terminal' },
+        { id: 'activity', label: 'Checks log' },
+      ]}
+      value=${tab}
+      onChange=${setTab}
+      label="Task sections"
+    />
+    <${TabPanel} tabId=${tab}>
+      ${tab === 'land' ? html`<${PortTab} task=${task} branches=${data.branches || []} busy=${busy} run=${run} onActions=${() => {}} />` : null}
+      ${tab === 'terminal' ? html`<${TerminalTab} task=${task} live=${data.live} terminal=${data.terminal} />` : null}
+      ${tab === 'activity' ? html`<${ActivityTab} taskId=${task.id} store=${buffer} runs=${data.runs} root=${task.worktree} />` : null}
+    <//>
+  `;
 }
