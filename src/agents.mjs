@@ -436,13 +436,19 @@ export function claudeArgs(input) {
   } else {
     args.push('--dangerously-skip-permissions');
   }
-  // A workflow run loads no MCP server it was not given: without this, every
-  // planner, implementer and reviewer got the user's claude.ai connectors (Gmail,
-  // Drive, Calendar - 19 tools, including Drive's share_file and trash_file under an
-  // implementer's skip-permissions). Settings and CLAUDE.md files still load,
-  // user-level included: the user's own instructions are part of what makes a
-  // direct session's output better, and `--setting-sources project,local`, which
-  // was here before, dropped them (verified against claude 2.1.289).
+  // A workflow run loads no MCP server it was not given, and no user-level
+  // settings. Without the first, every planner, implementer and reviewer got the
+  // user's claude.ai connectors (Gmail, Drive, Calendar - 19 tools, including
+  // Drive's share_file and trash_file under an implementer's skip-permissions).
+  // Without the second, the user's settings.json decides where a run goes: an `env`
+  // block there is applied to the child, and on 2026-10-05 FireConnect wrote
+  // ANTHROPIC_BASE_URL and a Fireworks key into it, which would have sent every
+  // "subscription" run to Fireworks and billed it there. The provider chosen by
+  // routing is the only thing allowed to say where a run goes.
+  //
+  // The user's global CLAUDE.md is passed explicitly instead, because it is
+  // instructions rather than configuration, and a direct session has it. The
+  // project's own CLAUDE.md loads either way.
   //
   // The memory is pointed at the project's, not the worktree's. Claude Code keys
   // auto-memory by working directory, and a run's directory is a fresh worktree,
@@ -451,7 +457,9 @@ export function claudeArgs(input) {
   // the project's notes. A chat and a session are conversations with the person,
   // so they keep everything they had.
   if (input.role !== 'chat' && input.role !== 'session') {
-    args.push('--strict-mcp-config');
+    args.push('--strict-mcp-config', '--setting-sources', 'project,local');
+    const instructions = userInstructionsFile();
+    if (instructions) args.push('--append-system-prompt-file', instructions);
     const memory = projectMemoryDir(input.project?.path);
     if (memory) args.push('--settings', JSON.stringify({ autoMemoryDirectory: memory }));
   }
@@ -470,6 +478,12 @@ export function projectMemoryDir(projectPath, home = process.env.CLAUDE_CONFIG_D
   if (!projectPath) return null;
   const dir = path.join(home, 'projects', projectPath.replace(/[^A-Za-z0-9]/g, '-'), 'memory');
   return fs.existsSync(dir) ? dir : null;
+}
+
+// The user's global CLAUDE.md, when there is one.
+export function userInstructionsFile(home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')) {
+  const f = path.join(home, 'CLAUDE.md');
+  return fs.existsSync(f) ? f : null;
 }
 
 // The tree the agent runs in. Every caller in the service names it `worktree` and

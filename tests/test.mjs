@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,withBudget,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig,subagentModel,projectMemoryDir} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {modelFit,blendedRate,loadPolicies} from '../src/policy.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,withBudget,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig,subagentModel,projectMemoryDir,userInstructionsFile} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {modelFit,blendedRate,loadPolicies} from '../src/policy.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -7102,7 +7102,7 @@ test('auto-allow answers only in an editing conversation that has it on, and tur
   assert.equal(s.sessionById(c.id).auto_allow,0);
 });
 
-test('a workflow run loads no MCP connectors but keeps the user\'s instructions, and reads the project\'s memory',()=>{
+test('a workflow run loads no MCP connectors and no user settings, and reads the project\'s memory',()=>{
   const home=fs.mkdtempSync(path.join(os.tmpdir(),'claude-home-'));
   const projectPath='/Users/x/Code/my.app';
   const mem=path.join(home,'projects','-Users-x-Code-my-app','memory');
@@ -7113,7 +7113,7 @@ test('a workflow run loads no MCP connectors but keeps the user\'s instructions,
   for(const role of ['planner','implementer','reviewer','repair']){
     const a=claudeArgs({role,model:'m',prompt:'p'});
     assert.ok(a.includes('--strict-mcp-config'),role);
-    assert.ok(!a.includes('--setting-sources'),`${role}: user settings and CLAUDE.md still load`);
+    assert.equal(a[a.indexOf('--setting-sources')+1],'project,local',`${role}: a user settings.json cannot redirect the run`);
     assert.ok(a.indexOf('--strict-mcp-config')<a.indexOf('--'),`${role}: before the prompt separator`);
   }
   assert.ok(!claudeArgs({role:'chat',model:'m',prompt:'p'}).includes('--strict-mcp-config'));
@@ -7297,5 +7297,20 @@ test('a workflow run is pointed at its project\'s memory folder when one exists'
     const a=claudeArgs({role:'implementer',model:'m',prompt:'p',project});
     assert.deepEqual(JSON.parse(a[a.indexOf('--settings')+1]),{autoMemoryDirectory:mem});
     assert.ok(!claudeArgs({role:'chat',model:'m',prompt:'p',project}).includes('--settings'),'a chat keeps the CLI default');
+  }finally{if(saved===undefined)delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR=saved}
+});
+
+test('the user\'s global CLAUDE.md is appended to a workflow run, since its settings are not loaded',()=>{
+  const saved=process.env.CLAUDE_CONFIG_DIR;
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),'claude-home-'));
+  process.env.CLAUDE_CONFIG_DIR=home;
+  try{
+    assert.equal(userInstructionsFile(),null);
+    assert.ok(!claudeArgs({role:'reviewer',model:'m',prompt:'p'}).includes('--append-system-prompt-file'));
+    fs.writeFileSync(path.join(home,'CLAUDE.md'),'## Communication style');
+    const a=claudeArgs({role:'reviewer',model:'m',prompt:'p'});
+    assert.equal(a[a.indexOf('--append-system-prompt-file')+1],path.join(home,'CLAUDE.md'));
+    assert.ok(a.includes('--append-system-prompt'),'beside the read-only notice, not instead of it');
+    assert.ok(!claudeArgs({role:'chat',model:'m',prompt:'p'}).includes('--append-system-prompt-file'),'a chat loads user settings, CLAUDE.md with them');
   }finally{if(saved===undefined)delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR=saved}
 });
