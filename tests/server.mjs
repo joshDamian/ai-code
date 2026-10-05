@@ -2193,3 +2193,15 @@ test('a conversation on auto-allow gets its routine actions answered at once, ov
     assert.deepEqual(history.map((h)=>[h.status,h.auto]),[['allowed',1]]);
   }finally{srv.stop()}
 });
+
+test('usage reads its period from the second word, and reprice is a word of its own',async()=>{
+  const root=gitRepo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  s.initProject('p',root);
+  const run=(args)=>new Promise((res)=>{const p=spawn(process.execPath,[cliPath,...args],{cwd:root,env:{...process.env,AI_CODE_ROOT:root},stdio:['ignore','pipe','pipe']});let out='';p.stdout.on('data',c=>out+=c);p.on('close',code=>res({code,out}))});
+  assert.equal(JSON.parse((await run(['usage','all'])).out).period,'all');
+  assert.equal(JSON.parse((await run(['usage','30d'])).out).period,'30d');
+  assert.equal(JSON.parse((await run(['usage'])).out).period,'7d');
+  const r=JSON.parse((await run(['usage','reprice'])).out);
+  assert.equal(r.changed,0);
+});

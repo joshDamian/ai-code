@@ -543,8 +543,10 @@ async function main() {
     return out({ cases: cases.length, k: result.k, limit: result.limit, contentHash: result.contentHash, ...result.summary, rows: result.rows });
   }
   if (cmd === 'runs') return out(s.store.listRuns());
-  if (cmd === 'usage' && rest[0] === 'reprice') return out(s.repriceRuns());
-  if (cmd === 'usage') return out(s.usage(rest[0] || '7d'));
+  // The period is the second word, which the destructuring above names `sub`. It was
+  // read from `rest[0]`, the third, so `usage 30d` and `usage all` printed 7d.
+  if (cmd === 'usage' && sub === 'reprice') return out(s.repriceRuns());
+  if (cmd === 'usage') return out(s.usage(sub || '7d'));
   if (cmd === 'automation' && sub === 'list') return out(s.store.listAutomations());
   if (cmd === 'automation' && sub === 'add') {
     return out(s.store.addAutomation({ id: s.store.id(), name: rest[0], trigger: rest[1], action: rest.slice(2).join(' '), enabled: true, createdAt: new Date().toISOString() }));
