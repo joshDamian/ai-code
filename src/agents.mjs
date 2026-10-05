@@ -365,6 +365,20 @@ export function claudeArgs(input) {
   // which live in this server's data directory rather than the checkout. One flag
   // per directory, so the variadic option cannot swallow the flag after it.
   for (const dir of input.addDirs || []) args.push('--add-dir', dir);
+  // No run loads user-level settings. A user's settings.json may carry an `env`
+  // block, and Claude Code applies it over the environment it was started with - so
+  // an ANTHROPIC_BASE_URL there outranks the one providerEnv sets, and decides where
+  // every run goes. A FireConnect setup writes exactly that: verified 2026-10-05, a
+  // run started with DeepSeek's endpoint was answered by FireRouter instead, and a
+  // "subscription" run reached Fireworks. Routing is the only thing allowed to say
+  // where a run goes. Project settings still load, and so does the project's
+  // CLAUDE.md.
+  //
+  // The user's global CLAUDE.md is instructions rather than configuration, and a
+  // direct session has it, so it is passed explicitly.
+  args.push('--setting-sources', 'project,local');
+  const instructions = userInstructionsFile();
+  if (instructions) args.push('--append-system-prompt-file', instructions);
   // The role list is an allowlist of read-only roles and the branch below is what
   // makes it one: every role not named here lands on `--dangerously-skip-permissions`.
   // So a new role added to the service is a role with write access until it is
@@ -436,30 +450,19 @@ export function claudeArgs(input) {
   } else {
     args.push('--dangerously-skip-permissions');
   }
-  // A workflow run loads no MCP server it was not given, and no user-level
-  // settings. Without the first, every planner, implementer and reviewer got the
-  // user's claude.ai connectors (Gmail, Drive, Calendar - 19 tools, including
-  // Drive's share_file and trash_file under an implementer's skip-permissions).
-  // Without the second, the user's settings.json decides where a run goes: an `env`
-  // block there is applied to the child, and on 2026-10-05 FireConnect wrote
-  // ANTHROPIC_BASE_URL and a Fireworks key into it, which would have sent every
-  // "subscription" run to Fireworks and billed it there. The provider chosen by
-  // routing is the only thing allowed to say where a run goes.
+  // A workflow run also loads no MCP server it was not given: without this, every
+  // planner, implementer and reviewer got the user's claude.ai connectors (Gmail,
+  // Drive, Calendar - 19 tools, including Drive's share_file and trash_file under an
+  // implementer's skip-permissions).
   //
-  // The user's global CLAUDE.md is passed explicitly instead, because it is
-  // instructions rather than configuration, and a direct session has it. The
-  // project's own CLAUDE.md loads either way.
-  //
-  // The memory is pointed at the project's, not the worktree's. Claude Code keys
-  // auto-memory by working directory, and a run's directory is a fresh worktree,
-  // so every run started with an empty memory - 67 worktree memory folders on this
-  // machine, none with anything in them - while a session in the checkout read
-  // the project's notes. A chat and a session are conversations with the person,
-  // so they keep everything they had.
+  // Its memory is pointed at the project's, not the worktree's. Claude Code keys
+  // auto-memory by working directory, and a run's directory is a fresh worktree, so
+  // every run started with an empty memory - 67 worktree memory folders on this
+  // machine, none with anything in them - while a session in the checkout read the
+  // project's notes. A chat and a session are conversations with the person, run in
+  // the checkout, so they keep their connectors and their own memory.
   if (input.role !== 'chat' && input.role !== 'session') {
-    args.push('--strict-mcp-config', '--setting-sources', 'project,local');
-    const instructions = userInstructionsFile();
-    if (instructions) args.push('--append-system-prompt-file', instructions);
+    args.push('--strict-mcp-config');
     const memory = projectMemoryDir(input.project?.path);
     if (memory) args.push('--settings', JSON.stringify({ autoMemoryDirectory: memory }));
   }
@@ -847,6 +850,10 @@ export const AMBIENT_ROUTING_VARS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_BASE_URL',
+  // FireConnect sends the Fireworks key in a header rather than as a token, so a
+  // server started from a shell with its env would send that key to whichever
+  // endpoint a run was routed to.
+  'ANTHROPIC_CUSTOM_HEADERS',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',

@@ -575,6 +575,7 @@ test('provider env does not leak ambient Anthropic routing into the child',()=>{
     process.env.ANTHROPIC_API_KEY='ambient-key';
     process.env.ANTHROPIC_BASE_URL='https://api.deepseek.com/anthropic';
     process.env.ANTHROPIC_MODEL='deepseek-v4-flash';
+    process.env.ANTHROPIC_CUSTOM_HEADERS='X-Fireworks-Api-Key: fw-secret';
     process.env.DEEPSEEK_API_KEY='deepseek-key';
     process.env.OPENROUTER_API_KEY='or-key';
     process.env.FIREWORKS_API_KEY='fw-key';
@@ -585,6 +586,7 @@ test('provider env does not leak ambient Anthropic routing into the child',()=>{
     const cc=childEnv(providerEnv({id:'anthropic-claude-code',kind:'claude-code',config:{}},{name:'claude-sonnet-5'}));
     assert.equal(cc.ANTHROPIC_API_KEY,undefined);
     assert.equal(cc.ANTHROPIC_BASE_URL,undefined);
+    assert.equal(cc.ANTHROPIC_CUSTOM_HEADERS,undefined,'a FireConnect key header must not ride along to another endpoint');
     assert.equal(cc.ANTHROPIC_MODEL,undefined);
     assert.equal(cc.PATH,saved.PATH,'unrelated vars survive the scrub');
 
@@ -7116,9 +7118,12 @@ test('a workflow run loads no MCP connectors and no user settings, and reads the
     assert.equal(a[a.indexOf('--setting-sources')+1],'project,local',`${role}: a user settings.json cannot redirect the run`);
     assert.ok(a.indexOf('--strict-mcp-config')<a.indexOf('--'),`${role}: before the prompt separator`);
   }
-  assert.ok(!claudeArgs({role:'chat',model:'m',prompt:'p'}).includes('--strict-mcp-config'));
+  const chat=claudeArgs({role:'chat',model:'m',prompt:'p'});
+  assert.ok(!chat.includes('--strict-mcp-config'));
   const session=claudeArgs({role:'session',model:'m',prompt:'p',permissionTool:'mcp__g__a',mcpConfig:'/g.json'});
   assert.ok(!session.includes('--strict-mcp-config'));
+  // A user settings.json env block outranks providerEnv, so no role may load it.
+  for(const a of [chat,session]) assert.equal(a[a.indexOf('--setting-sources')+1],'project,local');
 });
 
 test('a frontier Claude parent hands Explore to Sonnet through --agents, and a provider can say otherwise',()=>{
@@ -7300,7 +7305,7 @@ test('a workflow run is pointed at its project\'s memory folder when one exists'
   }finally{if(saved===undefined)delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR=saved}
 });
 
-test('the user\'s global CLAUDE.md is appended to a workflow run, since its settings are not loaded',()=>{
+test('the user\'s global CLAUDE.md is appended to every run, since user settings are not loaded',()=>{
   const saved=process.env.CLAUDE_CONFIG_DIR;
   const home=fs.mkdtempSync(path.join(os.tmpdir(),'claude-home-'));
   process.env.CLAUDE_CONFIG_DIR=home;
@@ -7311,6 +7316,6 @@ test('the user\'s global CLAUDE.md is appended to a workflow run, since its sett
     const a=claudeArgs({role:'reviewer',model:'m',prompt:'p'});
     assert.equal(a[a.indexOf('--append-system-prompt-file')+1],path.join(home,'CLAUDE.md'));
     assert.ok(a.includes('--append-system-prompt'),'beside the read-only notice, not instead of it');
-    assert.ok(!claudeArgs({role:'chat',model:'m',prompt:'p'}).includes('--append-system-prompt-file'),'a chat loads user settings, CLAUDE.md with them');
+    assert.ok(claudeArgs({role:'chat',model:'m',prompt:'p'}).includes('--append-system-prompt-file'),'a chat gets it the same way');
   }finally{if(saved===undefined)delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR=saved}
 });
