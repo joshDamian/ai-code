@@ -5366,9 +5366,12 @@ export class Service {
     } catch {
       checks.push({ name: 'claude', ok: false, requiredForRealAgents: true });
     }
-    for (const p of this.store.listProviders().filter((x) => x.kind === 'deepseek')) {
-      const keyEnv = p.config.apiKeyEnv || 'DEEPSEEK_API_KEY';
-      checks.push({ name: p.name, ok: !!process.env[keyEnv], credential: keyEnv });
+    // Every hosted provider holds its credential in the environment variable its
+    // config names, so one rule covers all of them. A kind list here was what the
+    // deepseek branch left behind, and it kept saying nothing about the providers
+    // added after it.
+    for (const p of this.store.listProviders().filter((x) => x.config?.apiKeyEnv)) {
+      checks.push({ name: p.name, ok: !!process.env[p.config.apiKeyEnv], credential: p.config.apiKeyEnv });
     }
     return { checks };
   }

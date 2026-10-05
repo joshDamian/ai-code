@@ -581,6 +581,45 @@ test('provider add-claude seeds the anthropic catalog and refuses a re-run',asyn
   assert.match(dup.err,/provider sync anthropic-claude-code/);
 });
 
+// The Fireworks catalog, whose ids are resource names rather than slugs: the local
+// id, the invocation id and the endpoint path all carry `accounts/fireworks/models/`,
+// so this is the test that says that shape survives the registry and the CLI.
+test('provider add-fireworks seeds the fireworks catalog and refuses a re-run',async()=>{
+  const root=gitRepo();
+  const s=new Service(root,{allowMock:true,silent:true});
+  s.initProject('p',root);
+  const run=(args)=>new Promise((res)=>{const p=spawn(process.execPath,[cliPath,...args],{cwd:root,env:{...process.env,AI_CODE_ROOT:root},stdio:['ignore','pipe','pipe']});let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('close',code=>res({code,out,err}))});
+
+  const first=await run(['provider','add-fireworks']);
+  assert.equal(first.code,0,first.err);
+  const {providers,models}=JSON.parse((await run(['provider','list'])).out);
+  const p=providers.find(x=>x.id==='fireworks');
+  assert.equal(p.kind,'fireworks');
+  assert.equal(p.config.apiKeyEnv,'FIREWORKS_API_KEY');
+  assert.equal(p.config.billingMode,'api');
+  const at=(id)=>{const m=models.find(x=>x.id===id);assert.ok(m,`${id} is in the catalog`);return m};
+
+  const kimi=at('fireworks:accounts/fireworks/models/kimi-k3');
+  assert.equal(kimi.invocation_model_id,'accounts/fireworks/models/kimi-k3');
+  assert.equal(kimi.input_cost_per_mtok,3);
+  assert.equal(kimi.cache_read_cost_per_mtok,0.3);
+  assert.equal(kimi.output_cost_per_mtok,15);
+  assert.equal(kimi.context_length,1048576);
+  assert.ok(kimi.capabilities.includes('planning'),'a plan has somewhere to go when the subscription is spent');
+  assert.ok(kimi.capabilities.includes('review'));
+
+  // The cheap end carries coding and repair only, so a plan cannot land on it.
+  const flash=at('fireworks:accounts/fireworks/models/glm-5p3-flash');
+  assert.deepEqual(flash.capabilities.sort(),['coding','repair']);
+  assert.equal(flash.output_cost_per_mtok,0.5);
+  assert.equal(models.filter(m=>m.provider_id==='fireworks').length,6,'the whole catalog lands');
+
+  const dup=await run(['provider','add-fireworks']);
+  assert.equal(dup.code,1);
+  assert.match(dup.err,/already exists/);
+  assert.match(dup.err,/provider sync fireworks/);
+});
+
 test('POST /api/chat/sessions creates a new chat',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-'));git(root,['init','-q']);fs.writeFileSync(path.join(root,'README.md'),'x');git(root,['add','.']);git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);const s=new Service(root,{allowMock:true,silent:true});const p=s.initProject('p',root);const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{const r=await post(`${srv.base}/api/chat/sessions`,{projectId:p.id});assert.equal(r.status,201);const body=JSON.parse(r.body);assert.ok(body.id);assert.equal(body.project_id,p.id);assert.equal(body.title,'New chat')}finally{srv.stop()}});
 
 test('POST /api/chat/sessions/:id/messages queues a job and returns 202',async()=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-chat-msg-'));git(root,['init','-q']);fs.writeFileSync(path.join(root,'README.md'),'x');git(root,['add','.']);git(root,['-c','user.email=t@e.com','-c','user.name=T','commit','-qm','init']);const s=new Service(root,{allowMock:true,silent:true});const p=s.initProject('p',root);s.updateProvider('mock',{enabled:false});s.addProvider({id:'chat-provider',name:'Chat',kind:'mock',enabled:true,config:{routable:true,chatText:'Answer to the question.'}});s.addModel({id:'chat-m',providerId:'chat-provider',name:'chat',capabilities:['planning'],speed:10,quality:10,cost:0,contextLength:100000});const srv=await startServer(root,{AI_CODE_ALLOW_MOCK:'1'});try{const createResp=await post(`${srv.base}/api/chat/sessions`,{projectId:p.id});const session=JSON.parse(createResp.body);const msgResp=await post(`${srv.base}/api/chat/sessions/${session.id}/messages`,{message:'What is in this repo?'});assert.equal(msgResp.status,202);const body=JSON.parse(msgResp.body);assert.ok(body.message);assert.equal(body.message.role,'user');assert.equal(body.message.content,'What is in this repo?');assert.ok(body.job);assert.equal(body.job.kind,'chat')}finally{srv.stop()}});

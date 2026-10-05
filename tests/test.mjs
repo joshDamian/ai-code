@@ -577,6 +577,7 @@ test('provider env does not leak ambient Anthropic routing into the child',()=>{
     process.env.ANTHROPIC_MODEL='deepseek-v4-flash';
     process.env.DEEPSEEK_API_KEY='deepseek-key';
     process.env.OPENROUTER_API_KEY='or-key';
+    process.env.FIREWORKS_API_KEY='fw-key';
     process.env.PATH=saved.PATH;
 
     // A subscription claude-code provider must see none of it, or it silently
@@ -602,6 +603,15 @@ test('provider env does not leak ambient Anthropic routing into the child',()=>{
     assert.equal(or.ANTHROPIC_MODEL,'google/gemini-2.5-pro');
     assert.equal(or.ANTHROPIC_API_KEY,undefined,'the ambient key is scrubbed and the branch adds no empty one');
     assert.throws(()=>providerEnv({kind:'openrouter',config:{apiKeyEnv:'MISSING_OR_KEY'}},{name:'x'}),/Missing MISSING_OR_KEY/);
+
+    // Fireworks is the same shape again, with model ids that are resource names
+    // rather than slugs. The base carries no `/v1` for the same reason.
+    const fw=childEnv(providerEnv({id:'fireworks',kind:'fireworks',config:{apiKeyEnv:'FIREWORKS_API_KEY'}},{name:'kimi-k3',invocationModelId:'accounts/fireworks/models/kimi-k3'}));
+    assert.equal(fw.ANTHROPIC_BASE_URL,'https://api.fireworks.ai/inference');
+    assert.equal(fw.ANTHROPIC_AUTH_TOKEN,'fw-key');
+    assert.equal(fw.ANTHROPIC_MODEL,'accounts/fireworks/models/kimi-k3');
+    assert.equal(fw.ANTHROPIC_API_KEY,undefined,'the ambient key is scrubbed and the branch adds no empty one');
+    assert.throws(()=>providerEnv({kind:'fireworks',config:{apiKeyEnv:'MISSING_FW_KEY'}},{name:'x'}),/Missing MISSING_FW_KEY/);
   }finally{
     for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];
     Object.assign(process.env,saved);

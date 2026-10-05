@@ -75,11 +75,24 @@ export DEEPSEEK_API_KEY="..."
 ai-code provider add-deepseek
 ```
 
+OpenRouter and Fireworks each serve an Anthropic-compatible endpoint, so they plug in the same way:
+
+```bash
+export OPENROUTER_API_KEY="..."
+ai-code provider add-openrouter
+
+export FIREWORKS_API_KEY="..."
+ai-code provider add-fireworks
+```
+
+Fireworks is the cash fallback for a spent Claude subscription: Kimi K3, GLM 5.3 and Qwen 3.8 Max carry every capability, so routing can still plan and review when the subscription is out, and the cheaper models take the implement and repair end. Their model ids are resource names (`accounts/fireworks/models/...`) and cached input is billed at a discount, both carried in the catalog.
+
 Test a real provider connection (this invokes Claude Code and may consume model/API usage):
 
 ```bash
 ai-code provider test anthropic-claude-code
 ai-code provider test deepseek-claude-code
+ai-code provider test fireworks
 ```
 
 DeepSeek's official Claude Code integration currently uses `https://api.deepseek.com/anthropic` and `deepseek-flash[1m]`; AI Code configures those in the child process only and does not mutate your shell environment.

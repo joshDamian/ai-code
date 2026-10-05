@@ -841,39 +841,42 @@ function childEnv(extra) {
   return { ...env, ...(extra || {}), PORT: AGENT_PORT };
 }
 
-// DeepSeek is reached through Claude Code's Anthropic-compatible endpoint, so the
-// provider config is expressed entirely as environment variables.
+// The providers Claude Code reaches through someone else's Anthropic-compatible
+// endpoint. Each is the same two facts - where the endpoint is, and which variable
+// holds the key - so they live in one table rather than in copies that drift apart.
+//
+// Every base URL is the one claude appends `/v1/messages` to, so none of them
+// carries a `/v1` of its own: a base that did would 404 on every call.
+//
+// The key is passed as ANTHROPIC_AUTH_TOKEN for all of them. Claude Code's login
+// gate accepts OAuth, AUTH_TOKEN, or an already-approved API key, and it rejects a
+// key it has not seen in ANTHROPIC_API_KEY - which childEnv strips anyway, so a
+// provider honouring that variable would read as "Not logged in" instead of
+// reaching its endpoint.
+const HOSTED_PROVIDERS = {
+  deepseek: { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/anthropic', keyEnv: 'DEEPSEEK_API_KEY' },
+  // The base is `/api` and not `/api/v1`: OpenRouter's Anthropic endpoint is
+  // `https://openrouter.ai/api/v1/messages`. OpenRouter also takes optional
+  // `HTTP-Referer`/`X-Title` attribution headers, which no env var can express, so
+  // this integration goes without them.
+  openrouter: { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api', keyEnv: 'OPENROUTER_API_KEY' },
+  // Fireworks serves the Anthropic Messages API directly, with tool calls
+  // translated on its side, and documents Claude Code against this base. Its
+  // model ids are resource names - `accounts/fireworks/models/<slug>` - which is
+  // why the catalog's ids carry that whole path.
+  fireworks: { label: 'Fireworks', baseUrl: 'https://api.fireworks.ai/inference', keyEnv: 'FIREWORKS_API_KEY' },
+};
+
 export function providerEnv(provider, model) {
-  if (provider.kind === 'deepseek') {
-    const keyEnv = provider.config.apiKeyEnv || 'DEEPSEEK_API_KEY';
+  const hosted = HOSTED_PROVIDERS[provider.kind];
+  if (hosted) {
+    const keyEnv = provider.config.apiKeyEnv || hosted.keyEnv;
     const key = process.env[keyEnv];
-    if (!key) throw Object.assign(new Error(`Missing ${keyEnv} for DeepSeek provider`), { code: 'AUTH_FAILURE' });
+    if (!key) throw Object.assign(new Error(`Missing ${keyEnv} for ${hosted.label} provider`), { code: 'AUTH_FAILURE' });
     const mid = model.invocationModelId || model.providerModelId || model.name;
     return {
       AI_CODE_PROVIDER: provider.id,
-      ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
-      ANTHROPIC_AUTH_TOKEN: key,
-      ANTHROPIC_MODEL: mid,
-      ANTHROPIC_DEFAULT_OPUS_MODEL: mid,
-      ANTHROPIC_DEFAULT_SONNET_MODEL: mid,
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: mid,
-      CLAUDE_CODE_SUBAGENT_MODEL: mid,
-      CLAUDE_CODE_EFFORT_LEVEL: provider.config.effort || 'max',
-      CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(provider.config.autoCompactWindow || 786432),
-    };
-  }
-  if (provider.kind === 'openrouter') {
-    const keyEnv = provider.config.apiKeyEnv || 'OPENROUTER_API_KEY';
-    const key = process.env[keyEnv];
-    if (!key) throw Object.assign(new Error(`Missing ${keyEnv} for OpenRouter provider`), { code: 'AUTH_FAILURE' });
-    const mid = model.invocationModelId || model.providerModelId || model.name;
-    // The base is `/api` and not `/api/v1`, because claude appends `/v1/messages`
-    // itself - OpenRouter's Anthropic endpoint is `https://openrouter.ai/api/v1/messages`.
-    // OpenRouter also takes optional `HTTP-Referer`/`X-Title` attribution headers, which
-    // no env var can express, so this integration goes without them.
-    return {
-      AI_CODE_PROVIDER: provider.id,
-      ANTHROPIC_BASE_URL: 'https://openrouter.ai/api',
+      ANTHROPIC_BASE_URL: hosted.baseUrl,
       ANTHROPIC_AUTH_TOKEN: key,
       ANTHROPIC_MODEL: mid,
       ANTHROPIC_DEFAULT_OPUS_MODEL: mid,
@@ -960,7 +963,7 @@ export async function* runAgent(provider, model, input) {
     );
     return;
   }
-  if (provider.kind === 'claude-code' || provider.kind === 'deepseek' || provider.kind === 'openrouter') {
+  if (provider.kind === 'claude-code' || HOSTED_PROVIDERS[provider.kind]) {
     yield* runClaude({
       ...input,
       model: model.invocationModelId || model.providerModelId || model.name,

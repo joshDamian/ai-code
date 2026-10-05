@@ -41,6 +41,7 @@ Providers
   provider add-claude
   provider add-deepseek [model]
   provider add-openrouter
+  provider add-fireworks
   provider sync [provider-id]
   provider test <provider-id> [model-id]
   provider health [provider-id]
@@ -131,12 +132,43 @@ const OPENROUTER_MODELS = [
   { id: 'openrouter:qwen/qwen3-235b-a22b', name: 'qwen3-235b', displayName: 'Qwen 3 235B', providerModelId: 'qwen/qwen3-235b-a22b', invocationModelId: 'qwen/qwen3-235b-a22b', capabilities: ['coding'], speed: 7, quality: 9, contextLength: 131072, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 0.7, outputCostPerMTok: 2.8, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
 ];
 
+// Fireworks' serverless catalog, which is the cash fallback for when the Claude
+// subscription is spent: the three strong models carry every capability so plan and
+// review still have somewhere to go, and the cheap ones are the implement/repair
+// end. Kimi K3 and GLM 5.3 are also the two the subscription-free tiers of other
+// vendors route to, which is why they are here at their own prices rather than
+// through OpenRouter.
+//
+// Prices are from docs.fireworks.ai/serverless/pricing on 2026-10-05, standard
+// (not Priority, Fast or US-only) rates. Cached input is billed at the discount on
+// the row, and Fireworks reports no cache-write tokens at all - a new prefix is
+// billed as input - so a row with no cacheWriteCostPerMTok is priced correctly.
+//
+// DeepSeek V4.1 Flash is deliberately absent: Fireworks charges about twice what
+// the direct DeepSeek provider charges for the same model, and the direct provider
+// is what the fallback chain already reaches.
+//
+// The `quality` numbers are first judgments, not measurements: no run in this
+// pipeline has been observed on any of these models yet. They sit below the Claude
+// models they would replace, so a healthy subscription keeps the plan and the
+// review, and the first quota-exhausted fallback is where the replay calibration
+// (src/ranker-eval.mjs) has evidence to correct them.
+const FIREWORKS_MODELS = [
+  { id: 'fireworks:accounts/fireworks/models/kimi-k3', name: 'kimi-k3', displayName: 'Kimi K3', providerModelId: 'accounts/fireworks/models/kimi-k3', invocationModelId: 'accounts/fireworks/models/kimi-k3', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 6, quality: 9, contextLength: 1048576, reasoning: 'frontier', toolUse: true, streaming: true, inputCostPerMTok: 3, cacheReadCostPerMTok: 0.3, outputCostPerMTok: 15, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
+  { id: 'fireworks:accounts/fireworks/models/glm-5p3', name: 'glm-5p3', displayName: 'GLM 5.3', providerModelId: 'accounts/fireworks/models/glm-5p3', invocationModelId: 'accounts/fireworks/models/glm-5p3', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 7, quality: 8.5, contextLength: 1048576, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 1.4, cacheReadCostPerMTok: 0.26, outputCostPerMTok: 4.4, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
+  { id: 'fireworks:accounts/fireworks/models/qwen3p8-max', name: 'qwen3p8-max', displayName: 'Qwen 3.8 Max', providerModelId: 'accounts/fireworks/models/qwen3p8-max', invocationModelId: 'accounts/fireworks/models/qwen3p8-max', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 7, quality: 8.5, contextLength: 262144, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 2, cacheReadCostPerMTok: 0.25, outputCostPerMTok: 6, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
+  { id: 'fireworks:accounts/fireworks/models/minimax-m3', name: 'minimax-m3', displayName: 'MiniMax M3', providerModelId: 'accounts/fireworks/models/minimax-m3', invocationModelId: 'accounts/fireworks/models/minimax-m3', capabilities: ['coding', 'repair'], speed: 8, quality: 7.5, contextLength: 512000, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 0.3, cacheReadCostPerMTok: 0.06, outputCostPerMTok: 1.2, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
+  { id: 'fireworks:accounts/fireworks/models/glm-5p3-flash', name: 'glm-5p3-flash', displayName: 'GLM 5.3 Flash', providerModelId: 'accounts/fireworks/models/glm-5p3-flash', invocationModelId: 'accounts/fireworks/models/glm-5p3-flash', capabilities: ['coding', 'repair'], speed: 9, quality: 7, contextLength: 1048576, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.15, cacheReadCostPerMTok: 0.03, outputCostPerMTok: 0.5, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
+  { id: 'fireworks:accounts/fireworks/models/gpt-oss-120b', name: 'gpt-oss-120b', displayName: 'GPT OSS 120B', providerModelId: 'accounts/fireworks/models/gpt-oss-120b', invocationModelId: 'accounts/fireworks/models/gpt-oss-120b', capabilities: ['coding'], speed: 9, quality: 6.5, contextLength: 131072, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.15, cacheReadCostPerMTok: 0.015, outputCostPerMTok: 0.6, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
+];
+
 // What each provider's models should be, keyed by the id `add-*` writes. `provider
 // sync` reads it, so there is one place that knows what a provider's list is.
 const CATALOGS = {
   'anthropic-claude-code': CLAUDE_MODELS,
   'deepseek-claude-code': DEEPSEEK_MODELS,
   'openrouter': OPENROUTER_MODELS,
+  'fireworks': FIREWORKS_MODELS,
 };
 
 // Commands the task namespace accepts. `execute` and the planning verbs are async;
@@ -301,6 +333,13 @@ async function providerCommand(sub, rest) {
     return out(s.store.getProvider('openrouter'));
   }
 
+  if (sub === 'add-fireworks') {
+    createOnly('fireworks');
+    s.addProvider({ id: 'fireworks', name: 'Fireworks', kind: 'fireworks', enabled: true, config: { apiKeyEnv: 'FIREWORKS_API_KEY', effort: 'max', routable: true, billingMode: 'api' } });
+    for (const m of FIREWORKS_MODELS) s.addModel({ ...m, providerId: 'fireworks' });
+    return out(s.store.getProvider('fireworks'));
+  }
+
   // The command that is *not* create-only: it reconciles the model rows a provider
   // already has against its catalog, adding what is missing and deleting what is no
   // longer there. Naming one that is not installed is a mistake worth reporting; an
@@ -309,7 +348,7 @@ async function providerCommand(sub, rest) {
   if (sub === 'sync') {
     const named = rest[0];
     if (named && !CATALOGS[named]) throw new Error(`Unknown provider '${named}'; syncable providers: ${Object.keys(CATALOGS).join(', ')}`);
-    if (named && !s.store.getProvider(named)) throw new Error(`Provider '${named}' not found; add it first with provider add-claude, add-deepseek or add-openrouter`);
+    if (named && !s.store.getProvider(named)) throw new Error(`Provider '${named}' not found; add it first with provider add-claude, add-deepseek, add-openrouter or add-fireworks`);
     const ids = named ? [named] : Object.keys(CATALOGS).filter((id) => s.store.getProvider(id));
     const synced = ids.map((id) => s.syncProviderModels(id, CATALOGS[id]));
     return out(named ? synced[0] : synced);
@@ -344,7 +383,7 @@ async function providerCommand(sub, rest) {
 async function shellCommand(providerId, args) {
   if (!providerId) throw new Error('shell needs a provider id; try `shell deepseek-claude-code`');
   const provider = s.store.getProvider(providerId);
-  if (!provider) throw new Error(`Provider '${providerId}' not found; add it first with provider add-deepseek, add-openrouter or add-claude`);
+  if (!provider) throw new Error(`Provider '${providerId}' not found; add it first with provider add-deepseek, add-openrouter, add-fireworks or add-claude`);
   if (!provider.enabled) throw new Error(`Provider '${providerId}' is disabled; run \`provider enable ${providerId}\` to use it`);
 
   const models = s.store.listModels(providerId);
