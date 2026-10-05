@@ -6470,33 +6470,60 @@ test('a session turn runs in the project checkout and tallies what it cost', asy
   assert.ok(turns[0].answer.length > 0);
 });
 
-test('the next turn is handed what happened in the last one', async () => {
+test('a conversation turn sends the person\'s words as the prompt, and the next turn continues its claude session', async () => {
   const root = repo();
   const s = new Service(root, { allowMock: true, silent: true });
   const p = s.initProject('p', root);
-  const session = s.createSession(p.id, 'Two turns');
-  const prompts = [];
-  const real = s.runRole.bind(s);
-  s.runRole = (task, role, prompt, ...rest) => {
-    prompts.push(prompt);
-    return real(task, role, prompt, ...rest);
-  };
-  s.askSession(session.id, 'First instruction.');
+  s.updateProvider('mock', { enabled: false });
+  s.addProvider({ id: 'echo', name: 'Echo', kind: 'mock', enabled: true, config: { routable: true, echo: true, sessionId: 'claude-1' } });
+  s.addModel({ id: 'echo-m', providerId: 'echo', name: 'echo', capabilities: ['coding', 'planning'], speed: 10, quality: 10, cost: 0, contextLength: 100000 });
+  const session = s.createSession(p.id, 'Two turns', { mode: 'edit' });
+  const started = (runId) => s.store.listEvents(runId).find((e) => e.type === 'started').data;
+  const first = s.askSession(session.id, 'First instruction.').pending_run_id;
   await s.sessionTurn(session.id);
-  s.askSession(session.id, 'Second instruction.');
+  const one = started(first);
+  assert.equal(one.prompt, 'First instruction.', 'the prompt is exactly what the person typed');
+  assert.match(one.system, /supervised/i, 'the rules travel as system prompt');
+  assert.doesNotMatch(one.system, /CONVERSATION SO FAR/, 'nothing to replay yet');
+  assert.equal(one.resumed, null);
+  const second = s.askSession(session.id, 'Second instruction.').pending_run_id;
   await s.sessionTurn(session.id);
-  assert.equal(prompts.length, 2);
-  // The first prompt is the prompt and nothing else: there is no history yet.
-  assert.doesNotMatch(prompts[0], /WHAT HAS HAPPENED SO FAR/);
-  assert.match(prompts[0], /supervised/i);
-  assert.match(prompts[1], /WHAT HAS HAPPENED SO FAR/);
-  assert.match(prompts[1], /USER: First instruction\./);
-  // And the instruction it is answering appears once, as the task text, rather
-  // than being replayed under the history it opens.
-  assert.doesNotMatch(prompts[1], /USER: Second instruction\./);
+  const two = started(second);
+  assert.equal(two.prompt, 'Second instruction.');
+  assert.equal(two.resumed, 'claude-1', 'the second turn continues the first turn\'s session');
+  assert.doesNotMatch(two.system, /CONVERSATION SO FAR/, 'a resumed session already has the history');
+  // A session that cannot be continued - here, the first turn left no id - starts
+  // fresh, with the conversation so far in the system prompt instead.
+  s.store.updateSessionRun(first, { session_id: null });
+  s.store.updateSessionRun(second, { session_id: null });
+  const third = s.askSession(session.id, 'Third instruction.').pending_run_id;
+  await s.sessionTurn(session.id);
+  const three = started(third);
+  assert.equal(three.resumed, null);
+  assert.match(three.system, /CONVERSATION SO FAR/);
+  assert.match(three.system, /USER: First instruction\./);
+  assert.doesNotMatch(three.system, /USER: Third instruction\./, 'the newest message is the prompt, not history');
 });
 
-test('a second instruction while one is in flight is refused', async () => {
+test('a resume that fails is retried fresh on the same model, with the history', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  s.updateProvider('mock', { enabled: false });
+  s.addProvider({ id: 'echo', name: 'Echo', kind: 'mock', enabled: true, config: { routable: true, echo: true, sessionId: 'pruned', failResume: 'pruned' } });
+  s.addModel({ id: 'echo-m', providerId: 'echo', name: 'echo', capabilities: ['coding', 'planning'], speed: 10, quality: 10, cost: 0, contextLength: 100000 });
+  const session = s.createSession(p.id, 'Broken resume', { mode: 'edit' });
+  s.askSession(session.id, 'First.');
+  await s.sessionTurn(session.id);
+  s.askSession(session.id, 'Second.');
+  await s.sessionTurn(session.id);
+  const runs = s.store.listSessionRuns(session.id);
+  assert.deepEqual(runs.map((r) => [r.provider_id, r.status]), [['echo', 'succeeded'], ['echo', 'failed'], ['echo', 'succeeded']], 'the provider is not blamed for a lost session');
+  const fresh = s.store.listEvents(runs[2].id).find((e) => e.type === 'started').data;
+  assert.equal(fresh.resumed, null);
+  assert.equal(fresh.prompt, 'Second.');
+  assert.match(fresh.system, /USER: First\./, 'the fresh session is told the conversation so far');
+});test('a second instruction while one is in flight is refused', async () => {
   const root = repo();
   const s = new Service(root, { allowMock: true, silent: true });
   const p = s.initProject('p', root);
@@ -7291,17 +7318,22 @@ test('a worktree\'s node_modules link is ignored by git even where the project i
   assert.equal(execFileSync('git',['diff','--cached','--name-only'],{cwd:wt.dir,encoding:'utf8'}).includes('node_modules'),false,'and add -A does not stage it');
 });
 
-test('a workflow run is pointed at its project\'s memory folder when one exists',()=>{
+test('a run outside the checkout is pointed at the project\'s memory folder, whatever its role',()=>{
   const saved=process.env.CLAUDE_CONFIG_DIR;
   const home=fs.mkdtempSync(path.join(os.tmpdir(),'claude-home-'));
   process.env.CLAUDE_CONFIG_DIR=home;
   try{
     const project={path:'/Users/x/repo'};
-    assert.ok(!claudeArgs({role:'implementer',model:'m',prompt:'p',project}).includes('--settings'));
+    const worktree='/Users/x/.ai-code-worktrees-repo/t1';
+    assert.ok(!claudeArgs({role:'implementer',model:'m',prompt:'p',project,worktree}).includes('--settings'),'no folder yet');
     const mem=path.join(home,'projects','-Users-x-repo','memory');fs.mkdirSync(mem,{recursive:true});
-    const a=claudeArgs({role:'implementer',model:'m',prompt:'p',project});
+    const a=claudeArgs({role:'implementer',model:'m',prompt:'p',project,worktree});
     assert.deepEqual(JSON.parse(a[a.indexOf('--settings')+1]),{autoMemoryDirectory:mem});
-    assert.ok(!claudeArgs({role:'chat',model:'m',prompt:'p',project}).includes('--settings'),'a chat keeps the CLI default');
+    // A task session works in its worktree under the session role.
+    const ts=claudeArgs({role:'session',model:'m',prompt:'p',project,cwd:worktree,permissionTool:'mcp__g__a',mcpConfig:'/g.json'});
+    assert.ok(ts.includes('--settings'),'a task session is outside the checkout too');
+    // In the checkout itself the CLI finds the memory on its own.
+    assert.ok(!claudeArgs({role:'chat',model:'m',prompt:'p',project,cwd:project.path}).includes('--settings'));
   }finally{if(saved===undefined)delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR=saved}
 });
 
@@ -7317,5 +7349,157 @@ test('the user\'s global CLAUDE.md is appended to every run, since user settings
     assert.equal(a[a.indexOf('--append-system-prompt-file')+1],path.join(home,'CLAUDE.md'));
     assert.ok(a.includes('--append-system-prompt'),'beside the read-only notice, not instead of it');
     assert.ok(claudeArgs({role:'chat',model:'m',prompt:'p'}).includes('--append-system-prompt-file'),'a chat gets it the same way');
+  }finally{if(saved===undefined)delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR=saved}
+});
+
+// The session engine: a task run as one conversation in its own worktree, checked
+// at the end of every turn.
+function sessionEngine({ writes = ['feature.txt'], test = null } = {}) {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  if (test) s.store.updateProject(p.id, { commands: { ...s.project(p.id).commands, test } });
+  s.updateProvider('mock', { enabled: false });
+  s.addProvider({ id: 'agent', name: 'Agent', kind: 'mock', enabled: true, config: { routable: true, echo: true, sessionId: 'claude-task', writes } });
+  s.addModel({ id: 'agent-m', providerId: 'agent', name: 'agent', capabilities: ['coding', 'planning'], speed: 10, quality: 10, cost: 0, contextLength: 100000 });
+  return { root, s, p };
+}
+
+test('a session task works in its own worktree and ends COMPLETE when its checks pass', async () => {
+  const { root, s, p } = sessionEngine();
+  const t = s.createTask(p.id, 'Add a feature file.', { engine: 'session', modelId: 'agent-m' });
+  assert.equal(t.engine, 'session');
+  const { task, session } = s.startSessionTask(t.id);
+  assert.equal(task.state, 'WORKING');
+  assert.ok(task.worktree && task.worktree !== root, 'a worktree of its own');
+  assert.equal(session.task_id, t.id);
+  assert.equal(session.cwd, task.worktree);
+  assert.equal(session.auto_allow, 1, 'routine actions are allowed in its own worktree');
+  assert.equal(s.sessionSummaries(p.id).length, 0, 'not listed among conversations');
+  await s.sessionTurn(session.id);
+  const done = s.task(t.id);
+  assert.equal(done.state, 'COMPLETE');
+  assert.ok(fs.existsSync(path.join(done.worktree, 'feature.txt')));
+  assert.ok(!fs.existsSync(path.join(root, 'feature.txt')), 'the project checkout is untouched');
+  assert.deepEqual(s.taskChangeStat(done).files, 1);
+  const first = s.store.listEvents(s.store.listSessionRuns(session.id)[0].id).find((e) => e.type === 'started').data;
+  assert.equal(first.prompt, 'Add a feature file.', 'the description is the first message, verbatim');
+  assert.match(first.system, /worktree/);
+  assert.equal(s.store.listSessionRuns(session.id)[0].model_id, 'agent-m', 'on the pinned model');
+});
+
+test('a session task that changes nothing waits for the person', async () => {
+  const { s, p } = sessionEngine({ writes: [] });
+  const t = s.createTask(p.id, 'What would you change?', { engine: 'session', planFirst: true });
+  const { session } = s.startSessionTask(t.id);
+  await s.sessionTurn(session.id);
+  assert.equal(s.task(t.id).state, 'WAITING');
+  const sys = s.store.listEvents(s.store.listSessionRuns(session.id)[0].id).find((e) => e.type === 'started').data.system;
+  assert.match(sys, /plan first/i);
+});
+
+test('a session task whose checks fail is handed the failure, then marked failed', async () => {
+  const { s, p } = sessionEngine({ test: 'node -e "console.error(\'boom\');process.exit(1)"' });
+  const t = s.createTask(p.id, 'Break the build.', { engine: 'session' });
+  const { session } = s.startSessionTask(t.id);
+  await s.sessionTurn(session.id);
+  assert.equal(s.task(t.id).state, 'FAILED');
+  const turns = s.sessionTurns(session.id);
+  assert.equal(turns.length, 3, 'the turn, then maxFixes (2) fixes');
+  assert.equal(turns[1].from, 'harness');
+  assert.match(turns[1].instruction, /test command failed[\s\S]*boom/);
+  assert.equal(s.store.listEvents(turns[1].run_id).find((e) => e.type === 'started').data.resumed, 'claude-task', 'a fix continues the same session');
+  // A message after that is a new start.
+  s.store.updateProject(p.id, { commands: { ...s.project(p.id).commands, test: 'node -e "process.exit(0)"' } });
+  s.askSession(session.id, 'Try once more.');
+  await s.sessionTurn(session.id);
+  assert.equal(s.task(t.id).state, 'COMPLETE');
+});
+
+test('closing a session task archives its conversation and removes its worktree', async () => {
+  const { s, p } = sessionEngine();
+  const t = s.createTask(p.id, 'Something.', { engine: 'session' });
+  const { session } = s.startSessionTask(t.id);
+  await s.sessionTurn(session.id);
+  const wt = s.task(t.id).worktree;
+  assert.equal(s.closeTask(t.id).state, 'CANCELLED', 'even from COMPLETE');
+  assert.ok(!fs.existsSync(wt));
+  assert.equal(s.sessionById(session.id).status, 'archived');
+});
+
+test('a comparison runs its attempts from one base commit, and a pick discards the others', async () => {
+  const { root, s, p } = sessionEngine();
+  s.addModel({ id: 'agent-2', providerId: 'agent', name: 'agent two', capabilities: ['coding', 'planning'], speed: 10, quality: 10, cost: 0, contextLength: 100000 });
+  const { group, tasks } = s.createAttempts(p.id, 'Add a feature file.', [
+    { engine: 'session', modelId: 'agent-m' },
+    { engine: 'session', modelId: 'agent-2' },
+    { engine: 'pipeline', modelId: 'agent-m' },
+  ]);
+  assert.deepEqual(tasks.map((t) => t.attempt_label), ['A', 'B', 'C']);
+  assert.ok(tasks.every((t) => t.attempt_group === group && t.base_commit === tasks[0].base_commit && t.base_commit));
+  // Something lands on the main branch between the comparison's creation and its start.
+  fs.writeFileSync(path.join(root, 'later.txt'), 'x');
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['-c', 'user.email=t@e.com', '-c', 'user.name=T', 'commit', '-qm', 'later'], { cwd: root });
+  const [a, b] = tasks;
+  for (const t of [a, b]) await s.sessionTurn(s.startSessionTask(t.id).session.id);
+  assert.ok(!fs.existsSync(path.join(s.task(a.id).worktree, 'later.txt')), 'the attempt starts from the group\'s commit');
+  const view = s.attempts(group);
+  assert.equal(view.attempts.length, 3);
+  const [ma, mb, mc] = view.attempts;
+  assert.equal(ma.engine, 'session');
+  assert.equal(ma.model_id, 'agent-m');
+  assert.equal(mb.model_id, 'agent-2');
+  assert.equal(ma.state, 'COMPLETE');
+  assert.equal(ma.checks, 'passed');
+  assert.equal(ma.changes.files, 1);
+  assert.equal(ma.interventions, 0, 'it never needed the person');
+  assert.equal(mc.engine, 'pipeline');
+  assert.equal(mc.state, 'CREATED');
+  // Picking B discards A and C.
+  const wtA = s.task(a.id).worktree;
+  const picked = s.pickAttempt(group, b.id);
+  assert.deepEqual(picked.attempts.map((x) => [x.label, x.pick, x.state]), [['A', 'lost', 'CANCELLED'], ['B', 'won', 'COMPLETE'], ['C', 'lost', 'CANCELLED']]);
+  assert.ok(!fs.existsSync(wtA));
+  assert.throws(() => s.pickAttempt(group, a.id), /already been decided/);
+  // The scoreboard counts it.
+  const board = s.scoreboard();
+  assert.equal(board.decided, 1);
+  const row = (engine, model) => board.rows.find((r) => r.engine === engine && r.model_id === model);
+  assert.equal(row('session', 'agent-2').wins, 1);
+  assert.equal(row('session', 'agent-2').win_rate, 1);
+  assert.equal(row('session', 'agent-m').wins, 0);
+  assert.equal(row('pipeline', 'agent-m').attempts, 1);
+});
+
+test('a comparison cannot be decided while an attempt is running', async () => {
+  const { s, p } = sessionEngine();
+  const { group, tasks } = s.createAttempts(p.id, 'X.', [{ engine: 'session' }, { engine: 'session' }]);
+  s.startSessionTask(tasks[0].id);
+  assert.throws(() => s.pickAttempt(group, tasks[1].id), /A is still running/);
+  assert.throws(() => s.createAttempts(p.id, 'X.', [{ engine: 'session' }]), /at least two/);
+});
+
+test('a tool list holds only tool names: settings and memory never land inside one',()=>{
+  // The CLI ends a variadic list at the next --flag (verified against claude
+  // 2.1.289), so the risk is a bare value after it, not a flag.
+  const saved=process.env.CLAUDE_CONFIG_DIR;
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),'claude-home-'));
+  process.env.CLAUDE_CONFIG_DIR=home;
+  fs.mkdirSync(path.join(home,'projects','-Users-x-repo','memory'),{recursive:true});
+  fs.writeFileSync(path.join(home,'CLAUDE.md'),'x');
+  try{
+    const base={model:'m',prompt:'p',project:{path:'/Users/x/repo'},cwd:'/Users/x/wt',appendSystemPrompt:'rules',resumeSession:'s1'};
+    const cases=[{role:'session',permissionTool:'mcp__g__a',mcpConfig:'/g.json'},{role:'chat',appMcp:{configPath:'/a.json',tools:['mcp__ai-code-app__x']}},{role:'planner'},{role:'reviewer'},{role:'implementer'}];
+    for(const c of cases){
+      const a=claudeArgs({...base,...c});
+      for(const flag of ['--allowedTools','--disallowedTools']){
+        const i=a.indexOf(flag);if(i<0)continue;
+        const end=a.slice(i+1).findIndex((x)=>x.startsWith('--'));
+        const list=a.slice(i+1,i+1+end);
+        assert.ok(list.length>0,`${c.role}: ${flag} is empty`);
+        assert.ok(list.every((x)=>/^[A-Za-z_][\w-]*(\(.*\))?$/.test(x)),`${c.role}: ${flag} holds a non-tool value: ${list.join(' ')}`);
+      }
+    }
   }finally{if(saved===undefined)delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR=saved}
 });

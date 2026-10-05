@@ -152,6 +152,17 @@ ai-code web
 
 `web` is the one a desktop shortcut should call. It finds a server already on the port and opens it, asks a supervisor holding the port to start one, and otherwise starts a server itself — so it does the right thing whether or not either is running. `dashboard` is the foreground server, and stays the command for watching its output.
 
+### Engines: pipeline, session, or both
+
+A task runs one of two ways, chosen under **Run as** when you create it in the dashboard:
+
+- **Pipeline** (the default, and what the CLI above runs): a planner writes a plan, you approve it, then an implementer, the test command and a reviewer take it from there, each a separate agent run.
+- **Session**: one agent works on the task end to end, in the task's own worktree, as a conversation. Your description is its first message, sent as written. Its routine actions in the worktree run without asking; pushes, GitHub actions, history rewrites and other risky commands still wait for you. After every turn the project's test command runs. A failure is handed back to the agent, up to `taskSession.maxFixes` times (default 2), and the task is **Complete** only when there are changes and the checks pass. If a turn changes nothing (a question, or a proposal when **Plan first** is on), the task is **Waiting** on your reply. Its budgets are under `taskSession` in `.ai-code/routing.json`, and default to the pipeline's planner, implementer and reviewer budgets added together, so neither engine gets more room than the other.
+
+**Compare** runs the same task two to four ways side by side. Each attempt is an engine on a model; all of them start from the same commit, each in its own worktree. The compare page shows each attempt's checks, changes, spend, run time, tool calls and how often it needed you. Engines and models stay hidden until you reveal them or pick. Picking one discards the others, and you land the winner from its own page as usual. Each pick is counted on the Usage page under **Engines and models, from your comparisons**.
+
+Conversations, including a session task's, continue one Claude session from turn to turn (`--resume`), so the agent keeps everything it read and did. If that session can't be continued (a different model, or a pruned session), the turn starts fresh with the conversation so far in its system prompt.
+
 ### Recovering an interrupted plan
 
 A process that dies between its planner run succeeding and the plan being written to the task leaves that task in `Planning` with a plan that exists only in the run's events. Opening the store repairs it, and every command opens the store — the plan is rebuilt from the run's events and put in front of you for approval rather than being paid for again. The one run that finished in the last few seconds is left alone, because its owner is still about to write that same plan itself.

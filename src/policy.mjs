@@ -4,7 +4,7 @@ import path from 'node:path';
 // routing.json holds one object per role plus a top-level `health` block. Only
 // the roles are per-role, so anything that walks the file must walk this list
 // rather than Object.keys, or it will treat `health` as a fifth role.
-const ROLES = ['planner', 'implementer', 'reviewer', 'repair', 'session'];
+const ROLES = ['planner', 'implementer', 'reviewer', 'repair', 'session', 'taskSession'];
 
 // Per-role routing policy. `strategy` decides which model Automatic picks - see
 // STRATEGIES below for what each one weighs.
@@ -88,6 +88,17 @@ const defaults = {
   // read per session would let five of them spend five times it. Absent or
   // non-positive means the per-run budget is the only bound.
   session: { strategy: 'balanced', preferred: [], fallback: [], effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 100, maxRunCost: 2, subagentWait: 600, permissionTimeoutMs: 120, dailyCap: 0 },
+  // A task run as one session, end to end, in its own worktree. It does the work of
+  // the whole pipeline in one agent, so its envelope is the pipeline's added up -
+  // a planner's, an implementer's and a reviewer's calls (40 + 200 + 40, rounded to
+  // 300) and cash ($1 + $5 + $1) - and its effort is the planner's and reviewer's,
+  // because it does their thinking too. A side-by-side comparison is only fair if
+  // neither side wins by being allowed to run longer.
+  //
+  // The timeout is a whole task's rather than one stage's. maxFixes is how many
+  // times a failing test command is handed back to the session to fix before the
+  // task is marked failed.
+  taskSession: { strategy: 'balanced', preferred: [], fallback: [], effort: 'high', timeout: 1800, stall: 120, maxToolCalls: 300, maxRunCost: 7, subagentWait: 600, maxFixes: 2 },
   // Circuit-breaker thresholds. Absent means the defaults in src/health.mjs apply.
   health: {},
   // Prompt budget for the context assembler. Absent means the defaults in

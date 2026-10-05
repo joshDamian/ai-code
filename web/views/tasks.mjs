@@ -18,13 +18,29 @@ import { TextArea, Select, Toggle } from '../components/form.mjs';
 import { TaskPicker } from '../components/task-picker.mjs';
 import { shortId } from '../lib.mjs';
 
+// How a task runs. A pipeline is planned, approved, implemented, tested and
+// reviewed by separate agents; a session is one agent doing all of it in its own
+// worktree, in a conversation you can join. Compare runs the same task several ways
+// side by side and lets you pick the result.
+const ENGINE_OPTIONS = [
+  { value: 'pipeline', label: 'Pipeline' },
+  { value: 'session', label: 'Session' },
+  { value: 'compare', label: 'Compare' },
+];
+const ENGINE_HINTS = {
+  pipeline: 'Planned, approved by you, implemented, tested and reviewed by separate agents.',
+  session: 'One agent works on it end to end in its own worktree. You can join the conversation at any point.',
+  compare: 'Runs the task several ways from the same commit. You compare the results and land the one you prefer.',
+};
+const MAX_VARIANTS = 4;
+
 const TABS = [
   { id: 'all', label: 'All', states: null },
-  { id: 'active', label: 'Active', states: ['PLANNING', 'AWAITING_APPROVAL', 'APPROVED', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING', 'AWAITING_DECISION'] },
+  { id: 'active', label: 'Active', states: ['PLANNING', 'AWAITING_APPROVAL', 'APPROVED', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'REPAIRING', 'AWAITING_DECISION', 'WORKING', 'WAITING'] },
   // A task waiting on a person, whichever question it is waiting on. Two states
   // rather than one, because the answers differ: a plan needs approving, a review
   // needs a choice.
-  { id: 'awaiting', label: 'Awaiting', states: ['AWAITING_APPROVAL', 'AWAITING_DECISION'] },
+  { id: 'awaiting', label: 'Awaiting', states: ['AWAITING_APPROVAL', 'AWAITING_DECISION', 'WAITING'] },
   { id: 'complete', label: 'Complete', states: ['COMPLETE'] },
   { id: 'failed', label: 'Failed', states: ['FAILED'] },
   { id: 'cancelled', label: 'Cancelled', states: ['CANCELLED'] },
@@ -53,6 +69,15 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
   // id is not what you remember about it.
   const [parentId, setParentId] = useState('');
   const [saving, setSaving] = useState(false);
+  const [engine, setEngine] = useState('pipeline');
+  const [modelId, setModelId] = useState('');
+  const [planFirst, setPlanFirst] = useState(false);
+  // A comparison's attempts, each an engine on a model ('' is Automatic).
+  const [variants, setVariants] = useState([
+    { engine: 'pipeline', modelId: '' },
+    { engine: 'session', modelId: '' },
+  ]);
+  const [models, setModels] = useState([]);
   const descriptionRef = useRef(null);
 
   useEffect(() => {
@@ -72,9 +97,15 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
 
   async function load() {
     try {
-      const [t, p] = await Promise.all([api.tasks(), api.projects()]);
+      const [t, p, prov] = await Promise.all([api.tasks(), api.projects(), api.providers().catch(() => null)]);
       setTasks(t);
       setProjects(p);
+      // The models a task can be pinned to: enabled, on an enabled provider, and able
+      // to write code - the one capability every engine needs.
+      if (prov) {
+        const on = new Set((prov.providers || []).filter((x) => x.enabled).map((x) => x.id));
+        setModels((prov.models || []).filter((m) => m.enabled !== false && on.has(m.provider_id) && (m.capabilities || []).includes('coding')));
+      }
       setProjectId((cur) => cur || (p[0] && p[0].id) || '');
     } catch (e) {
       showToast(e.message, 'error');
@@ -137,13 +168,17 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
     }
     setSaving(true);
     try {
-      const t = await api.createTask(projectId, title.trim(), parentId.trim() || undefined);
-      showToast('Task created.', 'success');
+      const opts =
+        engine === 'compare'
+          ? { variants: variants.map((v) => ({ engine: v.engine, modelId: v.modelId || null })), planFirst }
+          : { engine, modelId: modelId || null, planFirst: engine === 'session' && planFirst };
+      const made = await api.createTask(projectId, title.trim(), parentId.trim() || undefined, opts);
+      showToast(engine === 'compare' ? `Started ${variants.length} attempts.` : 'Task created.', 'success');
       setTitle('');
       setParentId('');
       setShowForm(false);
       await load();
-      navigate(`#/tasks/${t.id}`);
+      navigate(made.group ? `#/compare/${made.group}` : `#/tasks/${made.id}`);
     } catch (e) {
       showToast(e.message, 'error');
     } finally {
@@ -162,7 +197,11 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
       // middle-click and by the browser's own context menu. The row-click handler
       // stays for the larger target a mouse expects; the link is what makes the
       // row reachable without one.
-      render: (t) => html`<a href=${`#/tasks/${t.id}`} onClick=${(e) => e.stopPropagation()}>${t.title}</a>`,
+      render: (t) => html`<a href=${`#/tasks/${t.id}`} onClick=${(e) => e.stopPropagation()}>${t.title}</a>${t.attempt_group
+        ? html` <a class="attempt-chip ${t.pick === 'won' ? 'won' : ''}" href=${`#/compare/${t.attempt_group}`} title="One attempt of a comparison. Open the comparison." onClick=${(e) => e.stopPropagation()}>${t.attempt_label}</a>`
+        : t.engine === 'session'
+          ? html` <span class="engine-chip" title="Runs as one session">session</span>`
+          : null}`,
     },
     {
       key: 'project_id',
@@ -293,10 +332,29 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
                     placeholder="Search tasks by title — the task this one builds on"
                     loading=${saving}
                   />
+                  <div class="field">
+                    <span class="field-label" id="engine-label">Run as</span>
+                    <div class="seg" role="group" aria-labelledby="engine-label">
+                      ${ENGINE_OPTIONS.map((o) => html`<button type="button" key=${o.value} class="seg-btn ${engine === o.value ? 'active' : ''}" aria-pressed=${engine === o.value} onClick=${() => setEngine(o.value)}>${o.label}</button>`)}
+                    </div>
+                    <span class="muted field-hint">${ENGINE_HINTS[engine]}</span>
+                  </div>
+                  ${engine === 'compare'
+                    ? html`<${VariantRows} variants=${variants} setVariants=${setVariants} models=${models} disabled=${saving} />`
+                    : html`<${Select}
+                        label="Model"
+                        value=${modelId}
+                        onChange=${setModelId}
+                        options=${[{ value: '', label: 'Automatic (routing decides)' }, ...models.map((m) => ({ value: m.id, label: m.display_name || m.name }))]}
+                        loading=${saving}
+                      />`}
+                  ${engine === 'session' || (engine === 'compare' && variants.some((v) => v.engine === 'session'))
+                    ? html`<${Toggle} checked=${planFirst} onChange=${setPlanFirst} label="Plan first: wait for my OK before it edits anything" />`
+                    : null}
                   <div class="inline-form-foot">
                     <span class="muted">⌘↵ to create</span>
                     <button class="btn secondary" type="button" onClick=${() => setShowForm(false)}>Cancel</button>
-                    <button class="btn primary" type="submit" disabled=${saving || !projects.length}>${saving ? 'Creating…' : 'Create task'}</button>
+                    <button class="btn primary" type="submit" disabled=${saving || !projects.length}>${saving ? 'Creating…' : engine === 'compare' ? `Start ${variants.length} attempts` : 'Create task'}</button>
                   </div>
                     `}
                 </form>
@@ -338,6 +396,33 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
                   onAction=${() => setShowForm(true)}
                 />`
       }
+    </div>
+  `;
+}
+
+// A comparison's attempts, one row each: the engine and the model. Two to four rows,
+// because a comparison of one is a task and more than four is a wall nobody reads.
+function VariantRows({ variants, setVariants, models, disabled }) {
+  const set = (i, patch) => setVariants((vs) => vs.map((v, j) => (j === i ? { ...v, ...patch } : v)));
+  const modelOptions = [{ value: '', label: 'Automatic' }, ...models.map((m) => ({ value: m.id, label: m.display_name || m.name }))];
+  return html`
+    <div class="field variant-rows">
+      <span class="field-label">Attempts</span>
+      ${variants.map(
+        (v, i) => html`
+          <div class="variant-row" key=${i}>
+            <span class="attempt-chip">${'ABCD'[i]}</span>
+            <${Select} inline size="sm" ariaLabel=${`Attempt ${'ABCD'[i]} engine`} value=${v.engine} onChange=${(x) => set(i, { engine: x })} options=${ENGINE_OPTIONS.filter((o) => o.value !== 'compare')} disabled=${disabled} />
+            <${Select} inline size="sm" ariaLabel=${`Attempt ${'ABCD'[i]} model`} value=${v.modelId} onChange=${(x) => set(i, { modelId: x })} options=${modelOptions} disabled=${disabled} />
+            ${variants.length > 2
+              ? html`<button type="button" class="icon-btn" aria-label=${`Remove attempt ${'ABCD'[i]}`} disabled=${disabled} onClick=${() => setVariants((vs) => vs.filter((_, j) => j !== i))}>✕</button>`
+              : null}
+          </div>
+        `
+      )}
+      ${variants.length < MAX_VARIANTS
+        ? html`<button type="button" class="link-btn variant-add" disabled=${disabled} onClick=${() => setVariants((vs) => [...vs, { engine: 'session', modelId: '' }])}>+ Add an attempt</button>`
+        : null}
     </div>
   `;
 }

@@ -73,7 +73,9 @@ export const DISCUSSION_OPENS = 'Answer the person deciding this review.';
 // A provider that never leaves the machine. Used by the test suite and by any
 // install that has not configured a real provider yet.
 export async function* runMock(input) {
-  yield { type: 'started', data: { provider: 'mock', role: input.role } };
+  // What it was handed, so a test can tell a resumed turn from a fresh one and the
+  // person's words from the harness's.
+  yield { type: 'started', data: { provider: 'mock', role: input.role, resumed: input.resumeSession || null, prompt: input.mockEcho ? input.prompt : undefined, system: input.mockEcho ? input.appendSystemPrompt || null : undefined } };
   if (input.mockDelayMs) await sleep(input.mockDelayMs, input.signal);
   if (input.mockFailure) {
     throw Object.assign(new Error(input.mockFailure), {
@@ -187,7 +189,7 @@ export async function* runMock(input) {
   // A planner with a sandbox is the third writer: its scratch files land in its
   // planning copy, which is what lets a test show they are not a violation and
   // never reach the checkout.
-  const writes = input.role === 'implementer' || input.role === 'repair' || (input.role === 'planner' && input.sandbox);
+  const writes = input.role === 'implementer' || input.role === 'repair' || input.role === 'session' || (input.role === 'planner' && input.sandbox);
   for (const file of (writes && input.mockWrites) || []) {
     const dest = path.join(agentCwd(input), file);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -245,7 +247,10 @@ export async function* runMock(input) {
   } else {
     yield { type: 'message', data: `${input.role} completed.` };
   }
-  yield { type: 'completed', data: { ok: true, resumed: input.resumeSession || null } };
+  // A configured session id stands in for the one claude reports, and a resumed
+  // turn keeps the id it resumed, which is what the CLI does.
+  const sid = input.resumeSession || (input.mockSessionId ? `${input.mockSessionId}` : null);
+  yield { type: 'completed', data: { ok: true, resumed: input.resumeSession || null, ...(sid ? { sessionId: sid } : {}) } };
 }
 
 // Plan mode tells the model to save its work to a plans file. The tool that would
@@ -379,6 +384,22 @@ export function claudeArgs(input) {
   args.push('--setting-sources', 'project,local');
   const instructions = userInstructionsFile();
   if (instructions) args.push('--append-system-prompt-file', instructions);
+  // A run outside the checkout reads the checkout's memory. Claude Code keys
+  // auto-memory by working directory, so a run in a fresh worktree - a pipeline
+  // stage, or a task session working there under the `session` role - otherwise
+  // starts with none: 67 worktree memory folders on this machine, all empty, while
+  // a session in the checkout read the project's notes. It goes here, with the
+  // other settings flags, because the role branches below end in variadic flags.
+  const memory = projectMemoryDir(input.project?.path);
+  const away = agentCwd(input) && input.project?.path && path.resolve(agentCwd(input)) !== path.resolve(input.project.path);
+  if (memory && away) args.push('--settings', JSON.stringify({ autoMemoryDirectory: memory }));
+  // The system prompt is assembled and passed as one flag, so a role's notice and
+  // the caller's own instructions arrive together and nothing depends on how the
+  // CLI treats a repeated --append-system-prompt. It is spliced in here, ahead of
+  // the role's flags, once the role has said what it adds: --allowedTools is
+  // variadic and has to stay the last option before the prompt.
+  const system = [];
+  const systemAt = args.length;
   // The role list is an allowlist of read-only roles and the branch below is what
   // makes it one: every role not named here lands on `--dangerously-skip-permissions`.
   // So a new role added to the service is a role with write access until it is
@@ -396,10 +417,10 @@ export function claudeArgs(input) {
   // PLANNING_VIOLATION check.
   if (input.role === 'planner' && input.sandbox?.checkout) {
     args.push('--dangerously-skip-permissions');
-    args.push('--append-system-prompt', planSandboxNotice(input.sandbox.checkout));
+    system.push(planSandboxNotice(input.sandbox.checkout));
   } else if (input.role === 'planner' || input.role === 'chat') {
     args.push('--permission-mode', 'plan', '--disallowedTools', 'Edit', 'Write', 'Bash');
-    args.push('--append-system-prompt', READ_ONLY_NOTICE);
+    system.push(READ_ONLY_NOTICE);
     // A read-only turn of a conversation also carries the permission gate: plan mode
     // still holds back anything that is not a read, and the gate is who it asks -
     // which is how draft_task reaches the person rather than being refused for want
@@ -410,7 +431,7 @@ export function claudeArgs(input) {
     if (input.role === 'chat') args.push(...mcpFlags(gated ? input.mcpConfig : null, input.appMcp));
   } else if (input.role === 'reviewer') {
     args.push('--permission-mode', 'plan', '--disallowedTools', 'Edit', 'Write');
-    args.push('--append-system-prompt', READ_ONLY_NOTICE);
+    system.push(READ_ONLY_NOTICE);
     // The verdict is read from the validated output, never from the reply text.
     // Verified to work through both provider kinds, including the DeepSeek
     // Anthropic-compatible endpoint, which is the same binary with a different
@@ -453,19 +474,14 @@ export function claudeArgs(input) {
   // A workflow run also loads no MCP server it was not given: without this, every
   // planner, implementer and reviewer got the user's claude.ai connectors (Gmail,
   // Drive, Calendar - 19 tools, including Drive's share_file and trash_file under an
-  // implementer's skip-permissions).
-  //
-  // Its memory is pointed at the project's, not the worktree's. Claude Code keys
-  // auto-memory by working directory, and a run's directory is a fresh worktree, so
-  // every run started with an empty memory - 67 worktree memory folders on this
-  // machine, none with anything in them - while a session in the checkout read the
-  // project's notes. A chat and a session are conversations with the person, run in
-  // the checkout, so they keep their connectors and their own memory.
-  if (input.role !== 'chat' && input.role !== 'session') {
-    args.push('--strict-mcp-config');
-    const memory = projectMemoryDir(input.project?.path);
-    if (memory) args.push('--settings', JSON.stringify({ autoMemoryDirectory: memory }));
-  }
+  // implementer's skip-permissions). A chat and a session are conversations with the
+  // person, so they keep their connectors.
+  if (input.role !== 'chat' && input.role !== 'session') args.push('--strict-mcp-config');
+  // What the caller has to say that is not the person's words: a conversation's
+  // rules and history, a task session's whereabouts. Kept out of the prompt so the
+  // prompt can be exactly what the person typed.
+  if (input.appendSystemPrompt) system.push(input.appendSystemPrompt);
+  if (system.length) args.splice(systemAt, 0, '--append-system-prompt', system.join('\n\n'));
   if (input.subagentModel) args.push('--agents', JSON.stringify(exploreAgent(input.subagentModel)));
   if (input.resumeSession) args.push('--resume', input.resumeSession);
   // `--` so a prompt that starts with a dash is not read as a flag.
@@ -997,7 +1013,13 @@ export async function* runAgent(provider, model, input) {
         mockDiscussDecision: provider.config.discussDecision || null,
         mockPlanText: provider.config.planText || null,
         mockChatText: provider.config.chatText || null,
-        mockFailure: provider.config.failRoles?.includes(input.role) ? 'SIMULATED_FAILURE' : null,
+        mockEcho: !!provider.config.echo,
+        // A resume of the named session fails, the way a pruned session does.
+        mockFailure: provider.config.failRoles?.includes(input.role)
+          ? 'SIMULATED_FAILURE'
+          : provider.config.failResume && input.resumeSession === provider.config.failResume
+            ? `No conversation found with session ID: ${input.resumeSession}`
+            : null,
       })
     );
     return;

@@ -649,7 +649,7 @@ function Turn({ t, live, root, sessionId, children }) {
     .join(' · ');
   return html`
     <div class="ss-turn">
-      ${t.instruction ? html`<div class="ss-said">${t.instruction}</div>` : null}
+      ${t.instruction ? html`<div class="ss-said ${t.from === 'harness' ? 'ss-said-harness' : ''}">${t.from === 'harness' ? html`<span class="ss-said-from">AI Code</span>` : null}${t.instruction}</div>` : null}
       <${SentFiles} files=${t.attachments} sessionId=${sessionId} runId=${t.run_id} />
       ${live
         ? children
@@ -864,7 +864,7 @@ function Rail({ detail, turns, project, events, open, onClose, busy, onDraft, on
         : null}
 
       <section class="ss-rail-sec">
-        <div class="ss-rail-sec-head"><h3 class="ss-eyebrow">Uncommitted in checkout</h3><span class="muted">${changes.length ? `${changes.length} file${changes.length === 1 ? '' : 's'}` : ''}</span></div>
+        <div class="ss-rail-sec-head"><h3 class="ss-eyebrow">${detail?.session?.task_id ? 'Uncommitted in worktree' : 'Uncommitted in checkout'}</h3><span class="muted">${changes.length ? `${changes.length} file${changes.length === 1 ? '' : 's'}` : ''}</span></div>
         ${changes.length
           ? html`
               <ul class="ss-files">
@@ -903,7 +903,7 @@ function Rail({ detail, turns, project, events, open, onClose, busy, onDraft, on
       <section class="ss-rail-sec ss-facts">
         <div><span>Started</span><span>${detail?.session ? html`<${Time} at=${detail.session.created_at} />` : '—'}</span></div>
         <div><span>Model</span><span class="ss-mono">${model}</span></div>
-        ${project ? html`<div><span>Directory</span><span class="ss-mono ss-fact-path" title=${project.path}>${shortDir(project.path)}</span></div>` : null}
+        ${project ? html`<div><span>Directory</span><span class="ss-mono ss-fact-path" title=${detail?.session?.cwd || project.path}>${shortDir(detail?.session?.cwd || project.path)}</span></div>` : null}
         <div>
           <span>Approvals</span>
           <span>${tally.allowed} allowed${tally.auto ? ` (${tally.auto} auto)` : ''} · ${tally.denied} denied${tally.timeout ? ` · ${tally.timeout} timed out` : ''}</span>
@@ -1514,7 +1514,7 @@ export function Sessions({ id, navigate, onTitle }) {
       : closed
         ? 'Resume this conversation to send a message.'
         : editing
-          ? session?.auto_allow ? 'Tell it what to change. Routine actions run without asking.' : 'Tell it what to change. Each write asks you first.'
+          ? session?.auto_allow ? 'Tell it what to change next.' : 'Tell it what to change. Each write asks you first.'
           : 'Ask about the code, tasks, runs or spend…';
 
   return html`
@@ -1553,7 +1553,7 @@ export function Sessions({ id, navigate, onTitle }) {
                   <div class="ss-meta">
                     ${project ? html`<span>${project.name}</span><span aria-hidden="true">·</span>` : null}
                     ${editing
-                      ? html`<span class="ss-meta-branch">${icon(ICONS.branch)} edits the checkout</span>`
+                      ? html`<span class="ss-meta-branch">${icon(ICONS.branch)} ${session?.task_id ? 'edits its worktree' : 'edits the checkout'}</span>`
                       : html`<span class="ss-meta-branch">${icon(ICONS.search)} changes nothing</span>`}
                     <span aria-hidden="true">·</span>
                     <span>${turns.length} turn${turns.length === 1 ? '' : 's'}</span>
@@ -1570,6 +1570,8 @@ export function Sessions({ id, navigate, onTitle }) {
               : null}
           ${renaming || !session
             ? null
+            : session.task_id
+              ? html`<a class="btn secondary sm" href=${`#/tasks/${session.task_id}`}>Open task</a>`
             : html`<div class="seg ss-mode" role="group" aria-label="Mode">
                 <button type="button" class="seg-btn ${!editing ? 'active ss-mode-read' : ''}" aria-pressed=${!editing} onClick=${() => switchMode('read')} disabled=${busy || working}>Read-only</button>
                 <button
@@ -1605,6 +1607,9 @@ export function Sessions({ id, navigate, onTitle }) {
           : null}
 
         <div class="ss-transcript" ref=${transcriptRef}>
+          ${session?.task_id
+            ? html`<div class="notice ss-task-banner">This conversation is the agent for a task, working in the task's own worktree. Routine actions there run without asking; anything that leaves this machine still asks you. <a class="link" href=${`#/tasks/${session.task_id}`}>Back to the task</a></div>`
+            : null}
           ${detail === null
             ? html`<div class="ss-list-empty"><${Spinner} /></div>`
             : !settledTurns.length && !working

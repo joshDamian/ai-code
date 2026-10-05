@@ -11,6 +11,7 @@ import { Projects } from './views/projects.mjs';
 import { Project } from './views/project.mjs';
 import { Tasks } from './views/tasks.mjs';
 import { TaskDetail } from './views/task-detail.mjs';
+import { Compare } from './views/compare.mjs';
 import { Chat } from './views/chat.mjs';
 import { Sessions } from './views/sessions.mjs';
 import { Providers } from './views/providers.mjs';
@@ -30,6 +31,7 @@ function parseHash() {
   const parts = hash.split('/').filter(Boolean);
   if (!parts.length) return { view: 'overview' };
   if (parts[0] === 'tasks' && parts[1]) return { view: 'task-detail', id: parts[1] };
+  if (parts[0] === 'compare' && parts[1]) return { view: 'compare', id: parts[1] };
   if (parts[0] === 'chat' && parts[1]) return { view: 'chat-detail', id: parts[1] };
   if (parts[0] === 'sessions' && parts[1]) return { view: 'session-detail', id: parts[1] };
   if (parts[0] === 'project' && parts[1]) return { view: 'project', id: parts[1] };
@@ -303,6 +305,9 @@ function App() {
     case 'task-detail':
       view = html`<${TaskDetail} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
       break;
+    case 'compare':
+      view = html`<${Compare} group=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
+      break;
     // The chat list is the conversations list now; a chat still opens on its own.
     case 'chat':
       view = html`<${Sessions} navigate=${navigate} onTitle=${setPageTitle} />`;
@@ -340,7 +345,7 @@ function App() {
   // replaced by the one screen that can say what happened and offer to fix it.
   if (serverDown) view = html`<${ServerPanel} supervisorUp=${supervisorUp} />`;
 
-  const navRoute = route.view === 'task-detail' ? 'tasks' : route.view === 'chat-detail' || route.view === 'chat' ? 'sessions' : route.view === 'session-detail' ? 'sessions' : route.view === 'project' ? 'projects' : route.view;
+  const navRoute = route.view === 'task-detail' || route.view === 'compare' ? 'tasks' : route.view === 'chat-detail' || route.view === 'chat' ? 'sessions' : route.view === 'session-detail' ? 'sessions' : route.view === 'project' ? 'projects' : route.view;
   const title = route.view === 'task-detail' || route.view === 'chat-detail' || route.view === 'session-detail' || route.view === 'project' ? pageTitle : null;
 
   return html`
