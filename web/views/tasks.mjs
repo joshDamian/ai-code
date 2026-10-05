@@ -101,10 +101,15 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
       setTasks(t);
       setProjects(p);
       // The models a task can be pinned to: enabled, on an enabled provider, and able
-      // to write code - the one capability every engine needs.
+      // to write code - the one capability every engine needs. The mock provider is
+      // the test suite's, and a task pinned to it would run nothing; the other model
+      // pickers (Routing, the planning-model picker) exclude it the same way.
       if (prov) {
-        const on = new Set((prov.providers || []).filter((x) => x.enabled).map((x) => x.id));
-        setModels((prov.models || []).filter((m) => m.enabled !== false && on.has(m.provider_id) && (m.capabilities || []).includes('coding')));
+        const on = new Set((prov.providers || []).filter((x) => x.enabled && x.kind !== 'mock').map((x) => x.id));
+        const names = new Map((prov.providers || []).map((x) => [x.id, x.name]));
+        setModels((prov.models || [])
+          .filter((m) => m.enabled !== false && on.has(m.provider_id) && (m.capabilities || []).includes('coding'))
+          .map((m) => ({ ...m, provider_name: names.get(m.provider_id) || m.provider_id })));
       }
       setProjectId((cur) => cur || (p[0] && p[0].id) || '');
     } catch (e) {
@@ -159,6 +164,14 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
   // The candidates the picker may offer. Same project only: the server refuses a
   // cross-project parent, so listing one would be offering a dead end.
   const parentCandidates = useMemo(() => (tasks || []).filter((t) => t.project_id === projectId), [tasks, projectId]);
+
+  // Model options carry the provider as their hint: two providers can offer the
+  // same model under the same display name, and a list where "Claude Opus 5.5"
+  // appears twice is a coin flip. `hint` renders as the option's second line.
+  const modelOptions = useMemo(
+    () => (models || []).map((m) => ({ value: m.id, label: m.display_name || m.name, hint: m.provider_name })),
+    [models]
+  );
 
   async function submit(e) {
     e.preventDefault();
@@ -345,7 +358,7 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
                         label="Model"
                         value=${modelId}
                         onChange=${setModelId}
-                        options=${[{ value: '', label: 'Automatic (routing decides)' }, ...models.map((m) => ({ value: m.id, label: m.display_name || m.name }))]}
+                        options=${[{ value: '', label: 'Automatic (routing decides)' }, ...modelOptions]}
                         loading=${saving}
                       />`}
                   ${engine === 'session' || (engine === 'compare' && variants.some((v) => v.engine === 'session'))
@@ -404,7 +417,7 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
 // because a comparison of one is a task and more than four is a wall nobody reads.
 function VariantRows({ variants, setVariants, models, disabled }) {
   const set = (i, patch) => setVariants((vs) => vs.map((v, j) => (j === i ? { ...v, ...patch } : v)));
-  const modelOptions = [{ value: '', label: 'Automatic' }, ...models.map((m) => ({ value: m.id, label: m.display_name || m.name }))];
+  const attemptModelOptions = [{ value: '', label: 'Automatic' }, ...modelOptions];
   return html`
     <div class="field variant-rows">
       <span class="field-label">Attempts</span>
@@ -413,7 +426,7 @@ function VariantRows({ variants, setVariants, models, disabled }) {
           <div class="variant-row" key=${i}>
             <span class="attempt-chip">${'ABCD'[i]}</span>
             <${Select} inline size="sm" ariaLabel=${`Attempt ${'ABCD'[i]} engine`} value=${v.engine} onChange=${(x) => set(i, { engine: x })} options=${ENGINE_OPTIONS.filter((o) => o.value !== 'compare')} disabled=${disabled} />
-            <${Select} inline size="sm" ariaLabel=${`Attempt ${'ABCD'[i]} model`} value=${v.modelId} onChange=${(x) => set(i, { modelId: x })} options=${modelOptions} disabled=${disabled} />
+            <${Select} inline size="sm" ariaLabel=${`Attempt ${'ABCD'[i]} model`} value=${v.modelId} onChange=${(x) => set(i, { modelId: x })} options=${attemptModelOptions} disabled=${disabled} />
             ${variants.length > 2
               ? html`<button type="button" class="icon-btn" aria-label=${`Remove attempt ${'ABCD'[i]}`} disabled=${disabled} onClick=${() => setVariants((vs) => vs.filter((_, j) => j !== i))}>✕</button>`
               : null}
