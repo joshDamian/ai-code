@@ -93,7 +93,9 @@ export const api = {
   rejectSpec: (id) => request(`/api/projects/${id}/spec/reject`, { method: 'POST' }),
 
   drafts: (id) => request(`/api/projects/${id}/drafts`),
-  approveDraft: (id, draftId) => request(`/api/projects/${id}/drafts/${draftId}/approve`, { method: 'POST' }),
+  // `engine` is the approver's choice of how the task runs; omitted, the draft's own.
+  approveDraft: (id, draftId, engine = null) =>
+    request(`/api/projects/${id}/drafts/${draftId}/approve`, { method: 'POST', body: engine ? { engine } : {} }),
   dropDraft: (id, draftId) => request(`/api/projects/${id}/drafts/${draftId}`, { method: 'DELETE' }),
   // Drafts a fresh batch against the stored spec and the open task list. The reply
   // names the conversation the pass answers in.

@@ -25,6 +25,7 @@
 import { html, useState, useEffect, useRef, useCallback, useMemo, formatCost, formatDuration, diffLines, unifiedDiff, sessionSteps, shortDir, gitImpact, recall, remember } from '../lib.mjs';
 import { api, sessionStreamUrl } from '../api.mjs';
 import { withToken } from '../auth.mjs';
+import { EnginePick } from '../components/engine-pick.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { Markdown } from '../components/markdown.mjs';
@@ -685,17 +686,20 @@ function ModeDivider({ role }) {
 // and Drop are the queue's own actions, so deciding here and on the project page is
 // one decision, not two.
 function DraftCard({ draft, busy, onApprove, onDrop }) {
+  // How the task will run, chosen here. It starts on what the proposer asked for,
+  // which is the pipeline when it asked for nothing - most drafts.
+  const [engine, setEngine] = useState(draft.engine === 'session' ? 'session' : 'pipeline');
   return html`
     <section class="ss-draft" aria-label="Drafted task">
       <div class="ss-draft-head">
         ${icon(ICONS.task)}
         <b>${draft.title}</b>
-        ${draft.engine === 'session' ? html`<span class="badge">Session</span>` : null}
         <span class="badge badge-info">Waiting for approval</span>
       </div>
       ${draft.description && draft.description !== draft.title ? html`<p>${draft.description}</p>` : null}
+      <${EnginePick} value=${engine} onChange=${setEngine} disabled=${busy} />
       <div class="ss-draft-actions">
-        <button class="btn primary sm" type="button" onClick=${onApprove} disabled=${busy}>Approve</button>
+        <button class="btn primary sm" type="button" onClick=${() => onApprove(engine)} disabled=${busy}>${engine === 'session' ? 'Approve and start' : 'Approve'}</button>
         <button class="btn secondary sm" type="button" onClick=${onDrop} disabled=${busy}>Drop</button>
         <span class="muted">The same queue as the project page.</span>
       </div>
@@ -1510,13 +1514,13 @@ export function Sessions({ id, navigate, onTitle, onTask, project: scopeProject 
   );
 
   const decideDraft = useCallback(
-    async (draft, approve) => {
+    async (draft, approve, engine = null) => {
       if (!project) return;
       setBusy(true);
       try {
         if (approve) {
-          const r = await api.approveDraft(project.id, draft.id);
-          showToast(`Task created: ${r.task?.title || draft.title}`);
+          const r = await api.approveDraft(project.id, draft.id, engine);
+          showToast(r.task?.engine === 'session' ? `Task started: ${r.task?.title || draft.title}` : `Task created: ${r.task?.title || draft.title}`);
         } else {
           await api.dropDraft(project.id, draft.id);
         }
@@ -1764,7 +1768,7 @@ export function Sessions({ id, navigate, onTitle, onTask, project: scopeProject 
                 </${Turn}>
               `
             : null}
-          ${drafts.map((d) => html`<${DraftCard} key=${d.id} draft=${d} busy=${busy} onApprove=${() => decideDraft(d, true)} onDrop=${() => decideDraft(d, false)} />`)}
+          ${drafts.map((d) => html`<${DraftCard} key=${d.id} draft=${d} busy=${busy} onApprove=${(engine) => decideDraft(d, true, engine)} onDrop=${() => decideDraft(d, false)} />`)}
           ${error ? html`<div class="ss-failure">${error}</div>` : null}
         </div>
 

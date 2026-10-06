@@ -21,6 +21,7 @@ import { Markdown } from '../components/markdown.mjs';
 import { DiffViewer } from '../components/diff-viewer.mjs';
 import { Time } from '../components/time.mjs';
 import { StatusBadge } from '../components/status-badge.mjs';
+import { EnginePick } from '../components/engine-pick.mjs';
 
 // What a decision's state is called on screen. A draft is the one that has not
 // landed, which is the only one with buttons on it.
@@ -247,10 +248,14 @@ export function MemoryPanel({ project, onReload, navigate, showSpec = true, draf
     }
   }
 
+  // How each waiting draft will run, by draft id, starting on what it proposed.
+  const [engines, setEngines] = useState({});
+  const engineOf = (d) => engines[d.id] || (d.engine === 'session' ? 'session' : 'pipeline');
+
   async function approveDraft(d) {
-    const r = await run(`approve-${d.id}`, () => api.approveDraft(project.id, d.id));
+    const r = await run(`approve-${d.id}`, () => api.approveDraft(project.id, d.id, engineOf(d)));
     if (r) {
-      showToast('Task created and planned.', 'success');
+      showToast(r.task?.engine === 'session' ? 'Task started as a session.' : 'Task created and planned.', 'success');
       await onReload?.();
       if (navigate) navigate(`#/tasks/${r.task.id}`);
     }
@@ -363,11 +368,12 @@ export function MemoryPanel({ project, onReload, navigate, showSpec = true, draf
                       <div class="list-row-main">
                         <b>${d.title}</b>
                         <span class="muted">${d.description}</span>
-                        <span class="muted">from ${d.source === 'proposal' ? 'the proposals pass' : d.source === 'session' ? 'a session' : 'the idea note'}${d.engine === 'session' ? ' · runs as a session' : ''}</span>
+                        <span class="muted">from ${d.source === 'proposal' ? 'the proposals pass' : d.source === 'session' ? 'a session' : 'the idea note'}</span>
+                        <${EnginePick} value=${engineOf(d)} onChange=${(e) => setEngines((m) => ({ ...m, [d.id]: e }))} disabled=${!!busy} />
                       </div>
                       <div class="list-row-side">
                         <button class="btn" disabled=${!!busy} onClick=${() => approveDraft(d)}>
-                          ${busy === `approve-${d.id}` ? 'Creating…' : 'Approve'}
+                          ${busy === `approve-${d.id}` ? 'Creating…' : engineOf(d) === 'session' ? 'Approve and start' : 'Approve'}
                         </button>
                         <button class="btn secondary" disabled=${!!busy} onClick=${() => dropDraft(d)}>Drop</button>
                       </div>
