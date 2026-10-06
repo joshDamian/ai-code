@@ -165,7 +165,24 @@ export function Layout({ route, project = null, title, serverDown = false, onOpe
                 ${g.items.map((id) => {
                   const n = NAV.find((x) => x.id === id);
                   return html`
-                    <a key=${n.id} href=${n.id === 'sessions' ? conversationsHref() : `#/${n.id}`} class="nav-item ${route === n.id ? 'active' : ''}" title=${n.label}>
+                    <a
+                      key=${n.id}
+                      href=${n.id === 'sessions' ? conversationsHref() : `#/${n.id}`}
+                      class="nav-item ${route === n.id ? 'active' : ''}"
+                      title=${n.label}
+                      onClick=${n.id === 'sessions'
+                        ? (e) => {
+                            // Read at the click, not at the last render: the place it
+                            // returns to is remembered as pages open, and the href
+                            // drawn before a page settled can name the page it is on.
+                            const to = conversationsHref();
+                            if (to !== e.currentTarget.getAttribute('href')) {
+                              e.preventDefault();
+                              location.hash = to;
+                            }
+                          }
+                        : null}
+                    >
                       ${n.icon()}
                       <span class="nav-item-label">${n.label}</span>
                     </a>

@@ -156,6 +156,11 @@ function App() {
   useEffect(() => {
     if (route.view === 'session-detail') {
       if (taskOfSession === null) remember(CONVERSATIONS_PLACE, location.hash);
+      // A task's conversation remembered by an older build - or by a race this one
+      // does not have - would make the Conversations link point at the page already
+      // open, which reads as the link bouncing. Forgotten once the session is known
+      // to be a task's.
+      else if (taskOfSession && conversationsHref().endsWith(`/${route.id}`)) remember(CONVERSATIONS_PLACE, '#/sessions');
     } else if (route.view === 'sessions' || route.view === 'chat-detail') remember(CONVERSATIONS_PLACE, location.hash);
     else if (route.view === 'chat') remember(CONVERSATIONS_PLACE, '#/sessions');
   }, [route, taskOfSession]);
