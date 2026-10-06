@@ -1119,7 +1119,7 @@ function NewSession({ projects, projectsLoaded, projectId, onProject, models, on
   `;
 }
 
-export function Sessions({ id, navigate, onTitle, onTask }) {
+export function Sessions({ id, navigate, onTitle, onTask, project: scopeProject = null }) {
   const isNew = id === 'new';
   const sessionId = id && !isNew ? id : null;
   const [projects, setProjects] = useState([]);
@@ -1219,11 +1219,15 @@ export function Sessions({ id, navigate, onTitle, onTask }) {
       .projects()
       .then((p) => {
         if (cancelled) return;
-        setProjects(p);
+        // Inside a project workspace the list holds that project alone: one project
+        // collapses the picker to its name, which is the single-project case the
+        // list already draws, and nothing outside the project is a click away.
+        const scoped = scopeProject ? p.filter((x) => x.id === scopeProject) : p;
+        setProjects(scoped);
         setProjectsLoaded(true);
         // The project chosen last time, while it still exists; otherwise the first.
         const last = recall(MEMORY.project, '');
-        setProjectId((cur) => cur || (p.some((x) => x.id === last) ? last : (p[0] && p[0].id) || ''));
+        setProjectId((cur) => scopeProject || cur || (scoped.some((x) => x.id === last) ? last : (scoped[0] && scoped[0].id) || ''));
       })
       .catch((e) => {
         if (cancelled) return;
@@ -1241,7 +1245,8 @@ export function Sessions({ id, navigate, onTitle, onTask }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // Rerun when the workspace changes: the list's projects are the workspace's.
+  }, [scopeProject]);
 
   // The list follows the open session's project, so a link into a session in another
   // project shows that project's sessions beside it.

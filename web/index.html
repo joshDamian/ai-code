@@ -226,6 +226,10 @@ code{font-family:var(--font-mono);font-size:var(--text-sm)}
 .nav-group{margin-top:var(--space-4)}
 .nav-group:first-of-type{margin-top:0}
 .nav-group-label{font-size:var(--text-xs);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:0 var(--space-3) var(--space-2)}
+.nav-exit{display:block;font-size:var(--text-sm);color:var(--muted);text-decoration:none;padding:var(--space-1) var(--space-3) var(--space-3)}
+.nav-exit:hover{color:var(--text)}
+.workspace-name{text-transform:none;letter-spacing:0;font-size:var(--text-base);font-weight:650;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.collapsed .nav-exit,.collapsed .workspace-name{display:none}
 .logo-text{min-width:0}
 /* Collapsed: the labels go, the icons stay. Both states render the same markup -
    the label is hidden rather than swapped out - so the rail cannot drift from

@@ -72,7 +72,7 @@ async function request(path, opts = {}) {
 
 export const api = {
   overview: () => request('/api/overview'),
-  usage: (period = '7d') => request(`/api/usage?period=${encodeURIComponent(period)}`),
+  usage: (period = '7d', projectId = null) => request(`/api/usage?period=${encodeURIComponent(period)}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`),
 
   projects: () => request('/api/projects'),
   createProject: (name, path) => request('/api/projects', { method: 'POST', body: { name, path } }),
@@ -179,6 +179,7 @@ export const api = {
   routingPreview: (role, strategy) => request(`/api/routing/preview?role=${encodeURIComponent(role)}&strategy=${encodeURIComponent(strategy)}`),
 
   runs: (taskId) => request(`/api/runs${taskId ? `?taskId=${encodeURIComponent(taskId)}` : ''}`),
+  projectRuns: (projectId) => request(`/api/runs?projectId=${encodeURIComponent(projectId)}`),
   runEvents: (id) => request(`/api/runs/${id}/events`),
 
   doctor: () => request('/api/doctor'),

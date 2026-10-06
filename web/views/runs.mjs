@@ -21,7 +21,7 @@ import { formatCost, formatDuration, formatTokens, shortId } from '../lib.mjs';
 // never quotes. It stays available in the drawer, where there is room for it.
 const EMPTY = { runs: [], tasks: [], providers: [] };
 
-export function Runs({ navigate, runId }) {
+export function Runs({ navigate, runId, project = null }) {
   const [data, setData] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
   const [roleFilter, setRoleFilter] = useState('');
@@ -33,7 +33,8 @@ export function Runs({ navigate, runId }) {
       // The run rows carry a task id and a provider id, and neither is a name. The
       // table is unreadable without both lists, so they arrive together rather than
       // as three renders of "…".
-      const [runs, tasks, { providers }] = await Promise.all([api.runs(), api.tasks(), api.providers()]);
+      // A project workspace shows that project's runs and tasks only.
+      const [runs, tasks, { providers }] = await Promise.all([project ? api.projectRuns(project) : api.runs(), project ? api.tasks({ projectId: project }) : api.tasks(), api.providers()]);
       setData({ runs, tasks, providers });
     } catch (e) {
       showToast(e.message, 'error');
@@ -43,7 +44,7 @@ export function Runs({ navigate, runId }) {
 
   useEffect(() => {
     load();
-  }, []);
+  }, [project]);
 
   // `#/runs/:id` opens that run's drawer once the list that holds it has arrived.
   useEffect(() => {

@@ -53,7 +53,7 @@ const TABS = [
 // The view consumes the request by calling `onFormOpened`, which resets the
 // counter. Without that, the request would still be standing the next time this
 // view mounted and the form would reopen for no reason.
-export function Tasks({ navigate, openForm = 0, onFormOpened }) {
+export function Tasks({ navigate, openForm = 0, onFormOpened, project = null }) {
   const [tasks, setTasks] = useState(null);
   const [projects, setProjects] = useState([]);
   const [tab, setTab] = useState('all');
@@ -111,7 +111,7 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
           .filter((m) => m.enabled !== false && on.has(m.provider_id) && (m.capabilities || []).includes('coding'))
           .map((m) => ({ ...m, provider_name: names.get(m.provider_id) || m.provider_id })));
       }
-      setProjectId((cur) => cur || (p[0] && p[0].id) || '');
+      setProjectId((cur) => project || cur || (p[0] && p[0].id) || '');
     } catch (e) {
       showToast(e.message, 'error');
       setTasks([]);
@@ -132,7 +132,9 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
   // inside it. It sits before the tab split so the counts and the rows below them
   // are counted from the same list - a count that ignored the project would count
   // tasks the tab is not showing.
-  const scoped = useMemo(() => (tasks && projectFilter ? tasks.filter((t) => t.project_id === projectFilter) : tasks), [tasks, projectFilter]);
+  // Inside a project workspace the project is the route's, not the toolbar's.
+  const scopeTo = project || projectFilter;
+  const scoped = useMemo(() => (tasks && scopeTo ? tasks.filter((t) => t.project_id === scopeTo) : tasks), [tasks, scopeTo]);
 
   // The All tab's count has to be the count of what the tab lists, so the toggle
   // moves the number with the rows. Only the All tab has `states: null`, so every
@@ -260,7 +262,7 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
           ${
             // A single project leaves the control nothing to filter, so it is not
             // rendered at all rather than shown with one option.
-            projects.length > 1
+            projects.length > 1 && !project
               ? html`
                   <${Select}
                     ariaLabel="Project"
@@ -313,13 +315,13 @@ export function Tasks({ navigate, openForm = 0, onFormOpened }) {
                         </div>
                       `
                     : html`
-                  <${Select}
+                  ${project ? null : html`<${Select}
                     label="Project"
                     value=${projectId}
                     onChange=${setProjectId}
                     options=${projects.map((p) => ({ value: p.id, label: p.name }))}
                     loading=${saving}
-                  />
+                  />`}
                   <${TextArea}
                     inputRef=${descriptionRef}
                     label="Description"

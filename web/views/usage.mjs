@@ -22,7 +22,7 @@ function dayLabel(day) {
   return Number.isNaN(d.getTime()) ? day : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
-export function Usage() {
+export function Usage({ project = null } = {}) {
   const [period, setPeriod] = useState('7d');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -31,7 +31,7 @@ export function Usage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    api.usage(period)
+    api.usage(period, project)
       .then((d) => {
         if (!cancelled) setData(d);
       })
@@ -44,7 +44,7 @@ export function Usage() {
     return () => {
       cancelled = true;
     };
-  }, [period]);
+  }, [period, project]);
 
   const totals = (data && data.totals) || {};
   const byRole = (data && data.by_role) || [];

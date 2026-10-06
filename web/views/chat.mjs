@@ -485,7 +485,7 @@ export function Chat({ id: routeId, navigate, onTitle }) {
               </div>`;
             return html`<div class="chat-waiting">
               <span>${waitingText(project)}</span>
-              <a class="link" href=${`#/project/${project.id}`}>Review on the project page</a>
+              <a class="link" href=${`#/p/${project.id}`}>Review on the project page</a>
             </div>`;
           })()}
         </div>

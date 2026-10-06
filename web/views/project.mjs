@@ -1,5 +1,5 @@
 // One project's memory: the spec, the drafts waiting for approval, and the decision
-// log. URL hash: #/project/:id.
+// log. URL hash: #/p/:id, the project workspace's own page.
 //
 // This is the surface every "does a person agree to this" question lands on, and it
 // is deliberately one page: the spec a task was planned against, the tasks that have
@@ -379,7 +379,7 @@ export function MemoryPanel({ project, onReload, navigate, showSpec = true, draf
           : html`<p class="muted">Nothing is waiting. “What else should I build?” drafts a batch from the spec and the code.</p>`
       }
       ${own && others > 0
-        ? html`<p class="muted">${others} more drafted elsewhere · <a class="link" href=${`#/project/${project.id}`}>Review on the project page</a></p>`
+        ? html`<p class="muted">${others} more drafted elsewhere · <a class="link" href=${`#/p/${project.id}`}>Review on the project page</a></p>`
         : null}
     </div>
   `;

@@ -5946,12 +5946,12 @@ export class Service {
     return { changed, skipped, before: Math.round(before * 100) / 100, after: Math.round(after * 100) / 100 };
   }
 
-  usage(period = '7d') {
+  usage(period = '7d', projectId = null) {
     const spans = { '24h': 86400000, '7d': 604800000, '30d': 2592000000 };
     if (period !== 'all' && !spans[period]) period = '7d';
     const ms = spans[period];
     const since = ms ? new Date(Date.now() - ms).toISOString() : null;
-    const runs = this.store.listRunsSince(since);
+    const runs = this.store.listRunsSince(since, projectId);
     const names = new Map(this.store.listProviders().map((p) => [p.id, p.name]));
 
     // Model spend only. The test command is a tracked run with no provider behind it,

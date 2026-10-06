@@ -1,6 +1,7 @@
 // App shell: sidebar + header + content area + toast container.
 import { html, useState, useEffect, useRef, conversationsHref } from '../lib.mjs';
 import { ToastContainer } from './toast.mjs';
+import { api } from '../api.mjs';
 
 // One 16px stroke icon per destination, drawn inline. Inline rather than a
 // sprite or an icon font so there is no extra request, and `currentColor` so
@@ -74,7 +75,12 @@ function LogoMark() {
 // so the state is legible from any screen - and it is deliberately a plain dot
 // rather than the provider HealthDot: a circuit that opened is one provider being
 // unwell, and this is the dashboard's own machine being gone.
-export function Layout({ route, title, serverDown = false, onOpenPalette, onNewTask, children }) {
+// A project workspace's sidebar: the project's own pages, the ones whose list it
+// scopes. Its details page is the first, under the project's own name.
+const WORKSPACE_NAV = ['projects', 'tasks', 'sessions', 'runs', 'usage'];
+const WORKSPACE_PATH = { projects: '', tasks: '/tasks', sessions: '/conversations', runs: '/runs', usage: '/usage' };
+
+export function Layout({ route, project = null, title, serverDown = false, onOpenPalette, onNewTask, children }) {
   // Collapsed-ness is a preference, not view state: it survives navigation and
   // reloads so the shell does not snap back open under the user every visit.
   // localStorage throws in some privacy modes, so the read is guarded - a
@@ -124,7 +130,7 @@ export function Layout({ route, title, serverDown = false, onOpenPalette, onNewT
     };
   }, [navOpen]);
 
-  const current = NAV.find((n) => n.id === route);
+  const current = project && route === 'projects' ? { label: 'Project' } : NAV.find((n) => n.id === route);
 
   return html`
     <div class="app-shell ${collapsed ? 'collapsed' : ''} ${navOpen ? 'nav-open' : ''}">
@@ -151,7 +157,7 @@ export function Layout({ route, title, serverDown = false, onOpenPalette, onNewT
             onClick=${() => setCollapsed((v) => !v)}
           >${collapsed ? '»' : '«'}</button>
         </div>
-        ${NAV_GROUPS.map(
+        ${project ? html`<${WorkspaceNav} project=${project} route=${route} />` : NAV_GROUPS.map(
           (g) => html`
             <div class="nav-group" key=${g.label}>
               <div class="nav-group-label">${g.label}</div>
@@ -211,6 +217,39 @@ export function Layout({ route, title, serverDown = false, onOpenPalette, onNewT
         <main class="content">${children}</main>
       </div>
       <${ToastContainer} />
+    </div>
+  `;
+}
+
+// The sidebar inside a project workspace. The project's name heads it, read once
+// from the API; the items link inside the workspace; and the one way out is to all
+// projects, which is what leaving a focus mode should be - one click, always there.
+function WorkspaceNav({ project, route }) {
+  const [name, setName] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api.project(project).then((p) => live && setName(p?.name || null), () => live && setName(null));
+    return () => {
+      live = false;
+    };
+  }, [project]);
+  const base = `#/p/${encodeURIComponent(project)}`;
+  return html`
+    <div class="nav-group workspace-nav">
+      <a class="nav-exit" href="#/projects" title="Leave this project and see every project">← All projects</a>
+      <div class="nav-group-label workspace-name" title=${name || ''}>${name || 'Project'}</div>
+      <nav class="nav">
+        ${WORKSPACE_NAV.map((id) => {
+          const n = NAV.find((x) => x.id === id);
+          const label = id === 'projects' ? 'Overview' : n.label;
+          return html`
+            <a key=${id} href=${base + WORKSPACE_PATH[id]} class="nav-item ${route === id ? 'active' : ''}" title=${label}>
+              ${n.icon()}
+              <span class="nav-item-label">${label}</span>
+            </a>
+          `;
+        })}
+      </nav>
     </div>
   `;
 }

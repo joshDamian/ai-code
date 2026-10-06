@@ -833,9 +833,20 @@ export class Store {
     return this.db.prepare(q).all(...(tid ? [tid] : []));
   }
 
-  listRunsSince(since) {
-    const q = since ? 'SELECT * FROM runs WHERE started_at>=? ORDER BY started_at' : 'SELECT * FROM runs ORDER BY started_at';
-    return this.db.prepare(q).all(...(since ? [since] : []));
+  // A project's runs: those of its tasks, newest first. A run belongs to a project
+  // only through its task, so the provider-test and context-enrich rows, which have
+  // no task, belong to none.
+  listProjectRuns(projectId) {
+    return this.db
+      .prepare('SELECT runs.* FROM runs JOIN tasks ON tasks.id=runs.task_id WHERE tasks.project_id=? ORDER BY runs.started_at DESC')
+      .all(projectId);
+  }
+
+  listRunsSince(since, projectId = null) {
+    const where = [since ? 'runs.started_at>=?' : null, projectId ? 'tasks.project_id=?' : null].filter(Boolean);
+    const join = projectId ? ' JOIN tasks ON tasks.id=runs.task_id' : '';
+    const q = `SELECT runs.* FROM runs${join}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY runs.started_at`;
+    return this.db.prepare(q).all(...[since, projectId].filter(Boolean));
   }
 
   // Runs currently held by a live lease, for concurrency accounting. Keyed on the

@@ -79,7 +79,7 @@ export function CommandPalette({ open, onClose, navigate, onNewTask }) {
       })),
       ...(q
         ? [
-            ...projects.map((p) => ({ group: 'Projects', kind: 'nav', key: `#/project/${p.id}`, label: p.name, hint: 'project', href: `#/project/${p.id}` })),
+            ...projects.map((p) => ({ group: 'Projects', kind: 'nav', key: `#/p/${p.id}`, label: p.name, hint: 'project workspace', href: `#/p/${p.id}` })),
             ...sessions.map((x) => ({ group: 'Conversations', kind: 'nav', key: `#/sessions/${x.id}`, label: x.name, hint: x.mode === 'edit' ? 'can edit' : stateLabel(x.status), href: `#/sessions/${x.id}` })),
             ...chats.filter((c) => !c.system).map((c) => ({ group: 'Earlier chats', kind: 'nav', key: `#/chat/${c.id}`, label: c.title, hint: projectName.get(c.project_id) || 'chat', href: `#/chat/${c.id}` })),
           ]

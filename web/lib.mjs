@@ -44,6 +44,23 @@ export function conversationsHref() {
   return typeof h === 'string' && /^#\/(sessions|chat)(\/[A-Za-z0-9-]+)?$/.test(h) ? h : '#/sessions';
 }
 
+// The project workspace a page is inside, from the hash: `#/p/<id>/...`. Null outside
+// one. Read from the location rather than passed down, so a link built deep inside a
+// view stays in the workspace without every component in between carrying it.
+export function currentProject() {
+  const m = /^#\/p\/([^/]+)/.exec(location.hash);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+// A link that stays inside the current project workspace: `#/tasks/x` becomes
+// `#/p/<id>/tasks/x` there, and is left alone everywhere else. Every in-app link to
+// a task, conversation or run goes through this, which is what keeps a workspace
+// from leaking out into the all-projects views one click at a time.
+export function scopedHref(hash, project = currentProject()) {
+  if (!project || !hash.startsWith('#/') || hash.startsWith('#/p/')) return hash;
+  return `#/p/${encodeURIComponent(project)}/${hash.slice(2)}`;
+}
+
 // The last two folders of a directory, which is how a person names one they did not
 // type: `…/code/demo`, with the rest a hover away on the element's title.
 export function shortDir(p) {

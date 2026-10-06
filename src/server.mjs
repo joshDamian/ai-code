@@ -1409,8 +1409,13 @@ const server = http.createServer(async (req, res) => {
 
     if (u.pathname === '/api/jobs') return json(res, svc.store.listJobs(u.searchParams.get('taskId') || undefined));
 
-    if (u.pathname === '/api/usage') return json(res, svc.usage(u.searchParams.get('period') || '7d'));
-    if (u.pathname === '/api/runs') return json(res, svc.store.listRuns(u.searchParams.get('taskId')));
+    // Both take a projectId, which scopes them to that project's tasks - what the
+    // project workspace shows.
+    if (u.pathname === '/api/usage') return json(res, svc.usage(u.searchParams.get('period') || '7d', u.searchParams.get('projectId') || null));
+    if (u.pathname === '/api/runs') {
+      const projectId = u.searchParams.get('projectId');
+      return json(res, projectId ? svc.store.listProjectRuns(projectId) : svc.store.listRuns(u.searchParams.get('taskId')));
+    }
     if (u.pathname.match(routeRun)) return json(res, svc.store.listEvents(u.pathname.split('/')[3], Number(u.searchParams.get('after') || 0)));
 
     if (u.pathname === '/api/doctor') return json(res, await svc.doctor());

@@ -7712,3 +7712,26 @@ test('a conversation that fell back stays on the model it landed on until its pi
   assert.equal(turns.at(-1).model_id, 'other', 'the next turn stays where the conversation landed');
   assert.equal(turns.filter((r) => r.provider_id === 'sub').length, 0, 'and never walks back into the spent provider');
 });
+
+test('runs and usage scope to one project through its tasks', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const a = s.initProject('a', root);
+  const otherRoot = repo();
+  const b = s.initProject('b', otherRoot);
+  s.addProvider({ id: 'cash', name: 'Cash', kind: 'deepseek', enabled: true, config: { routable: true } });
+  const at = new Date().toISOString();
+  const add = (projectId, cost) => {
+    const t = s.createTask(projectId, `t ${cost}`);
+    const id = s.store.id();
+    s.store.addRun({ id, taskId: t.id, role: 'implementer', providerId: 'cash', modelId: 'm', status: 'running', startedAt: at });
+    s.store.updateRun(id, { status: 'succeeded', ended_at: at, cost, cost_basis: 'published-api-rate' });
+    return id;
+  };
+  const ra = add(a.id, 1);
+  add(b.id, 4);
+  assert.deepEqual(s.store.listProjectRuns(a.id).map((r) => r.id), [ra]);
+  assert.equal(s.usage('all', a.id).totals.cost, 1);
+  assert.equal(s.usage('all', b.id).totals.cost, 4);
+  assert.equal(s.usage('all').totals.cost, 5, 'unscoped is everything, as before');
+});

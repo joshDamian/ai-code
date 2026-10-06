@@ -165,7 +165,7 @@ export function Projects({ navigate, openForm }) {
                   const last = mine.reduce((m, t) => (t.updated_at > m ? t.updated_at : m), '');
                   const facts = [p.language, p.framework].filter((x) => x && x !== 'unknown');
                   return html`
-                    <a class="card project-card" key=${p.id} href=${`#/project/${p.id}`}>
+                    <a class="card project-card" key=${p.id} href=${`#/p/${p.id}`}>
                       <div class="project-card-head">
                         <b class="project-card-name">${p.name}</b>
                         ${p.spec

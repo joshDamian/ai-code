@@ -1,5 +1,5 @@
 // Router, global app shell, Preact mount point, global keyboard shortcuts.
-import { html, render, Fragment, useState, useEffect, useRef, useCallback, remember, conversationsHref, CONVERSATIONS_PLACE } from './lib.mjs';
+import { html, render, Fragment, useState, useEffect, useRef, useCallback, remember, conversationsHref, CONVERSATIONS_PLACE, currentProject, scopedHref } from './lib.mjs';
 import { Layout } from './components/layout.mjs';
 import { ShortcutLegend } from './components/kbd.mjs';
 import { CommandPalette } from './components/command-palette.mjs';
@@ -28,19 +28,37 @@ const GO = { o: '#/overview', t: '#/tasks', c: conversationsHref, s: conversatio
 
 function parseHash() {
   const hash = location.hash.replace(/^#\/?/, '');
-  const parts = hash.split('/').filter(Boolean);
+  let parts = hash.split('/').filter(Boolean);
+  // A project workspace: `p/<id>` in front of an ordinary route scopes it to one
+  // project. Its own pages are the project (bare `p/<id>`) and its tasks,
+  // conversations, runs and usage; a detail page opened from one keeps the prefix.
+  if (parts[0] === 'p' && parts[1]) {
+    const project = decodeURIComponent(parts[1]);
+    parts = parts.slice(2);
+    if (!parts.length) return { view: 'project', id: project, project };
+    if (parts[0] === 'conversations') parts[0] = 'sessions';
+    return { ...routeOf(parts), project };
+  }
   if (!parts.length) return { view: 'overview' };
+  return routeOf(parts);
+}
+
+function routeOf(parts) {
   if (parts[0] === 'tasks' && parts[1]) return { view: 'task-detail', id: parts[1] };
   if (parts[0] === 'compare' && parts[1]) return { view: 'compare', id: parts[1] };
   if (parts[0] === 'chat' && parts[1]) return { view: 'chat-detail', id: parts[1] };
   if (parts[0] === 'sessions' && parts[1]) return { view: 'session-detail', id: parts[1] };
-  if (parts[0] === 'project' && parts[1]) return { view: 'project', id: parts[1] };
+  // The project page now lives in its workspace; an old link lands there.
+  if (parts[0] === 'project' && parts[1]) return { view: 'project-redirect', id: parts[1] };
   // One run's detail, opened over the list: what a link to a particular run points at.
   if (parts[0] === 'runs' && parts[1]) return { view: 'runs', id: parts[1] };
   // The add form opened on arrival, for the links that exist to add a project.
   if (parts[0] === 'projects' && parts[1] === 'new') return { view: 'projects', intent: 'new' };
   return { view: parts[0] };
 }
+
+// The views a project workspace can show. See App.
+const WORKSPACE_VIEWS = new Set(['project', 'tasks', 'task-detail', 'compare', 'sessions', 'session-detail', 'chat-detail', 'runs', 'usage']);
 
 function navigate(hash) {
   if (location.hash === hash) {
@@ -143,7 +161,20 @@ function App() {
   }, [route, taskOfSession]);
 
   useEffect(() => {
+    // The project workspace the last page was in. A link inside a workspace to one of
+    // its record pages - a task, a conversation, a run, a comparison - is written by
+    // views that know nothing of workspaces (`#/tasks/<id>`), so the hash change is
+    // where it is kept inside: re-prefixed in place, with the history entry
+    // replaced so Back does not bounce out and in again. The ways out - All
+    // projects, a typed URL to another section - name pages a workspace does not
+    // hold, so they still leave.
+    let workspace = currentProject();
     function onHashChange() {
+      const m = /^#\/(tasks|sessions|runs|compare|chat)(\/|$)/.exec(location.hash);
+      if (workspace && m) {
+        history.replaceState(null, '', scopedHref(location.hash, workspace));
+      }
+      workspace = currentProject();
       setRoute(parseHash());
     }
     window.addEventListener('hashchange', onHashChange);
@@ -295,11 +326,22 @@ function App() {
     return () => window.removeEventListener('ai-code:connectivity', onConnectivity);
   }, []);
 
+  // A workspace holds the project's own pages and the detail pages opened from them.
+  // Anything else - providers, routing, settings - is the whole app's, so it is
+  // opened there rather than drawn inside a scope it would ignore.
+  const outsideWorkspace = (!!route.project && !WORKSPACE_VIEWS.has(route.view)) || route.view === 'project-redirect';
+  useEffect(() => {
+    if (route.view === 'project-redirect') history.replaceState(null, '', `#/p/${route.id}`), setRoute(parseHash());
+    else if (outsideWorkspace) navigate(`#/${location.hash.replace(/^#\/p\/[^/]+\/?/, '')}`);
+  }, [outsideWorkspace, route]);
+
   // The pairing screen, and the one early return in this component. It replaces the
   // whole shell rather than sitting inside it: an unpaired browser can render no view
   // at all, so a sidebar of destinations that all 401 would be nine links to the same
   // refusal.
   if (unpaired) return html`<${TokenGate} />`;
+
+  if (outsideWorkspace) return null;
 
   let view;
   switch (route.view) {
@@ -310,10 +352,10 @@ function App() {
       view = html`<${Projects} navigate=${navigate} openForm=${route.intent === 'new'} />`;
       break;
     case 'project':
-      view = html`<${Project} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
+      view = html`<${Project} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} workspace=${!!route.project} />`;
       break;
     case 'tasks':
-      view = html`<${Tasks} navigate=${navigate} openForm=${newTaskIntent} onFormOpened=${consumeNewTask} />`;
+      view = html`<${Tasks} navigate=${navigate} openForm=${newTaskIntent} onFormOpened=${consumeNewTask} project=${route.project || null} />`;
       break;
     case 'task-detail':
       view = html`<${TaskDetail} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
@@ -329,10 +371,10 @@ function App() {
       view = html`<${Chat} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
       break;
     case 'sessions':
-      view = html`<${Sessions} navigate=${navigate} onTitle=${setPageTitle} />`;
+      view = html`<${Sessions} navigate=${navigate} onTitle=${setPageTitle} project=${route.project || null} />`;
       break;
     case 'session-detail':
-      view = html`<${Sessions} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} onTask=${setTaskOfSession} />`;
+      view = html`<${Sessions} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} onTask=${setTaskOfSession} project=${route.project || null} />`;
       break;
     case 'providers':
       view = html`<${Providers} navigate=${navigate} />`;
@@ -341,10 +383,10 @@ function App() {
       view = html`<${Routing} navigate=${navigate} />`;
       break;
     case 'runs':
-      view = html`<${Runs} navigate=${navigate} runId=${route.id} />`;
+      view = html`<${Runs} navigate=${navigate} runId=${route.id} project=${route.project || null} />`;
       break;
     case 'usage':
-      view = html`<${Usage} navigate=${navigate} />`;
+      view = html`<${Usage} navigate=${navigate} project=${route.project || null} />`;
       break;
     case 'settings':
       view = html`<${Settings} navigate=${navigate} />`;
@@ -365,6 +407,7 @@ function App() {
     <${Fragment}>
       <${Layout}
         route=${navRoute}
+        project=${route.project || null}
         title=${title}
         serverDown=${serverDown}
         onOpenPalette=${() => setPaletteOpen(true)}
