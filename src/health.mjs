@@ -33,6 +33,10 @@ export const HEALTH_DEFAULTS = {
 export const FAILURE_POLICY = {
   RATE_LIMIT: { transient: true, resume: true, health: 'soft', cooldownMs: 30 * 1000 },
   USAGE_LIMIT: { transient: true, resume: true, health: 'open', cooldownMs: 10 * 60 * 1000 },
+  // A subscription's usage window spent. Open until the window reopens - the CLI
+  // names the time, and afterFailure takes it when the caller passes it on - else
+  // for an hour, so a turn does not keep walking back into a wall.
+  QUOTA_EXHAUSTED: { transient: true, resume: true, health: 'open', cooldownMs: 60 * 60 * 1000 },
   // A rejected key does not fix itself, so this holds far longer than the others.
   // It is deliberately finite rather than permanent: a user who corrects their key
   // should not need a manual reset they have no way to perform.
@@ -114,17 +118,20 @@ export function effectiveHealth(row, nowMs, t = HEALTH_DEFAULTS) {
 
 // The full row to persist after a failure. `failures` is the count in the window
 // *including* this one.
-export function afterFailure(row, code, failures, nowMs, t = HEALTH_DEFAULTS) {
+export function afterFailure(row, code, failures, nowMs, t = HEALTH_DEFAULTS, until = null) {
   const r = row || blankHealth(null);
   const now = new Date(nowMs).toISOString();
   const pol = policyFor(code);
+  // A stated reopening time, when the failure carried one and it is in the future,
+  // replaces the policy's fixed cooldown.
+  const stated = until && Date.parse(until) > nowMs ? until : null;
   const base = { ...r, consecutive_successes: 0, last_error: code, last_failure_at: now };
 
   // The provider is fine; the request was not. Leave its state exactly as it was.
   if (pol.health === 'none') return base;
 
   if (pol.health === 'open') {
-    return { ...base, state: 'OPEN', reason: code, opened_at: now, cooldown_until: new Date(nowMs + pol.cooldownMs).toISOString() };
+    return { ...base, state: 'OPEN', reason: code, opened_at: now, cooldown_until: stated || new Date(nowMs + pol.cooldownMs).toISOString() };
   }
 
   if (pol.health === 'soft') {

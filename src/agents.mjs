@@ -23,6 +23,12 @@ export const SHARE_TOOL = `mcp__${PERMISSION_SERVER}__share_file`;
 // anything unrecognised lands on AGENT_FAILURE rather than being swallowed.
 function classify(text) {
   const s = String(text || '').toLowerCase();
+  // A subscription's usage window spent: "You've hit your session limit · resets
+  // 4:10am (Africa/Lagos)". Claude Code reports it with status 429, so it read as a
+  // brief rate limit, held back for thirty seconds, and the next turn walked straight
+  // back into it - for hours. It is tested first, by its text, because the status
+  // alone cannot tell it from a real rate limit.
+  if (/session limit|usage limit reached|weekly limit|resets \d/.test(s)) return 'QUOTA_EXHAUSTED';
   // A 429 is often reported alongside a body that would also match USAGE_LIMIT, so
   // rate limiting has to be tested first.
   if (/rate.?limit|429|too many requests/.test(s)) return 'RATE_LIMIT';
@@ -43,6 +49,31 @@ function classify(text) {
   if (/\beconnrefused\b|\benotfound\b|\beai_again\b|socket hang up|bad gateway|service unavailable|connection (refused|reset)|\b(500|502|503|504)\b/.test(s)) return 'PROVIDER_DOWN';
   if (/timeout|timed out|etimedout/.test(s)) return 'TIMEOUT';
   return 'AGENT_FAILURE';
+}
+
+// When a spent usage window reopens, from the CLI's own sentence: "resets 4:10am
+// (Africa/Lagos)", "resets 8pm (...)". The time is wall-clock in that zone, and the
+// next such moment after `now` is the reset. Null when the sentence names no time
+// or the zone is unknown, and the caller holds the provider back for a default.
+export function quotaResetAt(message, now = Date.now()) {
+  const m = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\))?/i.exec(String(message || ''));
+  if (!m) return null;
+  let hour = Number(m[1]) % 12;
+  if ((m[3] || '').toLowerCase() === 'pm') hour += 12;
+  if (!m[3] && Number(m[1]) >= 12) hour = Number(m[1]) % 24;
+  const minute = Number(m[2] || 0);
+  const zone = m[4] || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // The zone's offset from UTC at `now`, from how the zone writes that instant.
+  let offsetMin;
+  try {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(now)).map((p) => [p.type, p.value]));
+    const asUtc = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute);
+    offsetMin = Math.round((asUtc - Math.floor(now / 60000) * 60000) / 60000);
+    const today = Date.UTC(+parts.year, +parts.month - 1, +parts.day, hour, minute) - offsetMin * 60000;
+    return new Date(today > now ? today : today + 86400000).toISOString();
+  } catch {
+    return null;
+  }
 }
 
 // Sleeps, or rejects early with whatever reason the signal was aborted with.
@@ -855,8 +886,11 @@ async function* runProcess(cmd, args, { cwd, env, role, signal }) {
       .join('\n')
       .trim();
     const err = new Error(notable || apiError?.message || `claude exited ${code}`);
-    // A structured API error status is a better signal than the stderr text.
-    err.code = apiError?.status ? classify(String(apiError.status)) : classify(stderr);
+    // A structured API error status is a better signal than the stderr text - except
+    // where the message says more than the status: a spent usage window is a 429 too.
+    const said = classify(apiError?.message || '');
+    err.code = said === 'QUOTA_EXHAUSTED' ? said : apiError?.status ? classify(String(apiError.status)) : classify(stderr);
+    if (err.code === 'QUOTA_EXHAUSTED') err.resetAt = quotaResetAt(apiError?.message || notable);
     err.sessionId = sessionId;
     throw err;
   }

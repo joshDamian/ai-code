@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,withBudget,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig,subagentModel,projectMemoryDir,userInstructionsFile} from '../src/agents.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {modelFit,blendedRate,loadPolicies} from '../src/policy.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact,referenceRates,priceAt} from '../src/format.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';import {execFileSync,spawnSync} from 'node:child_process';import {Service,transitions,PLANNER_PROMPT,CHAT_PROMPT,SESSION_PROMPT,INTAKE_PROMPT,PROPOSALS_PROMPT,INFER_SPEC_PROMPT,DECISIONS_PROMPT,reviewerPrompt,verificationPrompt,discussionPrompt,STYLE_RULES,promptFrame,withBudget,readPaths,touches,permissionDecision,taskShaped,APP_TOOLS_NOTE,autoAllowRefusal} from '../src/service.mjs';import {runProcess,collapseStream,childEnv,providerEnv,classify,claudeArgs,agentCwd,VERIFICATION_OPENS,DISCUSSION_OPENS,permissionMcpConfig,appMcpConfig,removeMcpConfig,subagentModel,projectMemoryDir,userInstructionsFile,quotaResetAt} from '../src/agents.mjs';import {afterFailure} from '../src/health.mjs';import {LEASE_STALE_MS} from '../src/store.mjs';import {modelFit,blendedRate,loadPolicies} from '../src/policy.mjs';import {relevantFiles,buildTaskContext,contextConfig,windowBudget,treeOnlyContext,inspect,importGraph,declarations,declarationIndex,references} from '../src/context.mjs';import {normalisePath,goldFromEvents,scoreCase,plannerCases,evaluate,summarise} from '../src/ranker-eval.mjs';import {createWorktree,dirtyPaths,dirtyAndUntracked,changedPaths,currentBranch,isAncestor} from '../src/git.mjs';import {Runner} from '../src/runner.mjs';import {describeEvent,formatEvent,formatTokens,formatWhen,formatCost,formatState,shortId,bodyKind,diffLines,diffSides,unifiedDiff,sessionSteps,gitImpact,referenceRates,priceAt} from '../src/format.mjs';
 function repo(){const d=fs.mkdtempSync(path.join(os.tmpdir(),'aicode-'));execFileSync('git',['init','-q'],{cwd:d});fs.writeFileSync(path.join(d,'package.json'),JSON.stringify({scripts:{test:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(d,'README.md'),'x');execFileSync('git',['add','.'],{cwd:d});execFileSync('git',['-c','user.email=test@example.com','-c','user.name=Test','commit','-qm','init'],{cwd:d});return d}
 
 // Step 0's artifact, read rather than restated.
@@ -7671,4 +7671,44 @@ test('a question waits longer than an approval before it is timed out', () => {
   s.sweepPermissions();
   assert.equal(s.store.getPermissionRequest(e.id).status, 'timeout');
   assert.equal(s.store.getPermissionRequest(q.id).status, 'pending');
+});
+
+
+test('a spent subscription window is not a rate limit: it is held back until the stated reset', () => {
+  assert.equal(classify("You've hit your session limit · resets 4:10am (Africa/Lagos)"), 'QUOTA_EXHAUSTED');
+  assert.equal(classify('429 Too Many Requests'), 'RATE_LIMIT', 'a real rate limit stays one');
+  // 01:00 UTC is 02:00 in Lagos (UTC+1), so "resets 4:10am" is 03:10 UTC the same day.
+  const now = Date.parse('2026-10-06T01:00:00Z');
+  assert.equal(quotaResetAt("resets 4:10am (Africa/Lagos)", now), '2026-10-06T03:10:00.000Z');
+  // A reset time already past today is tomorrow's.
+  assert.equal(quotaResetAt("resets 1am (Africa/Lagos)", now), '2026-10-07T00:00:00.000Z');
+  assert.equal(quotaResetAt('resets 8pm (Africa/Lagos)', now), '2026-10-06T19:00:00.000Z');
+  assert.equal(quotaResetAt('no time here', now), null);
+  // The breaker opens until then, not for thirty seconds.
+  const h = afterFailure(null, 'QUOTA_EXHAUSTED', 1, now, undefined, '2026-10-06T03:10:00.000Z');
+  assert.equal(h.state, 'OPEN');
+  assert.equal(h.cooldown_until, '2026-10-06T03:10:00.000Z');
+  assert.equal(afterFailure(null, 'QUOTA_EXHAUSTED', 1, now).cooldown_until, '2026-10-06T02:00:00.000Z', 'an hour when no time is stated');
+});
+
+test('a conversation that fell back stays on the model it landed on until its pinned model is healthy again', async () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  s.updateProvider('mock', { enabled: false });
+  s.addProvider({ id: 'sub', name: 'Sub', kind: 'mock', enabled: true, config: { routable: true, sessionId: 'sub-s' } });
+  s.addProvider({ id: 'alt', name: 'Alt', kind: 'mock', enabled: true, config: { routable: true, sessionId: 'alt-s' } });
+  s.addModel({ id: 'opus', providerId: 'sub', name: 'opus', capabilities: ['coding', 'planning'], speed: 7, quality: 10, contextLength: 100000 });
+  s.addModel({ id: 'other', providerId: 'alt', name: 'other', capabilities: ['coding', 'planning'], speed: 7, quality: 8, contextLength: 100000 });
+  const c = s.createSession(p.id, 'T', { modelId: 'opus' });
+  // The first turn ran on the fallback, and the pinned model's provider is spent.
+  const id = s.store.id();
+  s.store.addSessionRun({ id, taskId: null, role: 'chat', providerId: 'alt', modelId: 'other', status: 'running', startedAt: new Date().toISOString() }, c.id);
+  s.store.updateSessionRun(id, { status: 'succeeded', ended_at: new Date().toISOString(), resume_session_id: 'alt-s' });
+  s.recordFailure('sub', 'QUOTA_EXHAUSTED', new Date(Date.now() + 3600000).toISOString());
+  s.askSession(c.id, 'next');
+  await s.sessionTurn(c.id);
+  const turns = s.store.listSessionRuns(c.id);
+  assert.equal(turns.at(-1).model_id, 'other', 'the next turn stays where the conversation landed');
+  assert.equal(turns.filter((r) => r.provider_id === 'sub').length, 0, 'and never walks back into the spent provider');
 });

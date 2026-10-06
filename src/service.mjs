@@ -3146,11 +3146,14 @@ export class Service {
             sessionId,
             message: withAttachments(pending.text, pending.attachments),
             ...this.#turnPrompts(s, sessionId, pending.runId, { editing, app, project }),
-            // The model picked when the conversation was started, else the one the
-            // previous turn ran on - so an Automatic conversation stays on the model
-            // whose session it can continue. A preference: routing still skips it
-            // when it is unhealthy, and the turn then starts fresh.
-            preferredModelId: s.model_id || this.#resumePoint(sessionId, pending.runId)?.modelId || null,
+            // The model the previous turn ran on, so the turn continues a session it
+            // can resume with its context intact - and a conversation that had to fall
+            // back stays where it landed, rather than walking back into the model it
+            // left. The one picked when the conversation was started takes over
+            // again only when it is healthy (its quota reset, say): routing skips
+            // an unhealthy preference anyway, and a pin that sent every turn back to
+            // a provider at its limit is what made a task session loop.
+            preferredModelId: this.#turnModel(s, sessionId, pending.runId),
             resume: this.#resumePoint(sessionId, pending.runId),
             ...(s.task_id ? { policyKey: 'taskSession' } : {}),
             appTools: true,
@@ -3237,6 +3240,16 @@ export class Service {
   // one. A cancelled turn counts - stopping a turn and then saying what to do
   // instead is a continuation, as it is in claude itself. A failed one does not:
   // its session may be the state that failed.
+  // The model a conversation's next turn prefers. The pinned one while it can run;
+  // otherwise the one the last turn ran on.
+  #turnModel(s, sessionId, runId) {
+    const last = this.#resumePoint(sessionId, runId)?.modelId || null;
+    if (!s.model_id || s.model_id === last) return last || s.model_id || null;
+    const pinned = this.store.listModels().find((m) => m.id === s.model_id);
+    const healthy = pinned && this.healthNow().get(pinned.provider_id)?.eligible !== false;
+    return healthy ? s.model_id : last || s.model_id;
+  }
+
   #resumePoint(sessionId, runId) {
     const prior = this.store
       .listSessionRuns(sessionId)
@@ -4769,8 +4782,8 @@ export class Service {
   // Health writes always carry the configured thresholds. The store's own default
   // would silently disagree with a `health` block in routing.json, so nothing
   // above the store calls it without them.
-  recordFailure(providerId, code) {
-    return this.store.recordProviderFailure(providerId, code, { thresholds: this.healthThresholds() });
+  recordFailure(providerId, code, until = null) {
+    return this.store.recordProviderFailure(providerId, code, { thresholds: this.healthThresholds(), until });
   }
 
   recordSuccess(providerId) {
@@ -5652,7 +5665,7 @@ export class Service {
         // Health lives in its own table rather than in provider config, so this
         // write cannot race a config edit on the same provider.
         try {
-          this.recordFailure(p.id, code);
+          this.recordFailure(p.id, code, e.resetAt || null);
         } catch {
           /* a health write that fails must not replace the real failure */
         }

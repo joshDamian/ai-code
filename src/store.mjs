@@ -1053,7 +1053,7 @@ export class Store {
   // Records a failure against a provider. The failing run must already be in the
   // `runs` table with status 'failed' - runRole writes it before calling this -
   // because it is that row the window is counted from.
-  recordProviderFailure(providerId, code, { now = Date.now(), thresholds } = {}) {
+  recordProviderFailure(providerId, code, { now = Date.now(), thresholds, until = null } = {}) {
     // The request was wrong, not the provider. Writing nothing keeps the health
     // table from learning about failures it has no opinion on.
     if (policyFor(code).health === 'none') return null;
@@ -1063,7 +1063,7 @@ export class Store {
     // Decide from the *effective* state, so a cooldown that has already lapsed is
     // written down as DEGRADED rather than lingering as OPEN in the row.
     const from = { ...(row || blankHealth(providerId)), state: effectiveHealth(row, now, t).state };
-    return this.writeProviderHealth(afterFailure(from, code, failures, now, t));
+    return this.writeProviderHealth(afterFailure(from, code, failures, now, t, until));
   }
 
   recordProviderSuccess(providerId, { now = Date.now(), thresholds } = {}) {
