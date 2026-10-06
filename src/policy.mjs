@@ -78,6 +78,9 @@ const defaults = {
   // because every one of those calls is a person answering a prompt, and $2 rather
   // than $5 for the same reason.
   //
+  // questionTimeoutMs is the same for a question the agent asks (AskUserQuestion):
+  // longer, because it asks the person to think rather than to glance.
+  //
   // permissionTimeoutMs is the one budget with no counterpart above. It is the
   // seconds an agent waits, blocked, for a human to answer a permission prompt
   // before the request is swept to `timeout` - which is a denial. It is short on
@@ -87,7 +90,7 @@ const defaults = {
   // together may spend in a day - the machine's, not one session's, because a cap
   // read per session would let five of them spend five times it. Absent or
   // non-positive means the per-run budget is the only bound.
-  session: { strategy: 'balanced', preferred: [], fallback: [], effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 100, maxRunCost: 2, subagentWait: 600, permissionTimeoutMs: 120, dailyCap: 0 },
+  session: { strategy: 'balanced', preferred: [], fallback: [], effort: 'medium', timeout: 600, stall: 120, maxToolCalls: 100, maxRunCost: 2, subagentWait: 600, permissionTimeoutMs: 120, questionTimeoutMs: 600, dailyCap: 0 },
   // A task run as one session, end to end, in its own worktree. It does the work of
   // the whole pipeline in one agent, so its envelope is the pipeline's added up -
   // a planner's, an implementer's and a reviewer's calls (40 + 200 + 40, rounded to

@@ -7628,3 +7628,47 @@ test('a conversation turn carries the suggestion that closed it, so a reopened c
   s.store.addEvent({ runId: id, type: 'prompt_suggestion', data: { type: 'prompt_suggestion', suggestion: '  fix it ' } });
   assert.equal(s.sessionTurns(c.id).pop().suggestion, 'fix it');
 });
+
+test('a question is answered, not allowed: the answers go back in updatedInput', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const c = s.createSession(p.id, 'Q', { mode: 'edit' });
+  const input = { questions: [
+    { question: 'What goes under the card?', header: 'Cue', options: [{ label: 'Tags' }, { label: 'Moments' }, { label: 'Nothing' }], multiSelect: false },
+    { question: 'Which views?', header: 'Views', options: [{ label: 'History' }, { label: 'Day' }], multiSelect: true },
+  ] };
+  const ask = () => s.addPermissionRequest({ sessionId: c.id, tool: 'AskUserQuestion', input });
+  const q = ask();
+  assert.throws(() => s.answerPermission(q.id, 'allow'), /No answer for: What goes under the card\?/, 'an allow with no answers is refused');
+  assert.throws(() => s.answerPermission(q.id, 'allow', { 'What goes under the card?': 'Tags' }), /No answer for: Which views\?/, 'every question needs one');
+  s.answerPermission(q.id, 'allow', { 'What goes under the card?': ['Tags'], 'Which views?': ['History', 'Day', ' my own '] });
+  const d = permissionDecision(s.store.getPermissionRequest(q.id));
+  assert.equal(d.behavior, 'allow');
+  assert.deepEqual(d.updatedInput.answers, { 'What goes under the card?': 'Tags', 'Which views?': 'History, Day, my own' });
+  assert.deepEqual(d.updatedInput.questions, input.questions, 'what was asked goes back unchanged');
+  // Skipping is a deny: the agent is told nobody answered.
+  const q2 = ask();
+  s.answerPermission(q2.id, 'deny');
+  assert.equal(permissionDecision(s.store.getPermissionRequest(q2.id)).behavior, 'deny');
+  // Auto-allow never answers a question for the person.
+  assert.ok(autoAllowRefusal('AskUserQuestion', input, root));
+});
+
+test('a question waits longer than an approval before it is timed out', () => {
+  const root = repo();
+  const s = new Service(root, { allowMock: true, silent: true });
+  const p = s.initProject('p', root);
+  const c = s.createSession(p.id, 'Q', { mode: 'edit' });
+  const q = s.addPermissionRequest({ sessionId: c.id, tool: 'AskUserQuestion', input: { questions: [{ question: 'Q?', options: [{ label: 'A' }] }] } });
+  const e = s.addPermissionRequest({ sessionId: c.id, tool: 'Edit', input: { file_path: 'a.txt' } });
+  const window = (r) => Date.parse(s.pendingPermissions().find((x) => x.id === r.id).timeout_at) - Date.parse(r.created_at);
+  assert.equal(window(q), 600000, 'ten minutes to think');
+  assert.equal(window(e), 120000, 'two to glance');
+  // Five minutes on, the approval has timed out and the question has not.
+  const fiveAgo = new Date(Date.now() - 300000).toISOString();
+  s.store.db.prepare('UPDATE permission_requests SET created_at=? WHERE session_id=?').run(fiveAgo, c.id);
+  s.sweepPermissions();
+  assert.equal(s.store.getPermissionRequest(e.id).status, 'timeout');
+  assert.equal(s.store.getPermissionRequest(q.id).status, 'pending');
+});

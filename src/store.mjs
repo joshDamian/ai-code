@@ -319,7 +319,10 @@ export class Store {
       ],
       // A request the auto-allow rule answered rather than a person, so the
       // history can say which approvals nobody looked at.
-      permission_requests: [['auto', 'INTEGER NOT NULL DEFAULT 0']],
+      // `answers` is the person's reply to an AskUserQuestion request, as JSON:
+      // question text -> chosen label(s). Kept apart from `input`, which stays what
+      // the agent asked.
+      permission_requests: [['auto', 'INTEGER NOT NULL DEFAULT 0'], ['answers', 'TEXT']],
     })) {
       for (const [column, type] of columns) {
         const had = this.db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
@@ -1459,8 +1462,8 @@ export class Store {
     if (!p) return null;
     const n = { ...p, ...patch };
     this.db
-      .prepare('UPDATE permission_requests SET status=?,answered_at=?,auto=? WHERE id=?')
-      .run(n.status, n.answered_at ?? null, n.auto ? 1 : 0, id);
+      .prepare('UPDATE permission_requests SET status=?,answered_at=?,auto=?,answers=? WHERE id=?')
+      .run(n.status, n.answered_at ?? null, n.auto ? 1 : 0, n.answers ?? null, id);
     return this.getPermissionRequest(id);
   }
 
@@ -1469,10 +1472,14 @@ export class Store {
   // one whose process died: a timer dies with the process that armed it, and this
   // still finds the row. Returns the ids so the caller can release any waiter it
   // is still holding in memory.
-  sweepTimeoutPermissions(cutoffIso) {
-    const rows = this.db
-      .prepare("SELECT id FROM permission_requests WHERE status='pending' AND created_at < ?")
-      .all(cutoffIso);
+  // `longer` gives one tool its own, later cutoff - a question waits longer than an
+  // approval - and every other pending row takes `cutoffIso`.
+  sweepTimeoutPermissions(cutoffIso, longer = null) {
+    const rows = longer
+      ? this.db
+          .prepare("SELECT id FROM permission_requests WHERE status='pending' AND ((tool<>? AND created_at < ?) OR (tool=? AND created_at < ?))")
+          .all(longer.tool, cutoffIso, longer.tool, longer.cutoffIso)
+      : this.db.prepare("SELECT id FROM permission_requests WHERE status='pending' AND created_at < ?").all(cutoffIso);
     if (!rows.length) return [];
     const now = new Date().toISOString();
     const stmt = this.db.prepare("UPDATE permission_requests SET status='timeout',answered_at=? WHERE id=? AND status='pending'");

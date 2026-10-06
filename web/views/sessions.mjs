@@ -276,6 +276,7 @@ const VERBS = {
   Task: 'Delegate',
   TodoWrite: 'Plan',
   draft_task: 'Draft task',
+  AskUserQuestion: 'Ask',
 };
 const verbOf = (tool) => {
   const name = String(tool || 'tool').replace(/^mcp__[^_]+__/, '');
@@ -399,6 +400,7 @@ function groupOf(s) {
 
 function rowLine(s, root) {
   if (s.pending?.git && s.pending.git.level !== 'read') return html`<span class=${s.pending.git.level === 'remote' || s.pending.git.destructive ? 'bad' : ''}>${s.pending.git.label}?</span>`;
+  if (s.pending?.tool === 'AskUserQuestion') return html`Has a question for you`;
   if (s.pending) return html`Wants to ${verbOf(s.pending.tool).toLowerCase()} <${Path} path=${relTo(root, s.pending.target)} />`;
   if (s.pending_run_id) return s.activity ? html`${verbOf(s.activity.tool)} <${Path} path=${relTo(root, s.activity.target)} />` : 'Working…';
   if (s.status === 'archived') return 'Archived';
@@ -594,7 +596,7 @@ function Steps({ steps, waitingOn, root }) {
             <span class="ss-step-verb">${verbOf(st.tool)}</span>
             <span class="ss-step-target">${st.target ? html`<${Path} path=${relTo(root, st.target)} />` : null}</span>
             ${waiting
-              ? html`<span class="ss-step-note">waiting for approval</span>`
+              ? html`<span class="ss-step-note">${st.tool === 'AskUserQuestion' ? 'waiting for your answer' : 'waiting for approval'}</span>`
               : st.status !== 'done'
                 ? html`<span class="ss-step-note" title=${st.error || ''}>${st.status}</span>`
                 : null}
@@ -721,7 +723,98 @@ function GitImpact({ impact }) {
   `;
 }
 
+// The agent asking the person to choose, through Claude Code's AskUserQuestion. It
+// arrives through the same gate as an action, but it is answered rather than
+// allowed: each question shows its options, several where it asks for several, and
+// an Other line for an answer none of them is. Sending is an allow carrying the
+// answers; Skip is a deny, which tells the agent nobody answered.
+function QuestionCard({ permission, now, busy, onAnswer }) {
+  const questions = Array.isArray(permission.input?.questions) ? permission.input.questions : [];
+  // question text -> { picked: label[], other: string }
+  const [replies, setReplies] = useState({});
+  const left = secondsLeft(permission.timeout_at, now);
+  const total = Math.max(1, Math.round((Date.parse(permission.timeout_at) - Date.parse(permission.created_at)) / 1000));
+  const reply = (q) => replies[q.question] || { picked: [], other: '' };
+  const set = (q, patch) => setReplies((r) => ({ ...r, [q.question]: { ...reply(q), ...patch } }));
+  const toggle = (q, label) => {
+    const cur = reply(q);
+    if (q.multiSelect) set(q, { picked: cur.picked.includes(label) ? cur.picked.filter((x) => x !== label) : [...cur.picked, label] });
+    else set(q, { picked: cur.picked[0] === label ? [] : [label], other: '' });
+  };
+  // What is sent for a question: its picks, then the Other text. A single-choice
+  // question takes the Other text in place of a pick.
+  const answerOf = (q) => {
+    const r = reply(q);
+    const other = r.other.trim();
+    return q.multiSelect ? [...r.picked, ...(other ? [other] : [])] : other ? [other] : r.picked;
+  };
+  const ready = questions.length > 0 && questions.every((q) => answerOf(q).length > 0);
+  const send = () => onAnswer('allow', Object.fromEntries(questions.map((q) => [q.question, answerOf(q)])));
+  return html`
+    <section class="ss-approval ss-question" aria-label="Question for you" aria-live="polite">
+      <div class="ss-approval-grab" aria-hidden="true"></div>
+      <div class="ss-approval-head">
+        <${Ring} left=${left} total=${total} />
+        <div class="ss-approval-what">
+          <div class="ss-approval-title">${questions.length === 1 ? 'A question for you' : `${questions.length} questions for you`}</div>
+          <div class="ss-approval-sub">Skipped automatically in <span class="ss-mono ss-approval-left">${clock(left)}</span></div>
+        </div>
+      </div>
+      ${questions.map(
+        (q, qi) => html`
+          <fieldset class="ss-q" key=${qi}>
+            <legend>
+              ${q.header ? html`<span class="badge">${q.header}</span>` : null}
+              <b>${q.question}</b>
+              ${q.multiSelect ? html`<span class="muted">Choose any</span>` : null}
+            </legend>
+            <div class="ss-q-options" role=${q.multiSelect ? 'group' : 'radiogroup'}>
+              ${(q.options || []).map((o, oi) => {
+                const on = reply(q).picked.includes(o.label);
+                return html`
+                  <button
+                    key=${oi}
+                    type="button"
+                    class="ss-q-option ${on ? 'on' : ''}"
+                    role=${q.multiSelect ? 'checkbox' : 'radio'}
+                    aria-checked=${on ? 'true' : 'false'}
+                    disabled=${busy}
+                    onClick=${() => toggle(q, o.label)}
+                  >
+                    <span class="ss-q-label">${o.label}</span>
+                    ${o.description ? html`<span class="ss-q-desc">${o.description}</span>` : null}
+                  </button>
+                `;
+              })}
+            </div>
+            <input
+              class="input ss-q-other"
+              type="text"
+              placeholder=${q.multiSelect ? 'Anything else (optional)' : 'Or answer in your own words'}
+              value=${reply(q).other}
+              disabled=${busy}
+              onInput=${(e) => set(q, { other: e.target.value, ...(q.multiSelect ? {} : e.target.value.trim() ? { picked: [] } : {}) })}
+              onKeyDown=${(e) => {
+                if (e.key === 'Enter' && ready) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+            />
+          </fieldset>
+        `
+      )}
+      <div class="ss-approval-foot">
+        <span class="muted">${ready ? 'Your answer goes back to the agent.' : 'Choose an answer for each question.'}</span>
+        <button class="btn secondary" type="button" onClick=${() => onAnswer('deny')} disabled=${busy}>Skip</button>
+        <button class="btn ss-allow" type="button" onClick=${send} disabled=${busy || !ready}>Send answer</button>
+      </div>
+    </section>
+  `;
+}
+
 export function Approval({ permission, now, busy, onAnswer, root, onAutoAllow }) {
+  if (permission.tool === 'AskUserQuestion') return html`<${QuestionCard} permission=${permission} now=${now} busy=${busy} onAnswer=${onAnswer} />`;
   const a = approvalOf(permission.tool, permission.input, root);
   const cwd = permission.cwd ? relTo(root, permission.cwd) : '';
   const left = secondsLeft(permission.timeout_at, now);
@@ -1339,12 +1432,12 @@ export function Sessions({ id, navigate, onTitle }) {
   }, [sessionId, input, attach.files, attach.clear, busy, working, openStream, load, refreshList]);
 
   const answer = useCallback(
-    async (action) => {
+    async (action, answers = null) => {
       const req = permission;
       if (!req) return;
       setBusy(true);
       try {
-        await api.answerSessionPermission(sessionId, req.id, action);
+        await api.answerSessionPermission(sessionId, req.id, action, answers);
         setPermission(null);
       } catch (e) {
         // A 409 is the countdown having fired first, which is a denial the agent has
@@ -1527,7 +1620,7 @@ export function Sessions({ id, navigate, onTitle }) {
   const drafts = (project?.drafts || []).filter((d) => d.session_id === sessionId);
   const suggestion = liveSuggestion || turns[turns.length - 1]?.suggestion || '';
   const placeholder = permission
-    ? 'Paused on the approval above.'
+    ? permission.tool === 'AskUserQuestion' ? 'Answer the question above to continue.' : 'Paused on the approval above.'
     : working
       ? 'Working… send the next message when it replies.'
       : closed

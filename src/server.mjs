@@ -1223,7 +1223,7 @@ const server = http.createServer(async (req, res) => {
         // clicked a second after it fired would otherwise approve an action the agent
         // has already been told was denied.
         try {
-          svc.answerPermission(rest, b.action);
+          svc.answerPermission(rest, b.action, b.answers || null);
         } catch (e) {
           const status = e?.code === 'NOT_FOUND' ? 404 : e?.code === 'CONFLICT' ? 409 : 400;
           return json(res, { error: e.message }, status);

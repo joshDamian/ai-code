@@ -33,6 +33,9 @@ const RUN = process.env.AI_CODE_RUN_ID || '';
 // silent, where no answer and no error ever arrives.
 const SERVER_TIMEOUT_MS = Number(process.env.AI_CODE_PERMISSION_TIMEOUT_MS) || 120000;
 const CLIENT_TIMEOUT_MS = SERVER_TIMEOUT_MS + 15000;
+// A question waits longer than an approval: it asks the person to think, where an
+// approval asks them to glance. The server applies the same split.
+const QUESTION_TIMEOUT_MS = Number(process.env.AI_CODE_QUESTION_TIMEOUT_MS) || 600000;
 
 // The tool claude was told to call. The name is a constant here and in
 // src/agents.mjs, which is what writes the `mcp__<server>__<tool>` value into the
@@ -77,7 +80,7 @@ async function decide(args) {
     cwd: process.cwd(),
     run_id: RUN || null,
   };
-  const timer = AbortSignal.timeout(CLIENT_TIMEOUT_MS);
+  const timer = AbortSignal.timeout(args?.tool_name === 'AskUserQuestion' ? QUESTION_TIMEOUT_MS + 15000 : CLIENT_TIMEOUT_MS);
   let res;
   try {
     res = await fetch(`${ENDPOINT}/api/sessions/${SESSION}/permissions`, {

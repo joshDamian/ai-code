@@ -229,8 +229,9 @@ export const api = {
   // denial, so this is a verb and not a boolean.
   // Every prompt waiting on the machine, for the app-wide approval card.
   pendingPermissions: () => request('/api/permissions'),
-  answerSessionPermission: (sessionId, reqId, action) =>
-    request(`/api/sessions/${sessionId}/permissions/${reqId}`, { method: 'POST', body: { action } }),
+  // `answers` only for a question: question text -> the chosen label(s).
+  answerSessionPermission: (sessionId, reqId, action, answers = null) =>
+    request(`/api/sessions/${sessionId}/permissions/${reqId}`, { method: 'POST', body: answers ? { action, answers } : { action } }),
 
   // Web Push. `pushKey` answers 503 when the server has no web-push installed, which
   // the notifier treats as "no background push on this install" and nothing more.

@@ -1107,13 +1107,42 @@ export function autoAllowRefusal(tool, input, root) {
   return `${tool} is not a routine action`;
 }
 
+// The tool Claude Code asks its multiple-choice questions through. Its call is
+// held by the gate like any other, but it is a question, not an action: the
+// person answers it, and the answers go back in `updatedInput.answers` - question
+// text to the chosen label, several joined with ", " - which the CLI turns into
+// the tool's result ("Your questions have been answered: ..."). Verified against
+// claude 2.1.289 by execution.
+export const QUESTION_TOOL = 'AskUserQuestion';
+
 export function permissionDecision(row) {
-  if (row?.status === 'allowed') return { behavior: 'allow', updatedInput: parseJson(row.input) ?? {} };
+  if (row?.status === 'allowed') {
+    const input = parseJson(row.input) ?? {};
+    const answers = parseJson(row.answers);
+    return { behavior: 'allow', updatedInput: answers ? { ...input, answers } : input };
+  }
   const message =
     row?.status === 'timeout'
       ? 'Nobody answered this request in time, so it was not approved. Do not retry it.'
       : 'The person watching this session denied this action. Do not retry it or reach the same result another way.';
   return { behavior: 'deny', message };
+}
+
+// The person's answers to an AskUserQuestion request, checked against what was
+// asked: one entry per question, each a non-empty string - an option's label, a
+// comma-joined set of them, or free text the person typed instead. A reply that
+// leaves a question unanswered is refused rather than half sent.
+function questionAnswers(input, answers) {
+  const questions = Array.isArray(input?.questions) ? input.questions : [];
+  if (!questions.length) throw Object.assign(new Error('This question has no questions to answer'), { code: 'BAD_REQUEST' });
+  const out = {};
+  for (const q of questions) {
+    const a = answers && typeof answers === 'object' ? answers[q.question] : null;
+    const text = Array.isArray(a) ? a.map((x) => String(x).trim()).filter(Boolean).join(', ') : String(a ?? '').trim();
+    if (!text) throw Object.assign(new Error(`No answer for: ${q.question}`), { code: 'BAD_REQUEST' });
+    out[q.question] = text;
+  }
+  return out;
 }
 
 // What a task-scoped question is handed about the task it is asking about. The
@@ -3132,6 +3161,7 @@ export class Service {
             permission: {
               endpoint: this.permissionEndpoint,
               timeoutMs: (Number(policy.permissionTimeoutMs) || 120) * 1000,
+              questionTimeoutMs: (Number(policy.questionTimeoutMs) || 600) * 1000,
             },
           }
         );
@@ -3414,15 +3444,19 @@ export class Service {
   // `allow` is the only action that grants. Anything else - an unknown word, a
   // missing field, a UI sending `deny` - is a denial, so the route cannot grant an
   // action by misspelling it.
-  answerPermission(reqId, action) {
+  answerPermission(reqId, action, answers = null) {
     const r = this.store.getPermissionRequest(reqId);
     if (!r) throw Object.assign(new Error('Permission request not found'), { code: 'NOT_FOUND' });
     if (r.status !== 'pending') {
       throw Object.assign(new Error(`This request was already answered (${r.status})`), { code: 'CONFLICT' });
     }
+    // A question is answered, not allowed: an allow with no answers would hand the
+    // agent a question nobody replied to as though someone had.
+    const reply = action === 'allow' && r.tool === QUESTION_TOOL ? questionAnswers(parseJson(r.input), answers) : null;
     return this.store.updatePermissionRequest(reqId, {
       status: action === 'allow' ? 'allowed' : 'denied',
       answered_at: new Date().toISOString(),
+      ...(reply ? { answers: JSON.stringify(reply) } : {}),
     });
   }
 
@@ -3438,10 +3472,17 @@ export class Service {
   // Called on read rather than only on a timer, because the case it exists for is
   // the one no timer survives: the process that armed it is gone, and the row is
   // what is left.
+  // How long a request may wait for its answer: an approval is a glance, a question
+  // asks the person to think. Both read the live policy, like everything here.
+  #answerWindowMs(tool) {
+    const policy = this.policies.session || {};
+    return tool === QUESTION_TOOL ? (Number(policy.questionTimeoutMs) || 600) * 1000 : (Number(policy.permissionTimeoutMs) || 120) * 1000;
+  }
+
   sweepPermissions() {
-    const ms = (Number(this.policies.session?.permissionTimeoutMs) || 120) * 1000;
-    const cutoff = new Date(Date.now() - ms).toISOString();
-    const expired = this.store.sweepTimeoutPermissions(cutoff);
+    const now = Date.now();
+    const cutoff = (tool) => new Date(now - this.#answerWindowMs(tool)).toISOString();
+    const expired = this.store.sweepTimeoutPermissions(cutoff(null), { tool: QUESTION_TOOL, cutoffIso: cutoff(QUESTION_TOOL) });
     // The in-process waiters are released by the same sweep. Without this the
     // MCP tool would sit blocked until its own longer timer fired, which is a
     // slower way of reaching the same denial.
@@ -3471,7 +3512,7 @@ export class Service {
   }
 
   #permissionView(r) {
-    const ms = (Number(this.policies.session?.permissionTimeoutMs) || 120) * 1000;
+    const ms = this.#answerWindowMs(r.tool);
     return {
       id: r.id,
       tool: r.tool,
@@ -5457,6 +5498,7 @@ export class Service {
                 endpoint: options.permission.endpoint,
                 sessionId: session,
                 timeoutMs: options.permission.timeoutMs,
+                questionTimeoutMs: options.permission.questionTimeoutMs,
               })
             : null;
         // The same four values again as environment, which is belt and braces on
@@ -5470,6 +5512,7 @@ export class Service {
               AI_CODE_SESSION_ID: session,
               AI_CODE_RUN_ID: run.id,
               AI_CODE_PERMISSION_TIMEOUT_MS: String(options.permission.timeoutMs ?? 120000),
+              AI_CODE_QUESTION_TIMEOUT_MS: String(options.permission.questionTimeoutMs ?? 600000),
             }
           : {};
         // A chat's read-only tools over AI Code's records, when this process is the

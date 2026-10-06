@@ -543,7 +543,7 @@ export function agentCwd(input) {
 // The file is written 0600 although nothing in it is a credential. What it does
 // name is a route into this server and the session id it may act on, and a file in
 // a shared temp directory is readable by default - so the default is wrong here.
-export function permissionMcpConfig(runId, { endpoint, sessionId, timeoutMs }) {
+export function permissionMcpConfig(runId, { endpoint, sessionId, timeoutMs, questionTimeoutMs }) {
   const configPath = path.join(os.tmpdir(), `ai-code-mcp-${runId}.json`);
   fs.writeFileSync(
     configPath,
@@ -558,6 +558,7 @@ export function permissionMcpConfig(runId, { endpoint, sessionId, timeoutMs }) {
               AI_CODE_SESSION_ID: sessionId,
               AI_CODE_RUN_ID: runId,
               AI_CODE_PERMISSION_TIMEOUT_MS: String(timeoutMs ?? 120000),
+              AI_CODE_QUESTION_TIMEOUT_MS: String(questionTimeoutMs ?? 600000),
             },
           },
         },
