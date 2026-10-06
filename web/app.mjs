@@ -124,10 +124,23 @@ function App() {
   // Every place inside Conversations is remembered as it is reached, so leaving for
   // another view and coming back lands where the person left. The chat list is the
   // conversations list now, so it is remembered as that.
+  // The task a conversation belongs to, when it is a task's agent: such a
+  // conversation is part of Tasks, so it lights Tasks in the nav and is not the
+  // place Conversations returns to. Set by the conversation view once it has loaded.
+  // `undefined` until the view says (it has to load the session first), then the
+  // task id or null. A conversation is only remembered once known not to be a
+  // task's: remembered on the first render, before the load, it would be.
+  const [taskOfSession, setTaskOfSession] = useState(undefined);
   useEffect(() => {
-    if (route.view === 'sessions' || route.view === 'session-detail' || route.view === 'chat-detail') remember(CONVERSATIONS_PLACE, location.hash);
-    else if (route.view === 'chat') remember(CONVERSATIONS_PLACE, '#/sessions');
+    setTaskOfSession(undefined);
   }, [route]);
+
+  useEffect(() => {
+    if (route.view === 'session-detail') {
+      if (taskOfSession === null) remember(CONVERSATIONS_PLACE, location.hash);
+    } else if (route.view === 'sessions' || route.view === 'chat-detail') remember(CONVERSATIONS_PLACE, location.hash);
+    else if (route.view === 'chat') remember(CONVERSATIONS_PLACE, '#/sessions');
+  }, [route, taskOfSession]);
 
   useEffect(() => {
     function onHashChange() {
@@ -319,7 +332,7 @@ function App() {
       view = html`<${Sessions} navigate=${navigate} onTitle=${setPageTitle} />`;
       break;
     case 'session-detail':
-      view = html`<${Sessions} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
+      view = html`<${Sessions} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} onTask=${setTaskOfSession} />`;
       break;
     case 'providers':
       view = html`<${Providers} navigate=${navigate} />`;
@@ -345,7 +358,7 @@ function App() {
   // replaced by the one screen that can say what happened and offer to fix it.
   if (serverDown) view = html`<${ServerPanel} supervisorUp=${supervisorUp} />`;
 
-  const navRoute = route.view === 'task-detail' || route.view === 'compare' ? 'tasks' : route.view === 'chat-detail' || route.view === 'chat' ? 'sessions' : route.view === 'session-detail' ? 'sessions' : route.view === 'project' ? 'projects' : route.view;
+  const navRoute = route.view === 'task-detail' || route.view === 'compare' ? 'tasks' : route.view === 'chat-detail' || route.view === 'chat' ? 'sessions' : route.view === 'session-detail' ? (taskOfSession ? 'tasks' : 'sessions') : route.view === 'project' ? 'projects' : route.view;
   const title = route.view === 'task-detail' || route.view === 'chat-detail' || route.view === 'session-detail' || route.view === 'project' ? pageTitle : null;
 
   return html`

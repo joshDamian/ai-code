@@ -1119,7 +1119,7 @@ function NewSession({ projects, projectsLoaded, projectId, onProject, models, on
   `;
 }
 
-export function Sessions({ id, navigate, onTitle }) {
+export function Sessions({ id, navigate, onTitle, onTask }) {
   const isNew = id === 'new';
   const sessionId = id && !isNew ? id : null;
   const [projects, setProjects] = useState([]);
@@ -1297,6 +1297,7 @@ export function Sessions({ id, navigate, onTitle }) {
       setTurns(d.turns || []);
       setPermission(d.permission || null);
       onTitle?.(d.session.name);
+      onTask?.(d.session.task_id || null);
       // A turn that ended without an answer is the one failure the transcript cannot
       // show from the turns alone when its run never started, so the job row reports it.
       const last = (d.turns || [])[(d.turns || []).length - 1];
@@ -1631,12 +1632,21 @@ export function Sessions({ id, navigate, onTitle }) {
             ? session?.auto_allow ? 'Tell it what to change next.' : 'Tell it what to change. Each write asks you first.'
             : 'Ask about the code, tasks, runs or spend…';
 
+  // A task's conversation is its agent at work, not one of the person's
+  // conversations: it is not in the list beside it, and the list was the one thing
+  // on screen with nothing to do with it. So it opens focused - the conversation
+  // and its rail - and the way back is to its task.
+  const focused = !!session?.task_id;
   return html`
-    <div class="ss-shell ss-shell-open ${railOpen ? 'rail-open' : ''}">
-      ${list}
+    <div class="ss-shell ss-shell-open ${focused ? 'ss-shell-focus' : ''} ${railOpen ? 'rail-open' : ''}">
+      ${focused ? null : list}
       <main class="ss-conv" aria-label=${session?.name || 'Conversation'}>
         <header class="ss-conv-head">
-          ${renaming ? null : html`<a class="btn secondary ss-icon-btn ss-back-btn" href="#/sessions" aria-label="Back to conversations">${icon(ICONS.back)}</a>`}
+          ${renaming
+            ? null
+            : focused
+              ? html`<a class="btn secondary ss-icon-btn ss-back-btn ss-back-task" href=${`#/tasks/${session.task_id}`} aria-label="Back to the task">${icon(ICONS.back)}</a>`
+              : html`<a class="btn secondary ss-icon-btn ss-back-btn" href="#/sessions" aria-label="Back to conversations">${icon(ICONS.back)}</a>`}
           <div class="ss-conv-title">
             ${renaming
               ? html`

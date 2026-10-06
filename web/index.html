@@ -1240,6 +1240,9 @@ a.list-row:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .content:has(>.ss-shell){flex:1;min-height:0;display:flex;padding-bottom:var(--space-5)}
 .ss-shell{flex:1;min-height:0;display:grid;grid-template-columns:280px minmax(0,1fr) 300px;background:var(--surface-0);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;position:relative}
 .ss-shell-index,.ss-shell-new{grid-template-columns:280px minmax(0,1fr)}
+.ss-shell-focus{grid-template-columns:minmax(0,1fr) 300px}
+/* The task's way back shows at every width, where the conversations one is a phone-only control. */
+.ss-shell-focus .ss-back-task{display:inline-flex}
 .ss-ic{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;transition:transform var(--dur-fast) var(--ease)}
 .ss-ic.open{transform:rotate(90deg)}
 .ss-ic.good,.ss-shell .good{color:var(--good)}
@@ -1581,6 +1584,7 @@ a.attempt-chip:hover{border-color:var(--accent-dim)}
 /* Below 1280px the details leave the grid and slide over the session on demand. */
 @media(max-width:1279px){
   .ss-shell-open{grid-template-columns:260px minmax(0,1fr)}
+  .ss-shell-focus{grid-template-columns:minmax(0,1fr)}
   .ss-shell-index,.ss-shell-new{grid-template-columns:260px minmax(0,1fr)}
   .ss-shell-open .ss-rail{position:absolute;top:0;right:0;bottom:0;width:min(320px,100%);box-sizing:border-box;box-shadow:var(--shadow-3);transform:translateX(100%);visibility:hidden;transition:transform .2s var(--ease),visibility .2s;z-index:40}
   .ss-shell-open .ss-rail.open{transform:none;visibility:visible}
