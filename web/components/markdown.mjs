@@ -34,9 +34,8 @@ function loadHighlighter() {
 
 // Mermaid's own palette is drawn from the dashboard's tokens, read once at load so
 // the colours have one source. securityLevel 'strict' escapes labels and drops click
-// handlers and links. Labels are drawn as SVG <text> rather than HTML inside
-// <foreignObject>, so the sanitiser can hold the diagram to its SVG profile alone.
-// `secure` lists the settings a diagram's %%{init}%% directive may not override: on
+// handlers and links. The classic look keeps the dashboard's flat strokes; mermaid
+// 12's default look adds gradients and shadows. `secure` lists the settings a diagram's %%{init}%% directive may not override: on
 // top of mermaid's defaults, the theme and its CSS, so a diagram cannot restyle
 // itself out of the palette or bring stylesheet text of its own.
 let mermaidLoad = null;
@@ -49,11 +48,9 @@ function loadMermaid() {
         startOnLoad: false,
         securityLevel: 'strict',
         suppressErrorRendering: true,
-        htmlLabels: false,
-        flowchart: { htmlLabels: false },
-        class: { htmlLabels: false },
-        secure: ['secure', 'securityLevel', 'startOnLoad', 'maxTextSize', 'suppressErrorRendering', 'maxEdges', 'theme', 'themeVariables', 'themeCSS', 'fontFamily', 'altFontFamily', 'htmlLabels'],
+        secure: ['secure', 'securityLevel', 'startOnLoad', 'maxTextSize', 'suppressErrorRendering', 'maxEdges', 'theme', 'themeVariables', 'themeCSS', 'fontFamily', 'altFontFamily'],
         theme: 'base',
+        look: 'classic',
         fontFamily: token('--font-ui'),
         themeVariables: {
           darkMode: true,
@@ -62,9 +59,11 @@ function loadMermaid() {
           primaryColor: token('--surface-3'),
           primaryTextColor: token('--text'),
           primaryBorderColor: token('--accent-dim'),
+          nodeBorder: token('--accent-dim'),
           secondaryColor: token('--surface-2'),
           tertiaryColor: token('--surface-2'),
           lineColor: token('--muted'),
+          edgeLabelBackground: token('--surface-1'),
           textColor: token('--text'),
           noteBkgColor: token('--surface-2'),
           noteTextColor: token('--text'),
@@ -85,8 +84,11 @@ function blockLanguage(code) {
 
 let diagramSeq = 0;
 
-// Mermaid's SVG goes through the sanitiser like everything else, held to the SVG
-// profile: a diagram is the one place SVG is let in, and HTML is not let in with it.
+// Mermaid's SVG goes through the sanitiser like everything else. A diagram is the one
+// place SVG is let in. Its labels are HTML inside <foreignObject>, and that HTML is
+// held to the same allow-list as a plan's own markup. Labels drawn as SVG <text>
+// instead would need no HTML, but mermaid 12 no longer centres them in state and use
+// case shapes.
 async function renderDiagram(pre, code) {
   const mermaid = await loadMermaid();
   if (!mermaid || !pre.isConnected) return;
@@ -103,7 +105,11 @@ async function renderDiagram(pre, code) {
   if (!pre.isConnected) return;
   const box = document.createElement('div');
   box.className = 'md-diagram';
-  box.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } });
+  box.innerHTML = DOMPurify.sanitize(svg, {
+    USE_PROFILES: { html: true, svg: true, svgFilters: true },
+    ADD_TAGS: ['foreignObject'],
+    HTML_INTEGRATION_POINTS: { foreignobject: true },
+  });
   pre.replaceWith(box);
 }
 
