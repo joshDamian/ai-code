@@ -11,6 +11,7 @@
 import { html, useRef, useEffect } from '../lib.mjs';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import { copyText, COPIED_MS, COPY_ICON, COPIED_ICON } from './copy.mjs';
 
 // A link in a plan points at the outside world. Following it in the dashboard's
 // own tab navigates away from a task mid-review with no way back, and rel=noopener
@@ -113,6 +114,35 @@ async function renderDiagram(pre, code) {
   pre.replaceWith(box);
 }
 
+// Every fenced block, diagram or not, gets a Copy button in its corner. The block is
+// wrapped so the button stays put while a wide block scrolls sideways under it, and it
+// copies the source as written: a diagram's mermaid text, not its drawing.
+function addCopyButton(pre, code) {
+  const source = code.textContent.replace(/\n$/, '');
+  const wrap = document.createElement('div');
+  wrap.className = 'md-block';
+  pre.replaceWith(wrap);
+  wrap.append(pre);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'copy-btn md-copy';
+  btn.setAttribute('aria-label', 'Copy code');
+  btn.title = 'Copy code';
+  btn.innerHTML = COPY_ICON;
+  let reset = null;
+  btn.addEventListener('click', async () => {
+    if (!(await copyText(source))) return;
+    btn.innerHTML = COPIED_ICON;
+    btn.setAttribute('aria-label', 'Copied');
+    clearTimeout(reset);
+    reset = setTimeout(() => {
+      btn.innerHTML = COPY_ICON;
+      btn.setAttribute('aria-label', 'Copy code');
+    }, COPIED_MS);
+  });
+  wrap.append(btn);
+}
+
 async function highlightBlock(code, lang) {
   if (code.textContent.split('\n').length > HIGHLIGHT_LINES) return;
   const hljs = await loadHighlighter();
@@ -138,6 +168,7 @@ export function Markdown({ text, className = 'md' }) {
     if (!root) return;
     for (const code of root.querySelectorAll('pre > code')) {
       const lang = blockLanguage(code);
+      addCopyButton(code.parentElement, code);
       if (lang === 'mermaid') renderDiagram(code.parentElement, code);
       else if (lang) highlightBlock(code, lang);
     }

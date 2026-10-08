@@ -29,6 +29,7 @@ import { EnginePick } from '../components/engine-pick.mjs';
 import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { Markdown } from '../components/markdown.mjs';
+import { CopyButton } from '../components/copy.mjs';
 import { EventStream } from '../components/event-stream.mjs';
 import { Time } from '../components/time.mjs';
 import { Select } from '../components/form.mjs';
@@ -665,6 +666,7 @@ function Turn({ t, live, root, sessionId, children }) {
               </button>
               ${open ? html`<${Steps} steps=${steps} root=${root} />` : null}
               ${t.answer ? html`<${Markdown} text=${t.answer} className="md ss-md" />` : null}
+              ${t.answer ? html`<div class="ss-answer-actions"><${CopyButton} text=${t.answer} label="Copy response" /></div>` : null}
               <${SharedFiles} files=${t.outputs} sessionId=${sessionId} runId=${t.run_id} />
               ${failure ? html`<div class="ss-failure">${failure}</div>` : null}
             </div>

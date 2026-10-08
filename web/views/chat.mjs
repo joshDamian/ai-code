@@ -5,6 +5,7 @@ import { showToast } from '../components/toast.mjs';
 import { Spinner } from '../components/spinner.mjs';
 import { Select } from '../components/form.mjs';
 import { Markdown } from '../components/markdown.mjs';
+import { CopyButton } from '../components/copy.mjs';
 import { Time } from '../components/time.mjs';
 import { MemoryPanel } from './project.mjs';
 import { NoProject } from '../components/empty-state.mjs';
@@ -464,7 +465,10 @@ export function Chat({ id: routeId, navigate, onTitle }) {
         <div class="ss-transcript" ref=${transcriptRef}>
           ${messages.map((msg) =>
             msg.role === 'assistant'
-              ? html`<div class="ss-answer" key=${msg.id}><${Markdown} text=${msg.content} className="md ss-md" /></div>`
+              ? html`<div class="ss-answer" key=${msg.id}>
+                  <${Markdown} text=${msg.content} className="md ss-md" />
+                  ${msg.content ? html`<div class="ss-answer-actions"><${CopyButton} text=${msg.content} label="Copy response" /></div>` : null}
+                </div>`
               : html`<div class="ss-said" key=${msg.id}>${msg.content}</div>`
           )}
           ${streaming ? html`<div class="ss-live"><${Spinner} /> <span>Reading the project…</span></div>` : null}
