@@ -35,5 +35,8 @@
     "@types/qrcode": "1.5.5",
     "@types/ws": "8.18.1",
     "typescript": "5.9.3"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true
   }
 }
