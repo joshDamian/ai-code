@@ -7,7 +7,7 @@
 // the web client is built not to do - and a subscribe POST answered from cache would
 // never reach the server at all.
 
-const CACHE = 'bench-shell-v2';
+const CACHE = 'bench-shell-v3';
 
 // The entry points only. The rest of the module graph is cached as it is fetched, which
 // keeps this list from having to name every view the app grows.
