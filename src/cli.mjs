@@ -21,7 +21,8 @@ const HELP = `bench - a workbench for Claude sessions
   bench open                  open the app in a browser
   bench add <path> [name]     register a repository as a project (--init to git init it)
   bench projects              list projects
-  bench share [--off]         publish the server on your tailnet (tailscale serve)
+  bench share [--port <n>]    publish the server on your tailnet (tailscale serve)
+                              --force takes over a port another service holds, --off undoes it
   bench pair                  print a one-time link (and QR code) that pairs a device
   bench devices               list paired devices
   bench revoke <device-id>    unpair a device
@@ -196,10 +197,42 @@ async function serviceStatus() {
 
 // -- commands ---------------------------------------------------------------------------------
 
-function tailscaleUrl() {
+/**
+ * The address the tailnet reaches this machine at. Every service on a node shares one
+ * hostname, so the port is the only thing that distinguishes them and has to be in the URL.
+ * @param {number} httpsPort
+ */
+function tailscaleUrl(httpsPort) {
   try {
     const name = JSON.parse(execFileSync('tailscale', ['status', '--json'], { encoding: 'utf8' }))?.Self?.DNSName?.replace(/\.$/, '');
-    return name ? `https://${name}` : null;
+    if (!name) return null;
+    return `https://${name}${httpsPort === 443 ? '' : `:${httpsPort}`}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What `tailscale serve` exposes now, as { 'https:443': 'http://127.0.0.1:4317' }. Null when
+ * tailscale is missing or answers in a shape we do not know, which callers read as "cannot
+ * tell" and not as "nothing is served", so an unreadable config never blocks a share.
+ */
+function serveTargets() {
+  let raw;
+  try {
+    raw = execFileSync('tailscale', ['serve', 'status', '--json'], { encoding: 'utf8' });
+  } catch {
+    return null;
+  }
+  try {
+    /** @type {Record<string, string>} */
+    const targets = {};
+    for (const [hostPort, entry] of Object.entries(JSON.parse(raw)?.Web || {})) {
+      const root = entry?.Handlers?.['/'];
+      const target = root?.Proxy || root?.Text || root?.Path || null;
+      if (target) targets[`https:${String(hostPort).slice(String(hostPort).lastIndexOf(':') + 1)}`] = String(target);
+    }
+    return targets;
   } catch {
     return null;
   }
@@ -264,11 +297,34 @@ async function main() {
     return;
   }
   if (cmd === 'share') {
-    const args = rest.includes('--off') ? ['serve', '--https=443', 'off'] : ['serve', '--bg', '--https=443', `http://127.0.0.1:${port}`];
+    const off = rest.includes('--off');
+    const force = rest.includes('--force');
+    const at = rest.indexOf('--port');
+    const sharePort = at === -1 ? 443 : Number(rest[at + 1]);
+    if (!Number.isInteger(sharePort) || sharePort < 1 || sharePort > 65535) throw new Error('Usage: bench share [--port <n>] [--force] [--off]');
+    const backend = `http://127.0.0.1:${port}`;
+    // A port belongs to whoever claimed it. 443 is as likely to hold someone's dashboard as
+    // it is to be free, and serving there replaces that outright, so replace only if asked.
+    const existing = serveTargets()?.[`https:${sharePort}`];
+    if (existing && existing !== backend && !force) {
+      throw new Error(
+        off
+          ? `tailscale serve https:${sharePort} is ${existing}, which bench did not set up. Use --force to turn it off anyway.`
+          : `tailscale serve already points https:${sharePort} at ${existing}.\nGive bench its own port:  bench share --port 8443\nOr take that port over:   bench share --force`
+      );
+    }
+    const args = off ? ['serve', `--https=${sharePort}`, 'off'] : ['serve', '--bg', `--https=${sharePort}`, backend];
     const r = spawnSync('tailscale', args, { stdio: 'inherit' });
     if (r.error) throw new Error('tailscale is not installed. See https://tailscale.com/download');
     if (r.status !== 0) process.exit(r.status || 1);
-    if (!rest.includes('--off')) out(`Shared on your tailnet: ${tailscaleUrl() || '(see `tailscale serve status`)'}\nNext: \`bench pair\` to let a device in.`);
+    if (!off) {
+      const url = tailscaleUrl(sharePort);
+      out(
+        `Shared on your tailnet: ${url || '(see `tailscale serve status`)'}\n` +
+          (sharePort === 443 ? '' : `Devices reach it on that port, so set BENCH_PUBLIC_URL=${url} or the pairing link will point at 443.\n`) +
+          'Next: `bench pair` to let a device in.'
+      );
+    }
     return;
   }
   if (cmd === 'devices') return out(await api('GET', '/api/devices'));
