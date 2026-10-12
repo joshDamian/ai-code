@@ -2,6 +2,7 @@
 // device that is not paired.
 import { html, render, useEffect, useState, recall, remember } from './lib.mjs';
 import { useStore, refresh, connect } from './api.mjs';
+import './install.mjs';
 import { ToastContainer } from './components/toast.mjs';
 import { ConfirmHost } from './components/confirm.mjs';
 import { Dot, sessionsStatus, Icon } from './components/ui.mjs';

@@ -6,6 +6,7 @@ import { confirmAction } from '../components/confirm.mjs';
 import { Toggle } from '../components/form.mjs';
 import { Time } from '../components/time.mjs';
 import { ModelPicker, ModePicker, EffortPicker } from '../components/ui.mjs';
+import { useInstall } from '../install.mjs';
 
 const toast = (e) => showToast(e.message || String(e), 'error');
 
@@ -13,6 +14,7 @@ export function Settings() {
   return html`
     <div class="page settings">
       <header class="page-header"><h1>Settings</h1></header>
+      <${InstallApp} />
       <${Defaults} />
       <${Providers} />
       <${Devices} />
@@ -150,6 +152,34 @@ function urlBase64ToUint8Array(s) {
   const pad = '='.repeat((4 - (s.length % 4)) % 4);
   const raw = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'));
   return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+function InstallApp() {
+  const { state, install } = useInstall();
+  const [why, setWhy] = useState(null);
+  useEffect(() => {
+    // What the browser can see, for when it offers no install: the usual reasons.
+    setWhy({
+      secure: window.isSecureContext,
+      worker: !!navigator.serviceWorker?.controller,
+      browser: (navigator.userAgentData?.brands || []).map((b) => b.brand).filter((b) => !/Not.?A.?Brand/i.test(b)).join(', ') || navigator.userAgent,
+    });
+  }, []);
+  if (state === 'app') return null;
+  return html`
+    <section class="section card">
+      <h2>Install</h2>
+      ${state === 'ready'
+        ? html`<p class="muted">Add Bench to this device as an app: its own icon, its own window, no browser bar.</p>
+            <div><button class="btn" type="button" onClick=${() => install().then((o) => o === 'accepted' && showToast('Installing Bench', 'success')).catch(toast)}>Install Bench</button></div>`
+        : state === 'installed'
+          ? html`<p class="muted">Installed. Open Bench from its icon.</p>`
+          : html`<p class="muted">This browser hasn't offered to install Bench on this page. If it is already installed here, open it from its icon. Otherwise, the browser has decided not to: in Chrome that is an Incognito tab, a managed or work profile, or a browser opened inside another app.</p>
+              ${why
+                ? html`<p class="muted mono-sm">HTTPS: ${why.secure ? 'yes' : 'no'} · Service worker in control: ${why.worker ? 'yes' : 'no (reload once)'} · ${why.browser}</p>`
+                : null}`}
+    </section>
+  `;
 }
 
 function Notifications() {
