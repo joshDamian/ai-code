@@ -939,3 +939,19 @@ button.side-settings{width:100%;text-align:left}
 .viewer-text{align-self:stretch;width:min(100%,1000px);margin:0 auto;padding:var(--space-3) var(--space-4,16px);border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-1);font:12.5px/1.55 var(--font-mono);white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto}
 .viewer-note{color:var(--muted)}
 @media (max-width:640px){.viewer-body{padding:0}.viewer-frame,.viewer-text,.viewer-image{border-radius:0;box-shadow:none}.viewer-text{border:0}}
+/* ---- a task on a phone ----
+   The top bar already names the task, so its header shrinks to one line of title and
+   actions plus one line of branch, and the tabs and session pickers get slimmer:
+   the conversation gets the height back. */
+@media(max-width:860px){
+  .task-head{grid-template-columns:minmax(0,1fr) auto;gap:2px var(--space-2);padding:var(--space-2) var(--space-3)}
+  .task-title-row{grid-column:1;grid-row:1}
+  .task-title-row .title-btn{font-size:var(--text-md);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .task-actions{grid-column:2;grid-row:1 / span 2;flex-wrap:nowrap}
+  .task-actions .btn{min-height:36px;padding:var(--space-1) var(--space-3)}
+  .task-meta{grid-column:1;grid-row:2;font-size:var(--text-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .task-meta .mono-sm{font-size:var(--text-xs)}
+  .task-tab{min-height:38px;padding-top:0;padding-bottom:0}
+  .session-head{padding-top:var(--space-1);padding-bottom:var(--space-1)}
+  .session-controls .select-trigger{min-height:34px}
+}

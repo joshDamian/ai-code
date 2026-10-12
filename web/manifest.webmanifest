@@ -39,5 +39,21 @@
       "type": "image/png",
       "purpose": "monochrome"
     }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshots/desktop.png",
+      "sizes": "3248x1996",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "A Claude session on the desktop"
+    },
+    {
+      "src": "/screenshots/phone.jpg",
+      "sizes": "1080x2400",
+      "type": "image/jpeg",
+      "form_factor": "narrow",
+      "label": "A task session on a phone"
+    }
   ]
 }
