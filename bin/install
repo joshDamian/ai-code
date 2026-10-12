@@ -66,3 +66,24 @@ if [ "$SERVICE" = 1 ]; then
 else
   printf '%s\n' "Run it with \`bench serve\`, or keep it running with \`bench service install\`."
 fi
+
+# Each install is a full copy, node_modules and all, so old ones are pruned: the newest
+# few stay, to go back to by hand. A release a service definition names or a running
+# process uses is never removed, even an old one - an install whose service step failed
+# leaves the server on the release it was already running.
+KEEP="${BENCH_KEEP_RELEASES:-3}"
+IN_USE=" $(basename "$RELEASE") $(
+  for f in "$HOME/.config/systemd/user/bench.service" "$HOME/Library/LaunchAgents/com.bench.server.plist"; do
+    [ -f "$f" ] && grep -o "$RELEASE_ROOT/[0-9]*" "$f" || true
+  done
+  ps -eo args 2>/dev/null | grep -o "$RELEASE_ROOT/[0-9]*" || true
+) "
+IN_USE="$(printf '%s' "$IN_USE" | sed "s|$RELEASE_ROOT/||g" | tr '\n' ' ')"
+PRUNED=0
+for old in $(ls -1 "$RELEASE_ROOT" | grep -E '^[0-9]{14}$' | sort -r | tail -n +"$((KEEP + 1))"); do
+  case "$IN_USE" in *" $old "*) continue ;; esac
+  rm -rf "$RELEASE_ROOT/$old"
+  PRUNED=$((PRUNED + 1))
+done
+[ "$PRUNED" -eq 0 ] || printf '%s\n' "Removed $PRUNED old release(s); kept the newest $KEEP in $RELEASE_ROOT"
+exit 0
