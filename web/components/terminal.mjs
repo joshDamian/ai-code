@@ -9,7 +9,7 @@
 import { html, useEffect, useRef, useState } from '../lib.mjs';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { terminalSocketUrl } from '../api.mjs';
+import { terminalUrl } from '../api.mjs';
 
 // How long to wait before reattaching after an abnormal close - a bounced server, a
 // dropped network. A deliberate close is not retried at all: 1000 means the shell
@@ -45,7 +45,10 @@ const STATUS = {
   ended: ['the shell exited', 'warn'],
 };
 
-export function TerminalPane({ taskId, target }) {
+// `query` names the shell: {task}, {project}, or {session} for `claude --resume`.
+export function TerminalPane({ query }) {
+  const key = new URLSearchParams(query).toString();
+  const [nonce, setNonce] = useState(0);
   const hostRef = useRef(null);
   const [state, setState] = useState('connecting');
 
@@ -87,7 +90,7 @@ export function TerminalPane({ taskId, target }) {
     };
 
     function connect() {
-      ws = new WebSocket(terminalSocketUrl(taskId, target));
+      ws = new WebSocket(terminalUrl(query));
       // Sent on open rather than before it: the server's session may be one that
       // outlived this tab at a size the tab it was opened from chose, and the new
       // reader is the one that decides how wide the shell is now.
@@ -134,7 +137,7 @@ export function TerminalPane({ taskId, target }) {
       if (ws) ws.close();
       term.dispose();
     };
-  }, [taskId, target]);
+  }, [key, nonce]);
 
   const [text, tone] = STATUS[state];
 
@@ -142,6 +145,7 @@ export function TerminalPane({ taskId, target }) {
     <div class="terminal-frame">
       <div class="terminal-bar">
         <span class="terminal-state ${tone}">${text}</span>
+        ${state === 'ended' ? html`<button class="btn sm secondary" type="button" onClick=${() => { setState('connecting'); setNonce((n) => n + 1); }}>Start again</button>` : null}
       </div>
       <div class="terminal-box">
         <div class="terminal-host" ref=${hostRef}></div>

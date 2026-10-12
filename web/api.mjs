@@ -1,275 +1,266 @@
-// Thin fetch wrapper. Every call goes through `request`, which normalizes
-// JSON bodies, parses JSON responses, and turns non-2xx responses into
-// thrown Errors carrying the server's {error} message.
+// @ts-check
+// The client's view of the server: JSON calls, and one WebSocket that keeps a shared
+// store current. Views read the store with useStore() and call `api` to change things;
+// what changed comes back down the socket, so a write is never applied twice.
+import { useEffect, useState, useRef } from './lib.mjs';
 
-import { authHeaders, withToken, reportUnauthorized } from './auth.mjs';
+/** @typedef {import('../src/contract.d.mts').Project} Project */
+/** @typedef {import('../src/contract.d.mts').Task} Task */
+/** @typedef {import('../src/contract.d.mts').Session} Session */
+/** @typedef {import('../src/contract.d.mts').Approval} Approval */
+/** @typedef {import('../src/contract.d.mts').SessionEvent} SessionEvent */
+/** @typedef {import('../src/contract.d.mts').ServerMessage} ServerMessage */
 
-// Whether the server is there, reported as an event on every transition.
-//
-// Every call in the app goes through `request`, so the answer is already known here -
-// and the app needs it: a dashboard loaded from a service-worker cache outlives the
-// process that served it, and without this it renders one failed request per view with
-// nothing to say about why. An event rather than a return value, because a dozen calls
-// are in flight at once and all of them are answered by the same screen.
-//
-// On transitions only: the overview poll runs every three seconds and a browser that
-// re-rendered the shell on each one would never settle.
-let last = '';
-function reportConnectivity(up, supervisor = false) {
-  const key = `${up}:${supervisor}`;
-  if (key === last) return;
-  last = key;
-  window.dispatchEvent(new CustomEvent('ai-code:connectivity', { detail: { up, supervisor } }));
-}
-
-async function request(path, opts = {}) {
-  const init = { ...opts };
-  // Empty on desktop, where the server exempts loopback and no token is needed.
-  init.headers = { ...authHeaders(), ...(init.headers || {}) };
-  if (init.body !== undefined && typeof init.body !== 'string') {
-    init.body = JSON.stringify(init.body);
-    init.headers = { 'content-type': 'application/json', ...init.headers };
+/** @param {string} path @param {{method?:string, body?:unknown}} [o] */
+async function request(path, o = {}) {
+  /** @type {RequestInit} */
+  const init = { method: o.method || 'GET', credentials: 'same-origin', headers: {} };
+  if (o.body !== undefined) {
+    init.body = JSON.stringify(o.body);
+    init.headers = { 'content-type': 'application/json' };
   }
-
   let res;
   try {
     res = await fetch(path, init);
   } catch (e) {
-    reportConnectivity(false);
-    throw new Error(`Network error: ${e.message}`);
+    throw new Error(`Network error: ${/** @type {Error} */ (e).message}`);
   }
-
-  // The supervisor holds the port while the server is down, and it answers 404 to
-  // everything under /api - a 404 that is not "no such route" but "no server". The
-  // header it puts on every response is the only way to tell the two apart, and
-  // reading it before the status is what keeps the stopped page from being read as a
-  // server that is up and simply missing a route.
-  if (res.headers.get('x-ai-code-supervisor')) reportConnectivity(false, true);
-  else reportConnectivity(true, false);
-
   const text = await res.text();
   let data = null;
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      data = text;
-    }
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
   }
-
-  if (!res.ok) {
-    // A 401 is not a failure of this call, it is the absence of a token - and every
-    // caller would report it the same unhelpful way. The app listens for this and
-    // shows the pairing screen instead.
-    if (res.status === 401) reportUnauthorized();
-    const msg = (data && typeof data === 'object' && data.error) || `Request failed (${res.status})`;
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
-  }
+  if (res.status === 401) set({ unauthorized: true });
+  if (!res.ok) throw Object.assign(new Error((data && data.error) || `Request failed (${res.status})`), { status: res.status, data });
   return data;
 }
 
+const get = (/** @type {string} */ p) => request(p);
+const post = (/** @type {string} */ p, /** @type {unknown} */ body = {}) => request(p, { method: 'POST', body });
+const patch = (/** @type {string} */ p, /** @type {unknown} */ body) => request(p, { method: 'PATCH', body });
+const del = (/** @type {string} */ p) => request(p, { method: 'DELETE' });
+const enc = encodeURIComponent;
+
 export const api = {
-  overview: () => request('/api/overview'),
-  usage: (period = '7d', projectId = null) => request(`/api/usage?period=${encodeURIComponent(period)}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`),
+  state: () => get('/api/state'),
+  addProject: (/** @type {{path:string, name?:string, init?:boolean}} */ b) => post('/api/projects', b),
+  renameProject: (/** @type {string} */ id, /** @type {string} */ name) => patch(`/api/projects/${id}`, { name }),
+  removeProject: (/** @type {string} */ id) => del(`/api/projects/${id}`),
+  git: (/** @type {string} */ id) => get(`/api/projects/${id}/git`),
+  checkoutDiff: (/** @type {string} */ id) => get(`/api/projects/${id}/diff`),
+  fetch: (/** @type {string} */ id) => post(`/api/projects/${id}/fetch`),
+  pull: (/** @type {string} */ id) => post(`/api/projects/${id}/pull`),
+  push: (/** @type {string} */ id) => post(`/api/projects/${id}/push`),
+  checkout: (/** @type {string} */ id, /** @type {{branch:string, create?:boolean, from?:string, stash?:boolean}} */ b) => post(`/api/projects/${id}/checkout`, b),
+  commit: (/** @type {string} */ id, /** @type {string} */ message) => post(`/api/projects/${id}/commit`, { message }),
+  browse: (/** @type {string|undefined} */ path) => get(`/api/fs${path ? `?path=${enc(path)}` : ''}`),
 
-  projects: () => request('/api/projects'),
-  createProject: (name, path) => request('/api/projects', { method: 'POST', body: { name, path } }),
-  // One project with its spec, its waiting drafts and its decision log. The panel
-  // renders all four, so they arrive together rather than a round trip apart.
-  project: (id) => request(`/api/projects/${id}`),
+  createTask: (/** @type {any} */ b) => post('/api/tasks', b),
+  task: (/** @type {string} */ id) => get(`/api/tasks/${id}`),
+  renameTask: (/** @type {string} */ id, /** @type {string} */ title) => patch(`/api/tasks/${id}`, { title }),
+  taskGit: (/** @type {string} */ id) => get(`/api/tasks/${id}/git`),
+  taskDiff: (/** @type {string} */ id) => get(`/api/tasks/${id}/diff`),
+  commitTask: (/** @type {string} */ id, /** @type {string} */ message) => post(`/api/tasks/${id}/commit`, { message }),
+  updateTask: (/** @type {string} */ id) => post(`/api/tasks/${id}/update`),
+  abortMerge: (/** @type {string} */ id) => post(`/api/tasks/${id}/abort-merge`),
+  mergeTask: (/** @type {string} */ id, /** @type {{strategy?:string, message?:string, cleanup?:boolean}} */ b) => post(`/api/tasks/${id}/merge`, b),
+  pushTask: (/** @type {string} */ id) => post(`/api/tasks/${id}/push`),
+  pullRequest: (/** @type {string} */ id, /** @type {{title?:string, body?:string}} */ b) => post(`/api/tasks/${id}/pr`, b),
+  closeTask: (/** @type {string} */ id, /** @type {{deleteBranch?:boolean}} */ b) => post(`/api/tasks/${id}/close`, b),
+  reopenTask: (/** @type {string} */ id) => post(`/api/tasks/${id}/reopen`),
 
-  // Intake: an idea note becomes a project. The drafting turn is a chat turn, so
-  // the reply names the session to open - the conversation is where the draft is
-  // watched, and the project it belongs to is where it is approved.
-  startIntake: (idea, name) => request('/api/intake', { method: 'POST', body: { idea, name } }),
+  createSession: (/** @type {any} */ b) => post('/api/sessions', b),
+  session: (/** @type {string} */ id) => get(`/api/sessions/${id}`),
+  events: (/** @type {string} */ id, /** @type {number} */ before) => get(`/api/sessions/${id}/events?before=${before}`),
+  send: (/** @type {string} */ id, /** @type {string} */ text, /** @type {{media_type:string, data:string}[]} */ images = []) => post(`/api/sessions/${id}/messages`, { text, images }),
+  interrupt: (/** @type {string} */ id) => post(`/api/sessions/${id}/interrupt`),
+  updateSession: (/** @type {string} */ id, /** @type {any} */ b) => patch(`/api/sessions/${id}`, b),
+  archiveSession: (/** @type {string} */ id, archived = true) => post(`/api/sessions/${id}/archive`, { archived }),
+  deleteSession: (/** @type {string} */ id) => del(`/api/sessions/${id}`),
+  answer: (/** @type {string} */ id, /** @type {import('../src/contract.d.mts').ApprovalAnswer} */ a) => post(`/api/approvals/${id}`, a),
 
-  // The spec: what the project is for. A POST proposes a change and it waits; the
-  // two verbs below are the only writes that move it.
-  projectSpec: (id) => request(`/api/projects/${id}/spec`),
-  proposeSpec: (id, spec) => request(`/api/projects/${id}/spec`, { method: 'POST', body: { spec } }),
-  approveSpec: (id, path) => request(`/api/projects/${id}/spec/approve`, { method: 'POST', body: { path } }),
-  rejectSpec: (id) => request(`/api/projects/${id}/spec/reject`, { method: 'POST' }),
-
-  drafts: (id) => request(`/api/projects/${id}/drafts`),
-  // `engine` is the approver's choice of how the task runs; omitted, the draft's own.
-  approveDraft: (id, draftId, engine = null) =>
-    request(`/api/projects/${id}/drafts/${draftId}/approve`, { method: 'POST', body: engine ? { engine } : {} }),
-  dropDraft: (id, draftId) => request(`/api/projects/${id}/drafts/${draftId}`, { method: 'DELETE' }),
-  // Drafts a fresh batch against the stored spec and the open task list. The reply
-  // names the conversation the pass answers in.
-  proposeTasks: (id) => request(`/api/projects/${id}/proposals`, { method: 'POST' }),
-  // Infers a spec from the existing codebase. The reply names the conversation it
-  // answers in, and the draft lands on the project page.
-  inferSpec: (id) => request(`/api/projects/${id}/infer-spec`, { method: 'POST' }),
-
-  decisions: (id, state) => request(`/api/projects/${id}/decisions${state ? `?state=${encodeURIComponent(state)}` : ''}`),
-  approveDecision: (id) => request(`/api/decisions/${id}/approve`, { method: 'POST' }),
-  rejectDecision: (id) => request(`/api/decisions/${id}/reject`, { method: 'POST' }),
-  // The retry for a decision pass that failed, and how a task completed before the
-  // log existed is asked for its entries.
-  draftDecisions: (id) => request(`/api/tasks/${id}/decisions`, { method: 'POST' }),
-
-  tasks: (params = {}) => {
-    const qs = new URLSearchParams();
-    if (params.state) qs.set('state', params.state);
-    if (params.projectId) qs.set('projectId', params.projectId);
-    const s = qs.toString();
-    return request(`/api/tasks${s ? `?${s}` : ''}`);
-  },
-  // `parentId` is optional: a task created without one is a task with no parent,
-  // which is what every task was before the field existed.
-  // `opts` says how it runs: `engine` ('pipeline' or 'session'), `modelId`, `planFirst`,
-  // or `variants` - two or more {engine, modelId} - for a side-by-side comparison,
-  // whose reply is `{group, tasks}` instead of a task.
-  createTask: (projectId, title, parentId, opts = {}) => request('/api/tasks', { method: 'POST', body: { projectId, title, parentId, ...opts } }),
-  attempts: (group) => request(`/api/attempts/${encodeURIComponent(group)}`),
-  pickAttempt: (group, taskId) => request(`/api/attempts/${encodeURIComponent(group)}/pick`, { method: 'POST', body: { taskId } }),
-  scoreboard: () => request('/api/scoreboard'),
-  taskShow: (id) => request(`/api/tasks/${id}/show`),
-  // Without `before` this returns the newest window; with it, the window ending
-  // just before that event id. Callers that render the result must bound it.
-  taskActivity: (id, opts = {}) => {
-    const q = new URLSearchParams();
-    if (opts.before) q.set('before', String(opts.before));
-    if (opts.limit) q.set('limit', String(opts.limit));
-    const s = q.toString();
-    return request(`/api/tasks/${id}/activity${s ? `?${s}` : ''}`);
-  },
-  taskPlan: (id) => request(`/api/tasks/${id}/plan`, { method: 'POST' }),
-  taskApprove: (id) => request(`/api/tasks/${id}/approve`, { method: 'POST' }),
-  taskExecute: (id) => request(`/api/tasks/${id}/execute`, { method: 'POST' }),
-  taskReview: (id) => request(`/api/tasks/${id}/review`, { method: 'POST' }),
-  taskRepair: (id) => request(`/api/tasks/${id}/repair`, { method: 'POST' }),
-  taskReject: (id) => request(`/api/tasks/${id}/reject`, { method: 'POST' }),
-  taskReplan: (id) => request(`/api/tasks/${id}/replan`, { method: 'POST' }),
-  taskRetry: (id) => request(`/api/tasks/${id}/retry`, { method: 'POST' }),
-  taskRefine: (id, feedback) => request(`/api/tasks/${id}/refine`, { method: 'POST', body: { feedback } }),
-  // A task's parent, set or cleared. `null` is the clear, so an accidental link is
-  // removable with the same call that made it.
-  taskLink: (id, parentId) => request(`/api/tasks/${id}/link`, { method: 'POST', body: { parentId } }),
-  // Re-opens a COMPLETE task with a human's instruction. The call is blocking: the
-  // repair, its tests and the verification review all run before it answers.
-  taskFeedback: (id, text) => request(`/api/tasks/${id}/feedback`, { method: 'POST', body: { text } }),
-  // The decision gate. `discuss` answers a comment and leaves the task where it is;
-  // `resolve` is the instruction that starts the repair, and it blocks for the whole
-  // of that cycle the way feedback does.
-  taskDiscuss: (id, text) => request(`/api/tasks/${id}/discuss`, { method: 'POST', body: { text } }),
-  taskResolve: (id, { option = null, text = '' } = {}) => request(`/api/tasks/${id}/resolve`, { method: 'POST', body: { option, text } }),
-  taskCancel: (id) => request(`/api/tasks/${id}/cancel`, { method: 'POST' }),
-  taskClose: (id) => request(`/api/tasks/${id}/close`, { method: 'POST' }),
-  // `to` is a query parameter because this is a read: which branch the port would
-  // land on, answered without materializing anything.
-  taskDiff: (id, to) => request(`/api/tasks/${id}/diff${to ? `?to=${encodeURIComponent(to)}` : ''}`),
-  taskPort: (id, opts = {}) => request(`/api/tasks/${id}/port`, { method: 'POST', body: opts }),
-  updatePlan: (id, plan) => request(`/api/tasks/${id}/plan`, { method: 'PATCH', body: { plan } }),
-  // The per-task planning-model preference. `null` clears it back to automatic.
-  taskSetPlanModel: (id, modelId) => request(`/api/tasks/${id}/plan`, { method: 'PATCH', body: { plan_model: modelId } }),
-
-  providers: () => request('/api/providers'),
-  updateProvider: (id, body) => request(`/api/providers/${id}`, { method: 'PATCH', body }),
-  testProvider: (id, modelId) => request(`/api/providers/${id}/test`, { method: 'POST', body: { modelId } }),
-  // Model ids are namespaced with whatever the provider calls the model, and for
-  // OpenRouter that includes a slash (`openrouter:anthropic/claude-opus-5`). Encoded,
-  // it survives as the one path segment the route matches; unencoded, the server sees
-  // a segment it has no route for and answers 404.
-  updateModel: (id, body) => request(`/api/models/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
-
-  routing: () => request('/api/routing'),
-  saveRouting: (policies) => request('/api/routing', { method: 'PUT', body: policies }),
-  routingPreview: (role, strategy) => request(`/api/routing/preview?role=${encodeURIComponent(role)}&strategy=${encodeURIComponent(strategy)}`),
-
-  runs: (taskId) => request(`/api/runs${taskId ? `?taskId=${encodeURIComponent(taskId)}` : ''}`),
-  projectRuns: (projectId) => request(`/api/runs?projectId=${encodeURIComponent(projectId)}`),
-  runEvents: (id) => request(`/api/runs/${id}/events`),
-
-  doctor: () => request('/api/doctor'),
-
-  // The server's own control surface. `shutdown` answers before it stops - a 202 and
-  // then the process goes - so nothing here waits on the server's death; the
-  // connectivity event above is what reports it.
-  serverStatus: () => request('/api/server/status'),
-  serverShutdown: () => request('/api/server/shutdown', { method: 'POST' }),
-  // The supervisor, when one is holding the port. With no supervisor these are 404s
-  // from the server, which callers read as "there is nothing to start it with".
-  supervisorStatus: () => request('/api/supervisor/status'),
-  supervisorStart: () => request('/api/supervisor/start', { method: 'POST' }),
-
-  automations: () => request('/api/automations'),
-  updateAutomation: (id, body) => request(`/api/automations/${id}`, { method: 'PATCH', body }),
-
-  chatSessions: (projectId) => request(`/api/chat/sessions${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
-  // `taskId` scopes the conversation to a task, so the agent answering it is handed
-  // that task's plan and review. Omitted, this is the project-wide chat it has
-  // always been.
-  createChatSession: (projectId, title, taskId) => request('/api/chat/sessions', { method: 'POST', body: { projectId, title, taskId } }),
-  chatSession: (id) => request(`/api/chat/sessions/${id}`),
-  sendChatMessage: (sessionId, message) => request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', body: { message } }),
-
-  // Supervised sessions. `message` is one turn, and the reply is the run's job
-  // rather than its result - the turn is read back through the stream, for the same
-  // reason a chat turn is.
-  sessions: (projectId) => request(`/api/sessions${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
-  createSession: (projectId, name, { providerId = null, modelId = null, mode } = {}) =>
-    request('/api/sessions', { method: 'POST', body: { projectId, name, providerId, modelId, ...(mode ? { mode } : {}) } }),
-  sessionSpend: () => request('/api/session-spend'),
-  session: (id) => request(`/api/sessions/${id}`),
-  updateSession: (id, body) => request(`/api/sessions/${id}`, { method: 'PATCH', body }),
-  archiveSession: (id) => request(`/api/sessions/${id}/archive`, { method: 'POST' }),
-  stopSession: (id) => request(`/api/sessions/${id}/cancel`, { method: 'POST' }),
-  resumeSession: (id) => request(`/api/sessions/${id}/resume`, { method: 'POST' }),
-  dismissSessionNudge: (id) => request(`/api/sessions/${id}/nudge`, { method: 'POST' }),
-  // `attachments` are `{name, type, data}` with `data` a base64 data URL, inlined in
-  // the one request so a message and its files arrive - or are refused - together.
-  sendSessionMessage: (id, message, attachments = []) =>
-    request(`/api/sessions/${id}/messages`, { method: 'POST', body: attachments.length ? { message, attachments } : { message } }),
-  // `kind` is `attachments` for what the person sent, `outputs` for what the agent shared back.
-  sessionAttachmentUrl: (id, runId, name, kind = 'attachments') =>
-    `/api/sessions/${encodeURIComponent(id)}/${kind}/${encodeURIComponent(runId)}/${encodeURIComponent(name)}`,
-  draftSessionTask: (id) => request(`/api/sessions/${id}/draft-task`, { method: 'POST' }),
-  // `allow` is the only action that grants; the server reads every other word as a
-  // denial, so this is a verb and not a boolean.
-  // Every prompt waiting on the machine, for the app-wide approval card.
-  pendingPermissions: () => request('/api/permissions'),
-  // `answers` only for a question: question text -> the chosen label(s).
-  answerSessionPermission: (sessionId, reqId, action, answers = null) =>
-    request(`/api/sessions/${sessionId}/permissions/${reqId}`, { method: 'POST', body: answers ? { action, answers } : { action } }),
-
-  // Web Push. `pushKey` answers 503 when the server has no web-push installed, which
-  // the notifier treats as "no background push on this install" and nothing more.
-  pushKey: () => request('/api/push/key'),
-  pushSubscribe: (subscription) => request('/api/push/subscribe', { method: 'POST', body: subscription }),
-  pushUnsubscribe: (endpoint) => request('/api/push/unsubscribe', { method: 'POST', body: { endpoint } }),
+  providers: () => get('/api/providers'),
+  updateProvider: (/** @type {string} */ id, /** @type {any} */ b) => patch(`/api/providers/${id}`, b),
+  updateModel: (/** @type {string} */ id, /** @type {any} */ b) => patch(`/api/models/${enc(id)}`, b),
+  testProvider: (/** @type {string} */ id, /** @type {string|null} */ modelId) => post(`/api/providers/${id}/test`, { modelId }),
+  setDefaults: (/** @type {any} */ b) => request('/api/defaults', { method: 'PUT', body: b }),
+  usage: () => get('/api/usage'),
+  doctor: () => get('/api/doctor'),
+  devices: () => get('/api/devices'),
+  revokeDevice: (/** @type {string} */ id) => del(`/api/devices/${id}`),
+  pairing: () => post('/api/pairing'),
+  pair: (/** @type {string} */ code, /** @type {string} */ name) => post('/api/pair', { code, name }),
+  pushKey: () => get('/api/push/key'),
+  pushSubscribe: (/** @type {any} */ sub) => post('/api/push/subscribe', sub),
+  pushUnsubscribe: (/** @type {string} */ endpoint) => post('/api/push/unsubscribe', { endpoint }),
+  status: () => get('/api/server/status'),
 };
 
-// The three URLs below carry the token in the query string, because EventSource and
-// the WebSocket constructor both have no way to set a header. It is the same secret
-// the `Authorization` header carries, and the server reads it in exactly these cases.
-
-export function taskStreamUrl(id) {
-  return withToken(`/api/tasks/${id}/stream`);
-}
-
-export function chatStreamUrl(id) {
-  return withToken(`/api/chat/sessions/${id}/stream`);
-}
-
-export function sessionStreamUrl(id) {
-  return withToken(`/api/sessions/${id}/stream`);
-}
-
-// The app-wide notification stream: run completions, for the in-page notifier.
-export function notificationsUrl() {
-  return withToken('/api/notifications');
-}
-
-// The one URL here that is not an http path: the terminal is a WebSocket, because
-// keystrokes go up it as well as output coming down. Absolute rather than relative
-// because the WebSocket constructor has no notion of a base - and the scheme is
-// derived from the page's, so a dashboard served over TLS upgrades to wss rather
-// than being refused as mixed content.
-export function terminalSocketUrl(taskId, target) {
+/** @param {URLSearchParams | Record<string,string>} q */
+export function terminalUrl(q) {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return withToken(`${scheme}//${location.host}/api/tasks/${taskId}/terminal?target=${encodeURIComponent(target)}`);
+  return `${scheme}//${location.host}/api/terminal?${new URLSearchParams(q)}`;
 }
+
+// -- the store ----------------------------------------------------------------------------
+
+/**
+ * @typedef {{
+ *   ready: boolean, unauthorized: boolean, connected: boolean, error: string|null,
+ *   projects: Project[], tasks: Task[], sessions: Session[], approvals: Approval[],
+ *   providers: any[], defaults: {providerId:string, modelId:string|null, mode:string},
+ *   me: {local:boolean, device:{id:string,name:string}|null} | null, push: string|null,
+ *   gitTick: Record<string, number>
+ * }} State
+ */
+
+/** @type {State} */
+let state = {
+  ready: false,
+  unauthorized: false,
+  connected: false,
+  error: null,
+  projects: [],
+  tasks: [],
+  sessions: [],
+  approvals: [],
+  providers: [],
+  defaults: { providerId: '', modelId: null, mode: 'default' },
+  me: null,
+  push: null,
+  gitTick: {},
+};
+/** @type {Set<() => void>} */
+const listeners = new Set();
+
+/** @param {Partial<State>} patch */
+function set(patch) {
+  state = { ...state, ...patch };
+  for (const l of listeners) l();
+}
+
+export const getState = () => state;
+
+/**
+ * The part of the store a component reads. It re-renders when that part changes.
+ * @template T @param {(s: State) => T} select @returns {T}
+ */
+export function useStore(select) {
+  const [, force] = useState(0);
+  const sel = useRef(select);
+  sel.current = select;
+  const last = useRef(select(state));
+  last.current = select(state);
+  useEffect(() => {
+    const check = () => {
+      const next = sel.current(state);
+      if (next !== last.current) {
+        last.current = next;
+        force((n) => n + 1);
+      }
+    };
+    listeners.add(check);
+    return () => {
+      listeners.delete(check);
+    };
+  }, []);
+  return last.current;
+}
+
+/** @template {{id:string}} T @param {T[]} list @param {T} item */
+const upsert = (list, item) => {
+  const i = list.findIndex((x) => x.id === item.id);
+  if (i < 0) return [item, ...list];
+  const next = list.slice();
+  next[i] = item;
+  return next;
+};
+
+/** @param {string} projectId */
+export const bumpGit = (projectId) => set({ gitTick: { ...state.gitTick, [projectId]: (state.gitTick[projectId] || 0) + 1 } });
+
+export async function refresh() {
+  try {
+    const s = await api.state();
+    set({ ready: true, unauthorized: false, error: null, projects: s.projects, tasks: s.tasks, sessions: s.sessions, approvals: s.approvals, providers: s.providers, defaults: s.defaults, me: s.me, push: s.push });
+  } catch (e) {
+    const err = /** @type {any} */ (e);
+    set({ ready: true, error: err.status === 401 ? null : err.message, unauthorized: err.status === 401 });
+  }
+}
+
+// Messages for one session: transcript events and streaming text. A session pane
+// subscribes while it is open, and the server only sends what is watched.
+/** @type {Map<string, Set<(m: ServerMessage) => void>>} */
+const watchers = new Map();
+/** @type {WebSocket|null} */
+let socket = null;
+
+function sendWatch() {
+  if (socket?.readyState === 1) socket.send(JSON.stringify({ type: 'watch', ids: [...watchers.keys()] }));
+}
+
+/** @param {string} sessionId @param {(m: ServerMessage) => void} fn */
+export function watchSession(sessionId, fn) {
+  let set = watchers.get(sessionId);
+  if (!set) watchers.set(sessionId, (set = new Set()));
+  set.add(fn);
+  sendWatch();
+  return () => {
+    set.delete(fn);
+    if (!set.size) watchers.delete(sessionId);
+    sendWatch();
+  };
+}
+
+/** @param {ServerMessage} m */
+function onMessage(m) {
+  if (m.type === 'hello') set({ sessions: m.sessions, approvals: m.approvals });
+  else if (m.type === 'session') set({ sessions: upsert(state.sessions, m.session) });
+  else if (m.type === 'session-removed') set({ sessions: state.sessions.filter((s) => s.id !== m.id) });
+  else if (m.type === 'task') set({ tasks: upsert(state.tasks, m.task) });
+  else if (m.type === 'approval') set({ approvals: [...state.approvals.filter((a) => a.id !== m.approval.id), m.approval] });
+  else if (m.type === 'approval-done') set({ approvals: state.approvals.filter((a) => a.id !== m.id) });
+  else if (m.type === 'git') bumpGit(m.project_id);
+  else if (m.type === 'event') for (const fn of watchers.get(m.event.session_id) || []) fn(m);
+  else if (m.type === 'delta') for (const fn of watchers.get(m.session_id) || []) fn(m);
+}
+
+let retry = 0;
+export function connect() {
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${scheme}//${location.host}/api/ws`);
+  socket = ws;
+  ws.onopen = () => {
+    retry = 0;
+    set({ connected: true });
+    sendWatch();
+    // Whatever happened while disconnected is read fresh, and open panes reload.
+    refresh();
+    window.dispatchEvent(new Event('ai-code:reconnected'));
+  };
+  ws.onmessage = (e) => {
+    try {
+      onMessage(JSON.parse(e.data));
+    } catch {
+      /* a frame this cannot read is skipped */
+    }
+  };
+  ws.onclose = () => {
+    if (socket !== ws) return;
+    set({ connected: false });
+    if (state.unauthorized) return;
+    retry = Math.min(retry + 1, 6);
+    setTimeout(connect, 500 * 2 ** retry);
+  };
+}
+
+// A phone that wakes from sleep has a socket that died silently; a ping finds out.
+setInterval(() => {
+  if (socket?.readyState === 1) socket.send(JSON.stringify({ type: 'ping' }));
+}, 25000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && socket && socket.readyState > 1) connect();
+});

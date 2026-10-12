@@ -1,439 +1,164 @@
-// Router, global app shell, Preact mount point, global keyboard shortcuts.
-import { html, render, Fragment, useState, useEffect, useRef, useCallback, remember, conversationsHref, CONVERSATIONS_PLACE, currentProject, scopedHref } from './lib.mjs';
-import { Layout } from './components/layout.mjs';
-import { ShortcutLegend } from './components/kbd.mjs';
-import { CommandPalette } from './components/command-palette.mjs';
+// The shell: routing, the sidebar of projects and their work, and the gates for a
+// device that is not paired.
+import { html, render, useEffect, useState, recall, remember } from './lib.mjs';
+import { useStore, refresh, connect } from './api.mjs';
+import { ToastContainer } from './components/toast.mjs';
 import { ConfirmHost } from './components/confirm.mjs';
-import { ApprovalDock } from './components/approvals.mjs';
-import { requestPermission, notifyRunEnd } from './components/notify.mjs';
-import { Overview } from './views/overview.mjs';
-import { Projects } from './views/projects.mjs';
-import { Project } from './views/project.mjs';
-import { Tasks } from './views/tasks.mjs';
-import { TaskDetail } from './views/task-detail.mjs';
-import { Compare } from './views/compare.mjs';
-import { Chat } from './views/chat.mjs';
-import { Sessions } from './views/sessions.mjs';
-import { Providers } from './views/providers.mjs';
-import { Routing } from './views/routing.mjs';
-import { Runs } from './views/runs.mjs';
-import { Usage } from './views/usage.mjs';
-import { Settings, TokenGate } from './views/settings.mjs';
-import { ServerPanel } from './components/server-panel.mjs';
-import { notificationsUrl } from './api.mjs';
+import { Dot, sessionsStatus, Icon } from './components/ui.mjs';
+import { Home } from './views/home.mjs';
+import { ProjectView } from './views/project.mjs';
+import { TaskView } from './views/task.mjs';
+import { SessionPane } from './views/session.mjs';
+import { Settings } from './views/settings.mjs';
+import { Pair, Unpaired } from './views/pair.mjs';
 
-// `c` and `s` both reach conversations - c was chat's, and chat is one of them now -
-// and return to where the person last was in them, as the sidebar link does.
-const GO = { o: '#/overview', t: '#/tasks', c: conversationsHref, s: conversationsHref, p: '#/providers', r: '#/runs' };
-
-function parseHash() {
-  const hash = location.hash.replace(/^#\/?/, '');
-  let parts = hash.split('/').filter(Boolean);
-  // A project workspace: `p/<id>` in front of an ordinary route scopes it to one
-  // project. Its own pages are the project (bare `p/<id>`) and its tasks,
-  // conversations, runs and usage; a detail page opened from one keeps the prefix.
+// #/                              projects
+// #/p/:pid                        a project
+// #/p/:pid/s/:sid                 a session in the project's checkout
+// #/p/:pid/t/:tid[/s/:sid]        a task, on one of its sessions
+// #/p/:pid/t/:tid/changes         a task's diff
+// #/p/:pid/t/:tid/terminal        a shell in its worktree
+// #/settings, #/pair/:code
+function parse() {
+  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === 'pair') return { view: 'pair', code: parts[1] };
+  if (parts[0] === 'settings') return { view: 'settings' };
   if (parts[0] === 'p' && parts[1]) {
-    const project = decodeURIComponent(parts[1]);
-    parts = parts.slice(2);
-    if (!parts.length) return { view: 'project', id: project, project };
-    if (parts[0] === 'conversations') parts[0] = 'sessions';
-    return { ...routeOf(parts), project };
+    const r = { view: 'project', projectId: parts[1] };
+    if (parts[2] === 's' && parts[3]) return { ...r, view: 'session', sessionId: parts[3] };
+    if (parts[2] === 't' && parts[3]) {
+      const t = { ...r, view: 'task', taskId: parts[3] };
+      if (parts[4] === 's' && parts[5]) return { ...t, sessionId: parts[5] };
+      if (parts[4] === 'changes' || parts[4] === 'terminal') return { ...t, tab: parts[4] };
+      return t;
+    }
+    return r;
   }
-  if (!parts.length) return { view: 'overview' };
-  return routeOf(parts);
+  return { view: 'home' };
 }
 
-function routeOf(parts) {
-  if (parts[0] === 'tasks' && parts[1]) return { view: 'task-detail', id: parts[1] };
-  if (parts[0] === 'compare' && parts[1]) return { view: 'compare', id: parts[1] };
-  if (parts[0] === 'chat' && parts[1]) return { view: 'chat-detail', id: parts[1] };
-  if (parts[0] === 'sessions' && parts[1]) return { view: 'session-detail', id: parts[1] };
-  // The project page now lives in its workspace; an old link lands there.
-  if (parts[0] === 'project' && parts[1]) return { view: 'project-redirect', id: parts[1] };
-  // One run's detail, opened over the list: what a link to a particular run points at.
-  if (parts[0] === 'runs' && parts[1]) return { view: 'runs', id: parts[1] };
-  // The add form opened on arrival, for the links that exist to add a project.
-  if (parts[0] === 'projects' && parts[1] === 'new') return { view: 'projects', intent: 'new' };
-  return { view: parts[0] };
+function useRoute() {
+  const [route, setRoute] = useState(parse);
+  useEffect(() => {
+    const on = () => setRoute(parse());
+    window.addEventListener('hashchange', on);
+    // A tapped notification asks an open window to go somewhere.
+    navigator.serviceWorker?.addEventListener('message', (e) => {
+      if (e.data?.type === 'navigate' && e.data.url) location.hash = new URL(e.data.url, location.origin).hash;
+    });
+    return () => window.removeEventListener('hashchange', on);
+  }, []);
+  return route;
 }
 
-// The views a project workspace can show. See App.
-const WORKSPACE_VIEWS = new Set(['project', 'tasks', 'task-detail', 'compare', 'sessions', 'session-detail', 'chat-detail', 'runs', 'usage']);
+function Sidebar({ route, onNavigate }) {
+  const projects = useStore((s) => s.projects);
+  const tasks = useStore((s) => s.tasks);
+  const sessions = useStore((s) => s.sessions);
+  const approvals = useStore((s) => s.approvals);
+  const connected = useStore((s) => s.connected);
+  const [folded, setFolded] = useState(() => recall('ai-code:folded', {}));
+  const fold = (id) => {
+    const next = { ...folded, [id]: !folded[id] };
+    setFolded(next);
+    remember('ai-code:folded', next);
+  };
 
-function navigate(hash) {
-  if (location.hash === hash) {
-    window.dispatchEvent(new HashChangeEvent('hashchange'));
-  } else {
-    location.hash = hash;
-  }
+  return html`
+    <nav class="sidebar" aria-label="Projects">
+      <div class="side-top">
+        <a class="logo" href="#/" onClick=${onNavigate}><span class="logo-mark">◆</span> AI Code</a>
+        ${!connected ? html`<span class="badge badge-warn" title="Reconnecting to the server">offline</span>` : null}
+      </div>
+      ${approvals.length ? html`<a class="side-waiting" href="#/" onClick=${onNavigate}><${Dot} status="waiting" /> ${approvals.length} waiting on you</a>` : null}
+      <div class="side-projects">
+        ${projects.map((p) => {
+          const pt = tasks.filter((t) => t.project_id === p.id && t.state === 'active');
+          const ps = sessions.filter((s) => s.project_id === p.id && !s.task_id);
+          const open = !folded[p.id];
+          return html`
+            <div class="side-project" key=${p.id}>
+              <div class="side-project-head ${route.projectId === p.id && route.view === 'project' ? 'active' : ''}">
+                <button class="fold" type="button" aria-label=${open ? 'Collapse' : 'Expand'} onClick=${() => fold(p.id)}>${open ? '▾' : '▸'}</button>
+                <a href=${`#/p/${p.id}`} onClick=${onNavigate}>${p.name}</a>
+                ${!open ? html`<${Dot} status=${sessionsStatus(sessions.filter((s) => s.project_id === p.id))} />` : null}
+              </div>
+              ${open
+                ? html`
+                    ${pt.map(
+                      (t) => html`<a class="side-item ${route.taskId === t.id ? 'active' : ''}" href=${`#/p/${p.id}/t/${t.id}`} onClick=${onNavigate} key=${t.id}>
+                        <${Dot} status=${sessionsStatus(sessions.filter((s) => s.task_id === t.id))} /><span>${t.title}</span>
+                      </a>`
+                    )}
+                    ${ps.map(
+                      (s) => html`<a class="side-item checkout ${route.sessionId === s.id && route.view === 'session' ? 'active' : ''}" href=${`#/p/${p.id}/s/${s.id}`} onClick=${onNavigate} key=${s.id}>
+                        <${Dot} status=${s.status} /><span>${s.title}</span>
+                      </a>`
+                    )}
+                  `
+                : null}
+            </div>
+          `;
+        })}
+      </div>
+      <a class="side-settings ${route.view === 'settings' ? 'active' : ''}" href="#/settings" onClick=${onNavigate}><${Icon} name="gear" /> Settings</a>
+    </nav>
+  `;
 }
 
-// Anything the user can type into. Shortcuts must never fire while one of these
-// has focus - that is how "g", "n" and "?" end up as text in a search box.
-function isTypingTarget(el) {
-  if (!el || !el.tagName) return false;
-  const tag = el.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-  return el.isContentEditable === true;
+function Main({ route }) {
+  if (route.view === 'settings') return html`<${Settings} />`;
+  if (route.view === 'project') return html`<${ProjectView} key=${route.projectId} projectId=${route.projectId} />`;
+  if (route.view === 'task') return html`<${TaskView} key=${route.taskId} projectId=${route.projectId} taskId=${route.taskId} sessionId=${route.sessionId} tab=${route.tab} />`;
+  if (route.view === 'session') return html`<div class="session-page"><${SessionPane} key=${route.sessionId} sessionId=${route.sessionId} onArchived=${() => (location.hash = `#/p/${route.projectId}`)} /></div>`;
+  return html`<${Home} />`;
 }
 
-// Whichever view provides a search field owns its markup, so look for the
-// conventional hooks rather than assuming one.
-function findSearchField() {
-  return document.querySelector('input[type="search"], [data-search], .search-input');
+function title(route, s) {
+  if (route.view === 'settings') return 'Settings';
+  const p = s.projects.find((x) => x.id === route.projectId);
+  if (route.view === 'task') return s.tasks.find((t) => t.id === route.taskId)?.title || 'Task';
+  if (route.view === 'session') return s.sessions.find((x) => x.id === route.sessionId)?.title || 'Session';
+  return p?.name || 'Projects';
 }
 
 function App() {
-  const [route, setRoute] = useState(parseHash());
-  const [legendOpen, setLegendOpen] = useState(false);
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  // The breadcrumb's subject: only the page itself knows what it is showing, so a
-  // view that has one hands it up. Null everywhere else, and nulled on the way out
-  // so a task's title cannot follow the user to another view.
-  const [pageTitle, setPageTitle] = useState(null);
-  // Set by the first 401 from any call. Desktop never sees it - the server exempts
-  // loopback, so no request from this machine can be refused for the want of a token.
-  // A phone sees it once, before it has paired.
-  const [unpaired, setUnpaired] = useState(false);
-  // How the last API call found the server, reported on every transition. Null until
-  // something has been asked, so a page that has just rendered does not flash a
-  // stopped panel before its first request has had a chance to fail.
-  const [link, setLink] = useState(null);
-  // Derived here rather than beside the effect that sets them, because the effects
-  // below read both while rendering - a const declared after them would be in the
-  // temporal dead zone when their dependency arrays are evaluated.
-  const serverDown = link ? !link.up : false;
-  const supervisorUp = !!link?.supervisor;
-
-  // The keydown listener is bound once; keep the current legend state where it
-  // can read it without rebinding on every toggle.
-  const legendRef = useRef(false);
-  useEffect(() => {
-    legendRef.current = legendOpen;
-  }, [legendOpen]);
-
-  // Likewise for the palette, whose Escape key would otherwise be handled as "clear
-  // the search box" by the branch below.
-  const paletteRef = useRef(false);
-  useEffect(() => {
-    paletteRef.current = paletteOpen;
-  }, [paletteOpen]);
-
-  // New task is the palette's one action that is not a navigation: the form belongs
-  // to the tasks view, so the route is set and an intent is raised. The view opens
-  // its form when the intent changes, which means the request survives the route
-  // change without anybody guessing when the view has finished rendering - the
-  // counter is the signal, and the view is the only thing that reads it.
-  const [newTaskIntent, setNewTaskIntent] = useState(0);
-  const newTask = useCallback(() => {
-    navigate('#/tasks');
-    setNewTaskIntent((n) => n + 1);
-  }, []);
-  const consumeNewTask = useCallback(() => setNewTaskIntent(0), []);
-
-  // The keydown listener is bound once, so it reaches `newTask` through a ref rather
-  // than through its closure - which would be the first render's version, and the
-  // first render's version is the one that captured an empty intent counter.
-  const newTaskRef = useRef(() => {});
-  useEffect(() => {
-    newTaskRef.current = newTask;
-  }, [newTask]);
-
-  // Every place inside Conversations is remembered as it is reached, so leaving for
-  // another view and coming back lands where the person left. The chat list is the
-  // conversations list now, so it is remembered as that.
-  // The task a conversation belongs to, when it is a task's agent: such a
-  // conversation is part of Tasks, so it lights Tasks in the nav and is not the
-  // place Conversations returns to. Set by the conversation view once it has loaded.
-  // `undefined` until the view says (it has to load the session first), then the
-  // task id or null. A conversation is only remembered once known not to be a
-  // task's: remembered on the first render, before the load, it would be.
-  const [taskOfSession, setTaskOfSession] = useState(undefined);
-  useEffect(() => {
-    setTaskOfSession(undefined);
-  }, [route]);
+  const route = useRoute();
+  const ready = useStore((s) => s.ready);
+  const unauthorized = useStore((s) => s.unauthorized);
+  const error = useStore((s) => s.error);
+  const heading = useStore((s) => title(route, s));
+  const [drawer, setDrawer] = useState(false);
 
   useEffect(() => {
-    if (route.view === 'session-detail') {
-      if (taskOfSession === null) remember(CONVERSATIONS_PLACE, location.hash);
-      // A task's conversation remembered by an older build - or by a race this one
-      // does not have - would make the Conversations link point at the page already
-      // open, which reads as the link bouncing. Forgotten once the session is known
-      // to be a task's.
-      else if (taskOfSession && conversationsHref().endsWith(`/${route.id}`)) remember(CONVERSATIONS_PLACE, '#/sessions');
-    } else if (route.view === 'sessions' || route.view === 'chat-detail') remember(CONVERSATIONS_PLACE, location.hash);
-    else if (route.view === 'chat') remember(CONVERSATIONS_PLACE, '#/sessions');
-  }, [route, taskOfSession]);
+    document.title = route.view === 'home' ? 'AI Code' : `${heading} · AI Code`;
+  }, [heading, route.view]);
+  useEffect(() => setDrawer(false), [location.hash]);
 
-  useEffect(() => {
-    // The project workspace the last page was in. A link inside a workspace to one of
-    // its record pages - a task, a conversation, a run, a comparison - is written by
-    // views that know nothing of workspaces (`#/tasks/<id>`), so the hash change is
-    // where it is kept inside: re-prefixed in place, with the history entry
-    // replaced so Back does not bounce out and in again. The ways out - All
-    // projects, a typed URL to another section - name pages a workspace does not
-    // hold, so they still leave.
-    let workspace = currentProject();
-    function onHashChange() {
-      const m = /^#\/(tasks|sessions|runs|compare|chat)(\/|$)/.exec(location.hash);
-      if (workspace && m) {
-        history.replaceState(null, '', scopedHref(location.hash, workspace));
-      }
-      workspace = currentProject();
-      setRoute(parseHash());
-    }
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
-  }, []);
+  if (route.view === 'pair') return html`<${Pair} code=${route.code} />`;
+  if (unauthorized) return html`<${Unpaired} />`;
+  if (!ready) return html`<div class="gate muted">Connecting…</div>`;
 
-  useEffect(() => {
-    let pending = false;
-    let pendingTimer = 0;
-
-    function clearPending() {
-      pending = false;
-      clearTimeout(pendingTimer);
-    }
-
-    function onKeyDown(e) {
-      const key = e.key;
-
-      // The one shortcut that is pressed with a modifier held, so it is matched
-      // before the branch below drops every other modified key. `key` rather than
-      // `code` because Ctrl+K and Cmd+K are the same intent on either platform.
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setPaletteOpen((v) => !v);
-        return;
-      }
-
-      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
-
-      // Esc works from anywhere, including inside a text field.
-      if (key === 'Escape') {
-        if (paletteRef.current) {
-          setPaletteOpen(false);
-          return;
-        }
-        if (legendRef.current) {
-          setLegendOpen(false);
-          return;
-        }
-        const el = document.activeElement;
-        if (isTypingTarget(el)) {
-          if (el.value) {
-            el.value = '';
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-          } else {
-            el.blur();
-          }
-        }
-        return;
-      }
-
-      if (isTypingTarget(e.target)) return;
-
-      if (pending) {
-        clearPending();
-        const go = GO[key.toLowerCase()];
-        const target = typeof go === 'function' ? go() : go;
-        if (target) {
-          e.preventDefault();
-          navigate(target);
-        }
-        return;
-      }
-
-      if (key === 'g') {
-        pending = true;
-        pendingTimer = setTimeout(() => {
-          pending = false;
-        }, 1200);
-        return;
-      }
-
-      if (key === '?') {
-        e.preventDefault();
-        setLegendOpen((v) => !v);
-        return;
-      }
-
-      if (key === '/') {
-        const field = findSearchField();
-        if (field) {
-          e.preventDefault();
-          field.focus();
-          if (typeof field.select === 'function') field.select();
-        }
-        return;
-      }
-
-      if (key === 'n') {
-        e.preventDefault();
-        newTaskRef.current();
-      }
-    }
-
-    window.addEventListener('keydown', onKeyDown);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      clearTimeout(pendingTimer);
-    };
-  }, []);
-
-  // Global run-completion watcher. An SSE stream from the server pushes a
-  // frame when any run finishes, so the browser can fire a notification
-  // without polling.
-  const navigateRef = useRef(navigate);
-  navigateRef.current = navigate;
-  useEffect(() => {
-    // Nothing to watch for while unpaired: the stream would 401 and retry forever,
-    // and every frame it did carry would be for a session this browser cannot read.
-    // And nothing while the server is down: EventSource reconnects on a timer, so a
-    // stream opened against a stopped server is a request every few seconds, forever,
-    // against a port that has nothing behind it.
-    if (unpaired || serverDown) return undefined;
-    requestPermission();
-    const es = new EventSource(notificationsUrl());
-    es.addEventListener('run-end', (e) => {
-      try {
-        const { run, task } = JSON.parse(e.data);
-        notifyRunEnd(run, task, (h) => navigateRef.current(h));
-      } catch {
-        // Malformed frame; ignore.
-      }
-    });
-    return () => es.close();
-  }, [unpaired, serverDown]);
-
-  // A push notification tapped while the app is already open. The service worker
-  // finds the window rather than opening a second copy, and this is what routes that
-  // window to the task the notification was about.
-  useEffect(() => {
-    if (typeof navigator === 'undefined' || !navigator.serviceWorker) return undefined;
-    const onMessage = (e) => {
-      const hash = typeof e.data?.url === 'string' ? e.data.url.replace(/^[^#]*/, '') : '';
-      if (e.data?.type === 'navigate' && hash) navigateRef.current(hash);
-    };
-    navigator.serviceWorker.addEventListener('message', onMessage);
-    return () => navigator.serviceWorker.removeEventListener('message', onMessage);
-  }, []);
-
-  useEffect(() => {
-    const onUnauthorized = () => setUnpaired(true);
-    window.addEventListener('ai-code:unauthorized', onUnauthorized);
-    return () => window.removeEventListener('ai-code:unauthorized', onUnauthorized);
-  }, []);
-
-  useEffect(() => {
-    const onConnectivity = (e) => setLink(e.detail);
-    window.addEventListener('ai-code:connectivity', onConnectivity);
-    return () => window.removeEventListener('ai-code:connectivity', onConnectivity);
-  }, []);
-
-  // A workspace holds the project's own pages and the detail pages opened from them.
-  // Anything else - providers, routing, settings - is the whole app's, so it is
-  // opened there rather than drawn inside a scope it would ignore.
-  const outsideWorkspace = (!!route.project && !WORKSPACE_VIEWS.has(route.view)) || route.view === 'project-redirect';
-  useEffect(() => {
-    if (route.view === 'project-redirect') history.replaceState(null, '', `#/p/${route.id}`), setRoute(parseHash());
-    else if (outsideWorkspace) navigate(`#/${location.hash.replace(/^#\/p\/[^/]+\/?/, '')}`);
-  }, [outsideWorkspace, route]);
-
-  // The pairing screen, and the one early return in this component. It replaces the
-  // whole shell rather than sitting inside it: an unpaired browser can render no view
-  // at all, so a sidebar of destinations that all 401 would be nine links to the same
-  // refusal.
-  if (unpaired) return html`<${TokenGate} />`;
-
-  if (outsideWorkspace) return null;
-
-  let view;
-  switch (route.view) {
-    case 'overview':
-      view = html`<${Overview} navigate=${navigate} onNewTask=${newTask} />`;
-      break;
-    case 'projects':
-      view = html`<${Projects} navigate=${navigate} openForm=${route.intent === 'new'} />`;
-      break;
-    case 'project':
-      view = html`<${Project} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} workspace=${!!route.project} />`;
-      break;
-    case 'tasks':
-      view = html`<${Tasks} navigate=${navigate} openForm=${newTaskIntent} onFormOpened=${consumeNewTask} project=${route.project || null} />`;
-      break;
-    case 'task-detail':
-      view = html`<${TaskDetail} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
-      break;
-    case 'compare':
-      view = html`<${Compare} group=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
-      break;
-    // The chat list is the conversations list now; a chat still opens on its own.
-    case 'chat':
-      view = html`<${Sessions} navigate=${navigate} onTitle=${setPageTitle} />`;
-      break;
-    case 'chat-detail':
-      view = html`<${Chat} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} />`;
-      break;
-    case 'sessions':
-      view = html`<${Sessions} navigate=${navigate} onTitle=${setPageTitle} project=${route.project || null} />`;
-      break;
-    case 'session-detail':
-      view = html`<${Sessions} id=${route.id} navigate=${navigate} onTitle=${setPageTitle} onTask=${setTaskOfSession} project=${route.project || null} />`;
-      break;
-    case 'providers':
-      view = html`<${Providers} navigate=${navigate} />`;
-      break;
-    case 'routing':
-      view = html`<${Routing} navigate=${navigate} />`;
-      break;
-    case 'runs':
-      view = html`<${Runs} navigate=${navigate} runId=${route.id} project=${route.project || null} />`;
-      break;
-    case 'usage':
-      view = html`<${Usage} navigate=${navigate} project=${route.project || null} />`;
-      break;
-    case 'settings':
-      view = html`<${Settings} navigate=${navigate} />`;
-      break;
-    default:
-      view = html`<${Overview} navigate=${navigate} onNewTask=${newTask} />`;
-  }
-
-  // The server this page was loaded from is gone. Every view would render an error per
-  // call it makes - and keep making them on its own poll - so the routed view is
-  // replaced by the one screen that can say what happened and offer to fix it.
-  if (serverDown) view = html`<${ServerPanel} supervisorUp=${supervisorUp} />`;
-
-  const navRoute = route.view === 'task-detail' || route.view === 'compare' ? 'tasks' : route.view === 'chat-detail' || route.view === 'chat' ? 'sessions' : route.view === 'session-detail' ? (taskOfSession ? 'tasks' : 'sessions') : route.view === 'project' ? 'projects' : route.view;
-  const title = route.view === 'task-detail' || route.view === 'chat-detail' || route.view === 'session-detail' || route.view === 'project' ? pageTitle : null;
+  const back = route.view === 'task' || route.view === 'session' ? `#/p/${route.projectId}` : route.view === 'project' || route.view === 'settings' ? '#/' : null;
 
   return html`
-    <${Fragment}>
-      <${Layout}
-        route=${navRoute}
-        project=${route.project || null}
-        title=${title}
-        serverDown=${serverDown}
-        onOpenPalette=${() => setPaletteOpen(true)}
-        onNewTask=${newTask}
-      >
-        ${view}
-      <//>
-      <${ShortcutLegend} open=${legendOpen} onClose=${() => setLegendOpen(false)} />
-      <${CommandPalette}
-        open=${paletteOpen}
-        onClose=${() => setPaletteOpen(false)}
-        navigate=${navigate}
-        onNewTask=${newTask}
-      />
-      ${/* Mounted once here, the way the toast stack is. A dialog any view can
-           raise, and none of them has to render it. */ ''}
+    <div class="shell ${drawer ? 'drawer-open' : ''}">
+      <${Sidebar} route=${route} onNavigate=${() => setDrawer(false)} />
+      ${drawer ? html`<div class="scrim" onClick=${() => setDrawer(false)}></div>` : null}
+      <main class="main">
+        <header class="topbar">
+          <button class="btn ghost icon-only" type="button" aria-label="Menu" onClick=${() => setDrawer(true)}><${Icon} name="menu" /></button>
+          ${back ? html`<a class="btn ghost icon-only" href=${back} aria-label="Back"><${Icon} name="back" /></a>` : null}
+          <span class="topbar-title">${heading}</span>
+        </header>
+        ${error ? html`<div class="notice notice-bad">${error}</div>` : null}
+        <${Main} route=${route} />
+      </main>
+      <${ToastContainer} />
       <${ConfirmHost} />
-      ${/* Any conversation's permission prompt, answerable from every screen. */ ''}
-      <${ApprovalDock} route=${route} navigate=${navigate} paused=${unpaired || serverDown} />
-    <//>
+    </div>
   `;
 }
 
 render(html`<${App} />`, document.getElementById('app'));
+refresh().then(connect);

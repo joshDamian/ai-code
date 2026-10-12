@@ -34,7 +34,10 @@ if (!loopbackBind && !process.env.AI_CODE_ALLOW_EXPOSED) {
   process.exit(1);
 }
 
-const svc = new Service(root);
+// AI_CODE_FAKE_SDK=1 runs sessions on the scripted fake the tests use, for working on
+// the interface without spending anything.
+const fake = process.env.AI_CODE_FAKE_SDK === '1' ? (await import('../tests/fake-sdk.mjs')).fakeQuery : undefined;
+const svc = new Service(root, fake ? { query: /** @type {any} */ (fake) } : {});
 const terminals = new TerminalSessions({ reapMs: Number(process.env.AI_CODE_TERMINAL_REAP_MS) || undefined });
 const startedAt = Date.now();
 const webDir = new URL('../web/', import.meta.url).pathname;

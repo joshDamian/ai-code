@@ -2,6 +2,7 @@
 //
 //   "write <file> <text>"  asks permission for Write, and writes the file if allowed
 //   "ask"                  asks an AskUserQuestion and replies with the answer
+//   "plan"                 asks to leave plan mode with a plan
 //   "slow"                 holds the turn open until interrupted
 //   "fail"                 ends the turn as an error
 //   anything else          replies "echo: <text>"
@@ -47,6 +48,9 @@ export function fakeQuery({ prompt, options }) {
       } else if (text === 'ask') {
         const r = await options.canUseTool('AskUserQuestion', { questions: [{ question: 'Which?', options: [{ label: 'A' }, { label: 'B' }] }] }, { signal: new AbortController().signal });
         reply = `answered ${JSON.stringify(r.updatedInput?.answers || null)}`;
+      } else if (text === 'plan') {
+        const r = await options.canUseTool('ExitPlanMode', { plan: '## Plan\n\n1. Read the code\n2. Change it' }, { signal: new AbortController().signal });
+        reply = r.behavior === 'allow' ? 'plan approved' : `plan rejected: ${r.message}`;
       } else if (text === 'slow') {
         if (!record.interruptPending) await new Promise((r) => (wakeInterrupt = r));
         record.interruptPending = false;

@@ -1,7 +1,7 @@
 {
-  "name": "AI Code — Mission Control",
+  "name": "AI Code",
   "short_name": "AI Code",
-  "description": "Monitor and control AI Code agent runs.",
+  "description": "Claude sessions, tasks and git for your projects.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

@@ -1,422 +1,70 @@
 # AI Code
 
-AI Code is a local-first software-engineering control plane: context → plan → approve → implement → test → review → repair.
+A workbench for Claude sessions, served from your own machine or a VPS and used from any browser: your Mac, a phone, a tablet.
+
+- **Tasks.** A task is a branch cut from any base branch, in its own worktree, with Claude sessions working in it. Its work lands on that base only when you merge it.
+- **Sessions in the checkout.** For quick work directly in the project's checked-out branch, with no worktree.
+- **Git without a terminal.** Switch branches (with a stash prompt), fetch, pull, push and commit from the project page. A task's changes, updates from its base, conflicts, merge (or squash), push and pull request all live on the task page.
+- **Claude Code itself.** Sessions run on the Claude Agent SDK, so they behave as Claude Code does: the same tools, CLAUDE.md, slash commands and permission modes (Ask before edits, Accept edits, Plan, Auto, Bypass). Approvals, questions and plans appear as cards you answer from any device. Any session also opens as `claude --resume` in a terminal.
+- **Providers.** Each session picks a provider and model: your Claude login, DeepSeek, OpenRouter or Fireworks.
 
 ## Requirements
-- macOS/Linux
-- Node.js 22.5+
-- Git
-- Claude Code installed and authenticated for real agent runs
-- DeepSeek API key for DeepSeek-backed Claude Code runs
 
-Claude Code supports non-interactive `-p` execution and JSON/stream-json output; AI Code uses that interface. DeepSeek officially documents using Claude Code through its Anthropic-compatible endpoint.
+- macOS or Linux, Node.js 22.13 or later, git
+- Claude Code logged in on the machine (`claude` then `/login`), or an API key for a hosted provider
+- Optional: the GitHub CLI (`gh auth login`) for pull requests, and Tailscale for other devices
 
-## Immediately after extraction
+## Run it
 
 ```bash
-cd ai-code
-./dev/ai-code doctor
-./dev/ai-code --help
+npm install
+./dev/ai-code serve          # http://localhost:4317
 ```
 
-Install the stable local command:
+Add a project from the page, or with `./dev/ai-code add /path/to/repo`.
+
+To install a snapshot as the `ai-code` command and keep the server running at login:
 
 ```bash
-./bin/install-ai-code
+bin/install-ai-code --service
+```
+
+## Other devices
+
+The server listens on loopback only. Your own browser on that machine needs no login. Every other device reaches it over your tailnet and pairs once:
+
+```bash
+ai-code share      # tailscale serve: https://<machine>.<tailnet>.ts.net
+ai-code pair       # a one-time link and QR code, valid for 10 minutes
+```
+
+Or choose **Settings → Pair a device**. A paired device gets its own cookie. You can unpair it in Settings or with `ai-code revoke <id>`. Add the app to your phone's home screen, then turn on notifications in Settings to get a push when Claude needs an approval or finishes.
+
+### On a VPS
+
+1. Install Node 22+, git, Claude Code (`npm i -g @anthropic-ai/claude-code`, then log in) and Tailscale, then join your tailnet.
+2. Clone this repository, run `npm install`, then `bin/install-ai-code --service`.
+3. Run `sudo loginctl enable-linger $USER` so the user service survives logout.
+4. Run `ai-code share` and `ai-code pair`, then open the link on your phone.
+
+Hosted-provider keys (`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `FIREWORKS_API_KEY`) are read from the server's environment. `ai-code service install` copies them, with your PATH, into the service definition.
+
+## Commands
+
+```
+ai-code serve | open | add <path> [name] | projects
+ai-code share [--off] | pair | devices | revoke <id>
+ai-code service install | uninstall | status
 ai-code doctor
+ai-code shell <provider> [claude args]
 ```
 
-The development command always uses the checked-out source. The installed `ai-code` command is the promoted stable version.
-
-Add `--supervisor` to that install to also keep the dashboard startable from its own page while the server is down — see [Starting and stopping the server](#starting-and-stopping-the-server).
-
-## Register a project
-
-From the AI Code checkout:
+## Development
 
 ```bash
-./dev/ai-code init "My Project" /absolute/path/to/project
+npm test            # node:test, with a scripted fake of the Agent SDK
+npm run typecheck   # tsc over the files marked // @ts-check
+AI_CODE_FAKE_SDK=1 ./dev/ai-code serve   # the interface, with no model calls
 ```
 
-Or after installation:
-
-```bash
-ai-code init "My Project" /absolute/path/to/project
-```
-
-## Project context
-
-Registering a project writes the deterministic half of its context — `architecture.md`, `conventions.md`, `commands.json`, and a `dependencies.json` parsed from the project's manifests. No model is involved, and nothing here changes unless you change it:
-
-```bash
-ai-code context init <project-id>
-```
-
-The two prose documents start as skeletons. Filling them in with a model is a separate, opt-in step that overwrites only those two files:
-
-```bash
-ai-code context enrich <project-id>
-```
-
-At run time the agent gets the project context plus the files most relevant to the task, ranked from the task text, entry points, test adjacency, config files and recent Git history. Assembly is capped by a token budget and a file cap, both under a `context` key in `routing.json`; when it overflows, the lowest-ranked file contents go first, then the generated docs, then the file tree. Each run records what it was given — `context_tokens`, `relevant_files`, `context_budget` — which the Usage view totals.
-
-## Add real providers
-
-Anthropic / Claude Code:
-
-```bash
-ai-code provider add-claude
-```
-
-DeepSeek through Claude Code:
-
-```bash
-export DEEPSEEK_API_KEY="..."
-ai-code provider add-deepseek
-```
-
-OpenRouter and Fireworks each serve an Anthropic-compatible endpoint, so they plug in the same way:
-
-```bash
-export OPENROUTER_API_KEY="..."
-ai-code provider add-openrouter
-
-export FIREWORKS_API_KEY="..."
-ai-code provider add-fireworks
-```
-
-Fireworks is the cash fallback for a spent Claude subscription: Kimi K3, GLM 5.3 and Qwen 3.8 Max carry every capability, so routing can still plan and review when the subscription is out, and the cheaper models take the implement and repair end. Their model ids are resource names (`accounts/fireworks/models/...`) and cached input is billed at a discount, both carried in the catalog.
-
-Test a real provider connection (this invokes Claude Code and may consume model/API usage):
-
-```bash
-ai-code provider test anthropic-claude-code
-ai-code provider test deepseek-claude-code
-ai-code provider test fireworks
-```
-
-DeepSeek's official Claude Code integration currently uses `https://api.deepseek.com/anthropic` and `deepseek-flash[1m]`; AI Code configures those in the child process only and does not mutate your shell environment.
-
-### Provider health
-
-Each provider carries a circuit-breaker state. A failing provider is dropped from routing rather than retried forever, and a success is what brings it back.
-
-```bash
-ai-code provider health            # every provider
-ai-code provider health deepseek-claude-code
-```
-
-```json
-{
-  "providerId": "deepseek-claude-code",
-  "state": "DEGRADED",
-  "eligible": true,
-  "penalty": 0.3,
-  "reason": "1 failure in the window",
-  "failures": 1,
-  "cooldownRemainingMs": 0,
-  "lastError": "RATE_LIMIT: 429 Too Many Requests"
-}
-```
-
-`OPEN` means no run will route to that provider until the cooldown expires or the credentials are fixed. Thresholds live under a `health` key in `routing.json`; the same state is shown as a badge on the provider cards in both UIs.
-
-## Run a task
-
-```bash
-ai-code task create <project-id> "Add a health check endpoint"
-ai-code task plan <task-id>
-ai-code task approve <task-id>
-ai-code task execute <task-id>
-ai-code task show <task-id>
-```
-
-Watch a task and list what is in flight:
-
-```bash
-ai-code task status <task-id>   # the task, its jobs, and its runs
-ai-code task active             # every job the server has queued or running
-```
-
-The dashboard:
-
-```bash
-ai-code dashboard
-```
-
-Open it in a browser, starting the server first if it is not up:
-
-```bash
-ai-code web
-```
-
-`web` is the one a desktop shortcut should call. It finds a server already on the port and opens it, asks a supervisor holding the port to start one, and otherwise starts a server itself — so it does the right thing whether or not either is running. `dashboard` is the foreground server, and stays the command for watching its output.
-
-### Engines: pipeline, session, or both
-
-A task runs one of two ways, chosen under **Run as** when you create it in the dashboard:
-
-- **Pipeline** (the default, and what the CLI above runs): a planner writes a plan, you approve it, then an implementer, the test command and a reviewer take it from there, each a separate agent run.
-- **Session**: one agent works on the task end to end, in the task's own worktree, as a conversation. Your description is its first message, sent as written. Its routine actions in the worktree run without asking; pushes, GitHub actions, history rewrites and other risky commands still wait for you. After every turn the project's test command runs. A failure is handed back to the agent, up to `taskSession.maxFixes` times (default 2), and the task is **Complete** only when there are changes and the checks pass. If a turn changes nothing (a question, or a proposal when **Plan first** is on), the task is **Waiting** on your reply. Its budgets are under `taskSession` in `.ai-code/routing.json`, and default to the pipeline's planner, implementer and reviewer budgets added together, so neither engine gets more room than the other.
-
-**Compare** runs the same task two to four ways side by side. Each attempt is an engine on a model; all of them start from the same commit, each in its own worktree. The compare page shows each attempt's checks, changes, spend, run time, tool calls and how often it needed you. Engines and models stay hidden until you reveal them or pick. Picking one discards the others, and you land the winner from its own page as usual. Each pick is counted on the Usage page under **Engines and models, from your comparisons**.
-
-Conversations, including a session task's, continue one Claude session from turn to turn (`--resume`), so the agent keeps everything it read and did. If that session can't be continued (a different model, or a pruned session), the turn starts fresh with the conversation so far in its system prompt.
-
-### Recovering an interrupted plan
-
-A process that dies between its planner run succeeding and the plan being written to the task leaves that task in `Planning` with a plan that exists only in the run's events. Opening the store repairs it, and every command opens the store — the plan is rebuilt from the run's events and put in front of you for approval rather than being paid for again. The one run that finished in the last few seconds is left alone, because its owner is still about to write that same plan itself.
-
-### Committing before execution
-
-The planner reads the project's working tree, uncommitted work included. The implementer works in a worktree cut from `HEAD`, which does not contain that work. A plan written against uncommitted changes therefore describes code the implementer will never see, and the change that comes back is built against stale sources.
-
-So `task execute` refuses while a file the plan depends on is dirty, naming the files to commit:
-
-```
-AI Code: PLAN_BASE_DIRTY: 3 file(s) this plan depends on have uncommitted changes
-(src/agents.mjs, src/service.mjs, tests/test.mjs). The implementer runs in a worktree
-built from HEAD (efe2a89), which contains none of them. Commit them first, or re-run
-with --force.
-```
-
-What a plan depends on is what the planner actually read — the files it opened with a tool, plus the ones the harness inlined into its prompt. That distinction is what keeps the gate proportionate: a repository under active development is normally dirty, and a task that has nothing to do with those files still runs.
-
-The refusal changes nothing. The task stays `APPROVED`, so committing the files and retrying is the whole remedy, and the gate opens on its own once they are clean. `--force` overrides it for the case where you have looked at the overlap and decided it does not matter; it cannot be combined with `--background`, because a queued job carries no options.
-
-After the implementer runs, the worktree is compared against what was dirty when the plan was written. A file it rewrote that had uncommitted work — and that was not committed since — is recorded as a plan conflict on the task, because the diff and the review are both computed inside the worktree, where the uncommitted version never existed.
-
-### Background execution
-
-`task execute` blocks until the whole workflow finishes. `--background` hands it to a running dashboard server and returns at once:
-
-```bash
-ai-code task execute <task-id> --background
-```
-
-The server owns the queue, so this needs one running. With no server on the port it exits non-zero and says so, rather than quietly starting a second one:
-
-```
-no dashboard server on :4317; start one with `ai-code web`, or drop --background
-```
-
-`task implement`, `task test`, `task review` and `task repair` take `--background` too. A task may have only one job queued or running at a time.
-
-The queue runs at most two jobs at once by default, narrowed further by how many runs the enabled providers will tolerate together — one for a Claude Code provider, two for a hosted API, overridable per provider with `config.maxConcurrency`. A provider at its own limit is simply not a candidate for the next run, so a job is never dispatched into a state where nothing can serve it.
-
-The count comes from the run leases, not from the server's memory, so a run started in another process counts too: a foreground run from the dashboard holds its provider slot against a background job, and a job holds it against the next CLI start.
-
-Background jobs are recorded in the `jobs` table and survive a restart as `interrupted`: the queue itself is in-process, so a job row left queued or running belongs to a server that is gone.
-
-`Ctrl-C` on the dashboard stops the queue, aborts every run in flight, and waits briefly for the detached agent processes to exit before closing. Without that the agents outlive the server with nothing watching them.
-
-### Review and repair
-
-A review that fails sends the task to repair, and the repair ends by asking the reviewer again — but not the same question. The second review is a verification: its prompt carries the findings the repair was acting on, the files that changed, and the result of the test command, and the diff is narrowed to those files. That is the whole difference from the first review, which has nothing to check the implementation against but the plan. The findings are named in the prompt rather than left to the context assembler's `review` section, which is the first thing trimmed under a token budget.
-
-The repair is measured rather than believed. The worktree is hashed before the repair and again after it, and a repair that changed no file is not reviewed at all: a reviewer sent in would spend a whole review arriving at that and fail for the same findings, which is a repair loop rather than a repair. The task rests in `REVIEWING` with the reason in its `review` field, where one more Review click runs the full review over the work as it stands. A repair that did change files leaves the task `COMPLETE` on a passing verification and `REPAIRING` on a failing one, as before.
-
-### Per-role budgets
-
-Every role has a wall-clock timeout, two spend budgets and a subagent exemption, all set per role in `.ai-code/routing.json`:
-
-| Role | `timeout` | `maxToolCalls` | `maxRunCost` | `subagentWait` |
-|---|---|---|---|---|
-| planner | 900s | 40 | $1.00 | 600s |
-| implementer | 600s | 200 | $5.00 | 600s |
-| reviewer | 900s | 40 | $1.00 | 600s |
-| repair | 600s | 200 | $5.00 | 600s |
-
-`subagentWait` is the wall clock a run may spend inside subagent calls without being charged for it: the spawn is the agent's own decision, but what happens inside it is another agent's work on another lifetime, which the parent can neither see nor bound. It is a cap and not a discount, and it covers an agent spawn rather than a Bash command — a command the run is waiting on is its own tool call, counted against it already.
-
-A wall clock does not stop an agent that stays busy the whole time, which is how a planning run once spent three and a half minutes and $2.21 re-reading a codebase. The two spend budgets are checked as each event arrives, and the run is aborted the moment it crosses either. The provider is not penalised — it answered every call correctly — and no fallback is attempted, because the next provider would spend the same budget to reach the same place. A planning run that hits a budget leaves its task `FAILED`, ready to replan with a narrower description or a larger budget.
-
-Set either budget to a non-positive value to remove the limit.
-
-`maxRunCost` is a cash ceiling: it applies to runs billed at a published API rate (DeepSeek, OpenRouter). A run on the Claude subscription is priced at list in the ledger, which measures quota rather than money, and is bounded by its tool-call and time budgets instead. Each agent is told its tool-call budget in its prompt.
-
-### Routing strategy
-
-Each role's strategy on the Routing page — Quality, Balanced, Speed or Cost — decides which model Automatic picks, for the first choice and for any fallback slot left on Automatic. A pinned preferred model, a task's planning model and a conversation's chosen model still come first while they are healthy. The strategy weighs three measures on fixed scales: the model's quality and speed ratings, and its blended price per million tokens of agent traffic, log-scaled. A subscription model is priced at zero, because the plan is paid for either way. The Routing page names the model each strategy currently picks.
-
-### Cost accounting
-
-Runs are priced from the tokens they report, cache reads and writes included; a typical agent run is about 88% cache reads by token. Subagent usage is added to the run that spawned it. Usage reports cash spent separately from subscription use at list price. After a catalog change, `ai-code provider sync` refreshes the model rates and `ai-code usage reprice` reprices past runs from their stored tokens.
-
-### Porting the work onto a branch
-
-A task's work lives in a worktree cut from `HEAD`, and nothing commits there. When the task finishes, `ai-code/<id>` still points at the base commit and the change exists only as uncommitted edits in a directory — nothing you can merge, review or safely delete. Porting is the other half.
-
-See what changed and where it would go:
-
-```bash
-ai-code task diff <task-id>
-ai-code task diff <task-id> --to <branch>
-```
-
-The default destination is the branch the plan was written against, falling back to the branch checked out now. `--to` overrides it. The answer says whether the port would be a fast-forward, whether the work is already in the destination, which files conflict, and which files at the destination are dirty in a way that would block the merge.
-
-Land it:
-
-```bash
-ai-code task port <task-id>                  # onto the default branch
-ai-code task port <task-id> --to feat/thing  # onto a named one
-ai-code task port <task-id> --dry-run        # report only, writes nothing
-ai-code task port <task-id> --clean          # remove the worktree after landing
-```
-
-Porting is three steps. It commits the worktree onto `ai-code/<id>`, untracked files included — which is what makes the work addressable, and it does not change what a reviewer is handed, because the diff is read against a ref rather than against the index. It predicts the merge with `git merge-tree`, which resolves it in the object store: no scratch worktree, no index, nothing left on disk and nothing to collide with on a retry. Then it lands it.
-
-Landing never moves a ref you own without being asked. If the destination is checked out anywhere, the port leaves it alone and prints the command to run — `git merge --ff-only ai-code/<id>` when the merge is a fast-forward, `git merge ai-code/<id>` when it is not. If it is checked out nowhere, the ref moves: to the work itself when that is a fast-forward, otherwise to a merge commit.
-
-That command is the part that is easy to lose, so it is not left to the reader. Both surfaces report what a port would leave you to do before you run one — `next` on `task diff` and `task port` — and the PORT tab renders it as Next steps above the buttons. A port that stopped short says so instead of reporting the success of the steps it did take.
-
-Once the worktree is gone, the branch is the artifact and porting it again reports the same command rather than failing on a missing directory. The tab shows the change off the commit, so a finished port still reads as the work it was. Nothing is lost by `--clean`; only the directory is.
-
-A conflict stops the port and names the files. No agent is asked to resolve it — a merge is where mechanical stops and judgement starts. The destination is not moved, and the work stays committed on the task branch, which is what you merge by hand.
-
-### Reading the PORT tab
-
-The tab leads with a verdict rather than with the controls, because the work is in one of a handful of states and they mean very different things. It is landed, or ready to land, or uncommitted in the worktree, or blocked by uncommitted work at the destination, or in conflict, or there is nothing to port. Each one says what it is, what follows from it, and whether anything is left to run.
-
-That verdict is derived in `assess` next to `next`, for the same reason: `task diff` and the tab must not be able to disagree about whether the work has landed. Only a state with a port to make offers the buttons. Landed work says so and offers none, and an empty task says there is nothing to port rather than presenting a merge command for a branch sitting at its own fork point.
-
-Once the work is in the destination the verdict names two commits, because they answer two questions. The task's own commit is the work — what to read to see what the task did — and the commit it landed as is what a `git log` of the destination shows and what a revert or a bisect would point at. A fast-forward makes those the same commit, and the tab says so instead of listing it twice. Before the work has landed there is only the first.
-
-The change below them is labelled by where it was read from, which is not always the worktree: uncommitted work is read from the directory, and work that has been committed is read from the commit even while the directory is still there. An empty pane reads as the work being gone, and it is the one reading this screen exists to prevent.
-
-`--clean` removes the worktree once the work is on a branch. It is opt-in and never automatic: the branch outlives the directory, but nothing does that until the port has run.
-
-What a port does not claim: it does not re-run the tests at the destination. They ran in the worktree, and a fresh tree at the merge commit has none of the destination's ignored files, so a run there fails for reasons that have nothing to do with the change. A fast-forward reproduces the tested tracked state exactly; run the test command in the destination yourself when it matters.
-
-In the dashboard this is the PORT tab on the task: the verdict, the destination picker, whatever is left to run, the buttons, and the change.
-
-## Development vs stable
-
-- `./dev/ai-code ...` = current source checkout.
-- `./bin/install-ai-code` = explicit promotion.
-- `ai-code ...` = promoted stable version.
-
-This separation is intentional so AI Code can develop itself without destabilising the version used on other repositories.
-
-## Verification
-
-```bash
-npm test
-```
-
-The test suite covers workflow transitions, approval enforcement, the planner's read-only rule and the system-prompt countermand to plan mode's plan-file instruction, worktree isolation, the pre-execution gate on uncommitted work a plan depends on, porting a task's work onto a branch, provider fallback, the circuit breaker, context assembly and its budget, per-role spend budgets, capability gating, recovery of a plan abandoned by a dead process, plan extraction from a run's closing message, the background queue and its concurrency caps, cross-process cancellation, the activity feed's rendering of every stored event shape, how a block of model text is rendered, how a unified diff is numbered and paired into two columns, what a port leaves for you to run, which state a task's work is in and which commits to name it by, and dashboard API behaviour.
-
-The HTTP tests bind an ephemeral port and wait for the child to answer on it before asserting anything. That is not incidental: with a fixed port, a stale server on it makes the child fail to bind and exit while the test polls the stranger and passes, which is exactly how a green suite once hid a broken server.
-
-Two of them are worth knowing about before changing them. The push test stands up a local HTTPS server holding a certificate it generates with `openssl`, because `web-push` speaks only TLS and builds the request itself — there is no seam to inject a fake at, so the test skips on a machine with no `openssl` rather than pretending to have run. The token test reads the token off the server's own stdout rather than inventing one, because the announcement is half of what it is testing.
-
-
-## Mission Control control plane
-
-Mission Control is the operational UI, not a read-only dashboard. Providers exposes provider health, routability, enable/disable, model enable/disable, connection testing and provider configuration. Routing exposes per-role strategy, preferred model, fallback order and effort. Runs and Usage expose persisted run telemetry and cost basis. Task detail exposes functional PLAN, EXECUTE, REVIEW and ACTIVITY tabs with live event streaming. Settings exposes runtime/diagnostic information.
-
-### The activity feed
-
-ACTIVITY renders one row per event, and the row says what happened rather than what kind of record it was: `Read — src/server.mjs` for a tool call, the opening line of the output plus `(+44 more lines)` for its result, `Explore · Running List web directory · 10.6K tok, 1 tool, 4s` for a subagent, `failed · 2 turns · 20s · $2.21 — API Error: 402 Insufficient Balance` for the run's own result. The badge is a handful of words to scan for — `tool`, `out`, `said`, `think`, `agent`, `run`, `note`, `limit`, `done`, `error` — and the left rule carries the same distinction, with the quiet kinds (a tool's output, a reasoning trace, a notice) set in the muted colour because they are context for the row above them.
-
-An event with nothing to say is not rendered at all. Empty reasoning blocks, subagent heartbeats with no body and unpatched bookkeeping make up roughly a third of a real run's log, and a row reading `system` or `message` is worse than no row. `describeEvent` in `src/format.mjs` is the whole of this, and the CLI, the TUI and the dashboard all render through it: the browser is served that same file rather than a copy, so the three cannot drift.
-
-### Plan and review rendering
-
-PLAN and REVIEW render the planner's and the reviewer's markdown as prose: headings, lists, fenced code, tables. `web/components/markdown.mjs` is the only file in the dashboard that puts model output into HTML — `dangerouslySetInnerHTML` appears nowhere else, and every other component goes through htm and gets escaping for free. `marked` parses and DOMPurify sanitises, both pinned to exact versions because a floating minor on a sanitiser is not a risk worth taking, both loaded from the same CDN the rest of the dashboard already depends on. The sanitiser runs with the HTML-only profile, so SVG and MathML are not reachable from a plan, and raw HTML in a plan survives only as far as DOMPurify allows: an `onerror` handler is stripped, a `javascript:` href is dropped, and every link that does survive opens in a new tab with `rel="noopener noreferrer"`.
-
-A reviewer that answers with a diff does not go through the renderer, because a diff sent through markdown comes out mangled. `bodyKind` in `src/format.mjs` decides which of the two a block of text is, which is why that decision lives in the file the browser is served: it is the same arrangement as `describeEvent`, and it is what makes the decision testable without a DOM.
-
-### Reading a diff
-
-Lines wrap rather than scrolling sideways, because a diff is read downwards and a long line — a minified bundle, a base64 blob, a path — turns sideways scrolling into the whole interaction otherwise. `pre-wrap` keeps the indentation that makes a diff legible; `overflow-wrap:anywhere` covers the lines that have no space in them to break at.
-
-The viewer offers two views of the same diff. Unified is the default, and it is what a reviewer reads. Split puts the old and new versions of a line beside each other, which is what makes a rewrite legible as a rewrite. The pairing is GitHub's — a run of deletions pairs positionally with the run of additions after it, and the shorter side is padded — and, like the numbering, it lives in `src/format.mjs` and is served to the browser rather than reimplemented there.
-
-Two counters advance through a diff and neither may drift: a line the classifier does not recognise as content shifts both gutters from there to the end. That is why `diffLines` treats the leading character as the whole test and reads the start lines out of each hunk header, and why the file that must never see a `\ No newline at end of file` line as content is the same one the CLI, the TUI and the dashboard all render through.
-
-The mock provider is retained for automated tests only and is never eligible for automatic production routing. A dashboard server started with `AI_CODE_ALLOW_MOCK=1` lifts that exclusion, which is how the HTTP tests drive a whole task end to end without spawning a real agent.
-
-### Current published pricing metadata
-
-Anthropic: Claude Opus 5.5 is $4/MTok input and $20/MTok output. Claude Opus 5 and Claude Opus 4.8 are $5/MTok input and $25/MTok output. Claude Sonnet 5 is $2/MTok input and $10/MTok output, and Claude Sonnet 4.6 is $3/MTok input and $15/MTok output. Claude Haiku 4.5 is $1/MTok input and $5/MTok output, and Claude Fable 5.1 is $10/MTok input and $50/MTok output. These are API list-price equivalents; Claude Code subscription usage is not represented as a direct per-token bill.
-
-DeepSeek: `deepseek-flash` is DeepSeek-V4.1-Flash. Current official pricing uses peak/off-peak rates and cache-hit pricing; AI Code stores the rate-card metadata and computes recorded API cost using observed usage and the run timestamp.
-
-
-## Phone access
-
-Mission Control installs on an Android or iOS phone as a PWA. It is the same dashboard against the same API, not a second client: a phone is a fourth caller of this server, next to the browser on this machine, the TUI and the CLI.
-
-Three things stood between the dashboard and a phone, and each is closed:
-
-- **The API had no authentication.** It now takes a token, and every `/api` route requires one unless the request arrived on loopback.
-- **The server bound every interface.** `server.listen(port)` binds `0.0.0.0`, so the dashboard was reachable from the LAN by accident. It now binds `127.0.0.1`, and a non-loopback bind refuses to start unless `AI_CODE_TOKEN` names the token explicitly.
-- **A backgrounded tab receives nothing.** Run completions are now also delivered as Web Push, so a phone with the app closed is told a run finished.
-
-### Setting it up
-
-The server stays on loopback. Tailscale terminates TLS in front of it and is the transport:
-
-```bash
-./dev/ai-code                       # prints the API token, and the command below
-tailscale serve https / http://127.0.0.1:4317
-```
-
-On the phone, open the `https://<machine>.<tailnet>.ts.net` address that `tailscale serve` prints. The first screen asks for the token — it is the `API token:` line the server logged at startup, and it is reprinted on every start, so it is never lost. Then **Add to Home screen**: the dashboard opens standalone, and the browser prompts once for notification permission, which is what registers the phone for push.
-
-A run that finishes while the app is closed now arrives as a notification, and tapping it opens the task it was about.
-
-### What the token does and does not grant
-
-The exemption is the Host header, not the socket, which is what makes this work through a proxy: `tailscale serve` connects to loopback from loopback, so a socket check could not tell a phone from the desktop, while the Host header it forwards still carries the machine's own name. Desktop sends `Host: localhost:4317` and stays tokenless; a phone sends the `.ts.net` name and is asked for the token. The consequence to know about is that a non-browser client on the tailnet can set `Host: localhost` by hand and inherit the exemption. That is the same trust boundary the terminal has always sat behind, and the fix — requiring the token on loopback too — would break the desktop, the TUI and the CLI to defend against a tailnet the user already controls.
-
-The terminal is the exception to all of it. It is loopback-only and a valid token does not change that, because reaching the API is not the same permission as opening a shell on the machine. The TAB is not rendered on a phone, and the upgrade is refused with a 403 if anything asks anyway.
-
-Push subscription state is in the `push_subscriptions` table, and the VAPID keypair and the API token are in `settings`. Deleting rows there revokes a phone's push and re-pairs it respectively.
-
-### Reaching it without Tailscale
-
-`AI_CODE_HOST=<tailnet-ip>` plus `AI_CODE_TOKEN=<a-token>` works, and serves plain HTTP. Without a secure context the browser has no service worker and no push, so this is a debug fallback rather than the way to use it. It is also why the bind refuses to start without a named token: that address is reachable by anything on the network.
-
-
-## Starting and stopping the server
-
-A dashboard page is served by the process it is talking to. Stop that process and the page is still in the browser tab, but every request from it now fails — the app notices and replaces the view with a panel that says the server is down and offers to start it. A page opened when nothing is listening gets the same panel, served by whatever holds the port.
-
-The two controls are served from opposite sides of the thing they control:
-
-- **Start** comes from the supervisor — a separate, machine-resident listener that binds the port while the server is down, serves the stopped page, starts the server when asked, then gets out of the way. A page cannot spawn a process, so this is the only way a browser can start one; with nothing holding the port there is no page to serve in the first place.
-- **Stop** lives in the running dashboard, at Settings → Server. The card shows the server's status, port, PID, host, root, uptime and job counts, and stops it after a two-step confirm.
-
-Install the supervisor:
-
-```bash
-./bin/install-ai-code --supervisor
-```
-
-It installs the release as usual and loads a LaunchAgent, `com.ai-code.supervisor`, which holds `http://localhost:4317` — or your `$PORT`, if you export one — and restarts at login. Idempotent — re-running points it at the release just built. Remove it with `./bin/install-ai-code --uninstall-supervisor`; without the agent the dashboard keeps working, and nothing holds the port or restarts the server while it is down.
-
-The agent carries an absolute path to your `node` and your own `PATH`, because launchd starts a job with four system directories and a login shell restores only what `/etc/paths.d` names. A node from nvm, fnm or asdf — and `claude`, which the agents need once the server is up — live in directories your `~/.zshrc` adds, and that is read for interactive shells only. Add `--dry-run` to print the agent without building a release or loading it.
-
-The supervisor writes to `~/Library/Logs/ai-code/supervisor.log`, and the server it starts writes to `~/Library/Logs/ai-code/server.log`. `ai-code web` is the terminal equivalent of the Start button.
-
-### What stopping does
-
-Stopping is not a pause. It cancels queued jobs, aborts runs in flight, and closes open terminals — the same shutdown `Ctrl-C` performs on the dashboard. Everything on disk survives, because the store, the tasks, the run history and the events are written as the work happens. A cancel is not a failure: the aborted run is recorded as `cancelled`, and its task is left where it can be run again.
-
-Both routes are loopback-only, checked by Host header, so a phone holding a valid API token can neither stop the server on the machine nor start one there. Deciding which process this machine runs is the machine's own business, and a remote caller is in no position to make that call.
-
-
-## Model registry
-
-AI Code does not use dashboard labels as raw provider model IDs. Each model has:
-- a stable AI Code model ID (for routing)
-- a provider model ID (the provider's API model name)
-- an invocation model ID (the exact value passed to the agent adapter/Claude Code)
-- a human display name
-
-The Routing UI only allows selecting enabled models from this registry; arbitrary model strings are not accepted. Provider adapters own any provider-specific translation.
-
-DeepSeek's Claude Code integration is provider-specific: DeepSeek documents `deepseek-flash` and `deepseek-v4-pro` as current API models and documents Claude-name mapping when Claude model names are used through its Anthropic-compatible endpoint. AI Code therefore keeps the DeepSeek provider model ID explicit instead of relying on accidental name mapping. citeturn1search0turn1search2
+There is no build step. The browser loads Preact, htm and the other libraries from this server's `node_modules` through an import map. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
