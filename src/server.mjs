@@ -301,6 +301,9 @@ route('GET', '/api/state', ({ auth }) => ({
 }));
 
 route('GET', '/api/projects', () => svc.store.listProjects());
+route('POST', '/api/projects/clone', ({ body }) => svc.cloneProject(body));
+route('POST', '/api/projects/create', ({ body }) => svc.createProject(body));
+route('GET', '/api/github/repos', () => svc.githubRepos());
 route('POST', '/api/projects', ({ body }) => svc.addProject(body));
 route('PATCH', '/api/projects/:id', ({ params, body }) => svc.store.updateProject(params[0], body));
 route('DELETE', '/api/projects/:id', ({ params }) => (svc.removeProject(params[0]), { ok: true }));
@@ -314,13 +317,26 @@ route('POST', '/api/projects/:id/commit', ({ params, body }) => svc.commit(param
 
 // A directory browser for adding a project from a phone. Names only, never contents.
 route('GET', '/api/fs', ({ u }) => {
-  const dir = path.resolve(u.searchParams.get('path') || os.homedir());
+  // A folder that does not exist yet (the default projects folder before its first
+  // project) opens at the nearest parent that does.
+  let dir = path.resolve(u.searchParams.get('path') || os.homedir());
+  while (!fs.existsSync(dir) && path.dirname(dir) !== dir) dir = path.dirname(dir);
   const entries = fs
     .readdirSync(dir, { withFileTypes: true })
     .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
     .map((e) => ({ name: e.name, repo: fs.existsSync(path.join(dir, e.name, '.git')) }))
     .sort((a, b) => a.name.localeCompare(b.name));
   return { path: dir, parent: path.dirname(dir) === dir ? null : path.dirname(dir), repo: fs.existsSync(path.join(dir, '.git')), entries };
+});
+
+// A new folder, for choosing where a project goes. One level, inside a folder that exists.
+route('POST', '/api/fs/mkdir', ({ body }) => {
+  const parent = path.resolve(String(body.parent || ''));
+  const name = String(body.name || '').trim();
+  if (!name || name.includes('/') || name.startsWith('.') || !fs.existsSync(parent)) throw new Error('Choose a folder name');
+  const dir = path.join(parent, name);
+  fs.mkdirSync(dir);
+  return { path: dir };
 });
 
 route('GET', '/api/tasks', ({ u }) => svc.tasks(u.searchParams.get('projectId') || undefined));

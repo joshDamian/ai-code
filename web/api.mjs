@@ -46,6 +46,10 @@ const enc = encodeURIComponent;
 export const api = {
   state: () => get('/api/state'),
   addProject: (/** @type {{path:string, name?:string, init?:boolean}} */ b) => post('/api/projects', b),
+  cloneProject: (/** @type {{repo:string, dir?:string, name?:string}} */ b) => post('/api/projects/clone', b),
+  createProject: (/** @type {{name:string, dir?:string}} */ b) => post('/api/projects/create', b),
+  githubRepos: () => get('/api/github/repos'),
+  mkdir: (/** @type {string} */ parent, /** @type {string} */ name) => post('/api/fs/mkdir', { parent, name }),
   renameProject: (/** @type {string} */ id, /** @type {string} */ name) => patch(`/api/projects/${id}`, { name }),
   removeProject: (/** @type {string} */ id) => del(`/api/projects/${id}`),
   git: (/** @type {string} */ id) => get(`/api/projects/${id}/git`),
@@ -111,7 +115,7 @@ export function terminalUrl(q) {
  * @typedef {{
  *   ready: boolean, unauthorized: boolean, connected: boolean, error: string|null,
  *   projects: Project[], tasks: Task[], sessions: Session[], approvals: Approval[],
- *   providers: any[], defaults: {providerId:string, modelId:string|null, mode:string, effort:string|null},
+ *   providers: any[], defaults: {providerId:string, modelId:string|null, mode:string, effort:string|null, projectsDir:string},
  *   me: {local:boolean, device:{id:string,name:string}|null} | null, push: string|null,
  *   gitTick: Record<string, number>
  * }} State
@@ -128,7 +132,7 @@ let state = {
   sessions: [],
   approvals: [],
   providers: [],
-  defaults: { providerId: '', modelId: null, mode: 'default', effort: null },
+  defaults: { providerId: '', modelId: null, mode: 'default', effort: null, projectsDir: '' },
   me: null,
   push: null,
   gitTick: {},

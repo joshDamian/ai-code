@@ -96,19 +96,19 @@ The server listens on `127.0.0.1:4317` only. Do not open that port in a firewall
 
 ## 5. Your projects
 
-Clone the repositories you want to work on, then register them. You can also add them from the app later with **Add project**.
+The simplest way is from the app: **Add project → Clone** lists your GitHub repositories (through the `gh` login from step 2) and clones the one you pick into `~/bench-projects`. From the shell instead:
 
 ```bash
-mkdir -p ~/code && cd ~/code
+mkdir -p ~/bench-projects && cd ~/bench-projects
 git clone https://github.com/you/your-repo.git
-bench add ~/code/your-repo
+bench add ~/bench-projects/your-repo
 ```
 
 Copy over any `.env` or other untracked files the projects need. They are not in git:
 
 ```bash
 # from your Mac
-scp ~/Code/your-repo/.env dev@<vps>:~/code/your-repo/.env
+scp ~/Code/your-repo/.env dev@<vps>:~/bench-projects/your-repo/.env
 ```
 
 If a project has dependencies, install them once in the checkout (`npm install` and so on). Task worktrees link to the checkout's `node_modules`.

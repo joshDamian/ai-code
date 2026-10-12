@@ -23,7 +23,7 @@ npm install
 ./dev/bench serve          # http://localhost:4317
 ```
 
-Add a project from the page, or with `./dev/bench add /path/to/repo`.
+Add a project from the page: clone one of your GitHub repositories (or any git URL), open a folder already on the machine, or start a new one. Clones and new projects go to `~/bench-projects` unless you choose another folder; Settings changes the default. From the command line: `./dev/bench add /path/to/repo`.
 
 To install a snapshot as the `bench` command and keep the server running at login:
 

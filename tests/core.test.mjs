@@ -336,3 +336,36 @@ test('effort comes from the defaults, reaches the SDK, and a change restarts the
   assert.throws(() => svc.setDefaults({ effort: 'extreme' }), /Unknown effort/);
   svc.shutdown();
 });
+
+test('a project can be cloned or created into the projects folder, or anywhere chosen', async () => {
+  const { svc, dir: source } = setup();
+  const home = tmp('projects');
+  svc.setDefaults({ projectsDir: path.join(home, 'bench-projects') });
+  assert.equal(svc.defaults().projectsDir, path.join(home, 'bench-projects'));
+
+  // Cloned by URL into the default folder, which is made on first use.
+  const cloned = await svc.cloneProject({ repo: `file://${source}` });
+  assert.equal(cloned.path, fs.realpathSync(path.join(home, 'bench-projects', path.basename(source))));
+  assert.equal(git(cloned.path, 'log', '-1', '--format=%s'), 'first');
+  assert.ok(git(cloned.path, 'branch', '-r').includes('origin/feature'), 'the remote branches came too');
+
+  // Into a folder of the person's choosing, under a name of their choosing.
+  const elsewhere = tmp('elsewhere');
+  const named = await svc.cloneProject({ repo: source, dir: elsewhere, name: 'my copy' });
+  assert.equal(named.path, fs.realpathSync(path.join(elsewhere, 'my copy')));
+  await assert.rejects(svc.cloneProject({ repo: source, dir: elsewhere, name: 'my copy' }), /already exists/);
+  await assert.rejects(svc.cloneProject({ repo: '--upload-pack=touch /tmp/x' }), /not a repository/);
+  await assert.rejects(svc.cloneProject({ repo: path.join(home, 'nope') }), (e) => e.status === 400);
+  assert.ok(!fs.existsSync(path.join(home, 'bench-projects', 'nope')), 'a failed clone leaves nothing behind');
+
+  // A new, empty project.
+  const fresh = svc.createProject({ name: 'Fresh idea' });
+  assert.equal(fresh.name, 'Fresh idea');
+  assert.equal(fresh.path, fs.realpathSync(path.join(home, 'bench-projects', 'Fresh idea')));
+  assert.equal(git(fresh.path, 'rev-list', '--count', 'HEAD'), '1', 'it has a first commit to branch from');
+  // A name cannot climb out of the folder: it becomes a folder inside it.
+  const odd = svc.createProject({ name: '../escape' });
+  assert.equal(odd.path, fs.realpathSync(path.join(home, 'bench-projects', 'escape')));
+  assert.ok(!fs.existsSync(path.join(home, 'escape')));
+  svc.shutdown();
+});

@@ -867,3 +867,19 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .thumb.file{display:grid;align-content:center;gap:2px;width:140px;height:56px;padding:var(--space-1) var(--space-2);box-sizing:border-box;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-1);font-size:var(--text-xs)}
 .thumb-name{font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .composer.dragging{outline:2px dashed var(--accent-dim);outline-offset:-6px}
+/* Adding a project: tabs, the destination, the repository list. */
+.seg{display:flex;gap:2px;padding:3px;background:var(--surface-0);border:1px solid var(--line);border-radius:var(--radius-sm);overflow-x:auto}
+.seg button{flex:1;padding:6px var(--space-3);border-radius:4px;color:var(--muted);font-size:var(--text-sm);font-weight:600;white-space:nowrap}
+.seg button.on{background:var(--surface-3);color:var(--text)}
+.dest{display:flex;align-items:center;gap:var(--space-2)}
+.dest-path{flex:1;min-width:0;overflow-wrap:anywhere;font-size:var(--text-sm);padding:6px var(--space-2);background:var(--surface-0);border:1px solid var(--line);border-radius:var(--radius-sm)}
+.picker-box{display:grid;gap:var(--space-2);margin-top:var(--space-2)}
+.repo-list{max-height:34vh}
+.repo-row{display:grid;gap:2px;min-width:0;flex:1}
+.repo-row .muted{font-size:var(--text-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.browser-item.picked{background:var(--surface-2);box-shadow:inset 2px 0 0 var(--accent)}
+button.side-settings{width:100%;text-align:left}
+.repo-list{overflow-x:hidden}
+.repo-list .browser-item{min-width:0}
+.repo-row{overflow:hidden}
+.repo-row .mono-sm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

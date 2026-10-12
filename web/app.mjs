@@ -5,7 +5,7 @@ import { useStore, refresh, connect } from './api.mjs';
 import { ToastContainer } from './components/toast.mjs';
 import { ConfirmHost } from './components/confirm.mjs';
 import { Dot, sessionsStatus, Icon } from './components/ui.mjs';
-import { Home } from './views/home.mjs';
+import { Home, AddProject } from './views/home.mjs';
 import { ProjectView } from './views/project.mjs';
 import { TaskView } from './views/task.mjs';
 import { SessionPane } from './views/session.mjs';
@@ -51,7 +51,9 @@ function useRoute() {
   return route;
 }
 
-function Sidebar({ route, onNavigate }) {
+// The Add project dialog is opened from here but drawn by App: on a phone the sidebar is
+// a transformed drawer, and a dialog inside it would slide away with it.
+function Sidebar({ route, onNavigate, onAdd }) {
   const projects = useStore((s) => s.projects);
   const tasks = useStore((s) => s.tasks);
   const sessions = useStore((s) => s.sessions);
@@ -101,6 +103,7 @@ function Sidebar({ route, onNavigate }) {
           `;
         })}
       </div>
+      <button class="side-settings" type="button" onClick=${() => { onNavigate(); onAdd(); }}><${Icon} name="plus" /> Add project</button>
       <a class="side-settings ${route.view === 'settings' ? 'active' : ''}" href="#/settings" onClick=${onNavigate}><${Icon} name="gear" /> Settings</a>
     </nav>
   `;
@@ -129,6 +132,7 @@ function App() {
   const error = useStore((s) => s.error);
   const heading = useStore((s) => title(route, s));
   const [drawer, setDrawer] = useState(false);
+  const [adding, setAdding] = useState(false);
 
   useEffect(() => {
     document.title = route.view === 'home' ? 'Bench' : `${heading} · Bench`;
@@ -143,7 +147,7 @@ function App() {
 
   return html`
     <div class="shell ${drawer ? 'drawer-open' : ''}">
-      <${Sidebar} route=${route} onNavigate=${() => setDrawer(false)} />
+      <${Sidebar} route=${route} onNavigate=${() => setDrawer(false)} onAdd=${() => setAdding(true)} />
       ${drawer ? html`<div class="scrim" onClick=${() => setDrawer(false)}></div>` : null}
       <main class="main">
         <header class="topbar">
@@ -154,6 +158,7 @@ function App() {
         ${error ? html`<div class="notice notice-bad">${error}</div>` : null}
         <${Main} route=${route} />
       </main>
+      ${adding ? html`<${AddProject} onClose=${() => setAdding(false)} />` : null}
       <${ToastContainer} />
       <${ConfirmHost} />
     </div>

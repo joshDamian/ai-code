@@ -412,6 +412,63 @@ export function compare(dir, branch, target) {
 
 // -- GitHub -----------------------------------------------------------------------
 
+/**
+ * What a person typed for a repository, as something `git clone` takes, and the folder
+ * name it clones into. `owner/repo` is GitHub shorthand; anything else is passed to git
+ * as given, except a value that could be read as an option.
+ * @param {string} spec @returns {{url:string, name:string, github:string|null}}
+ */
+export function repoSpec(spec) {
+  const s = String(spec || '').trim();
+  if (!s) throw new Error('Name a repository');
+  if (s.startsWith('-')) throw new Error('That is not a repository');
+  const short = /^([\w.-]+)\/([\w.-]+?)(?:\.git)?$/.exec(s);
+  if (short && !s.includes(':') && !s.startsWith('.') && !s.startsWith('/')) {
+    return { url: `https://github.com/${short[1]}/${short[2]}.git`, name: short[2], github: `${short[1]}/${short[2]}` };
+  }
+  const gh = /github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(s);
+  const name = (/([^/:]+?)(?:\.git)?\/?$/.exec(s)?.[1] || '').replace(/^\.+/, '');
+  if (!name) throw new Error('Cannot tell the repository name from that');
+  return { url: s, name, github: gh ? `${gh[1]}/${gh[2]}` : null };
+}
+
+/**
+ * Clones into `dir`, which must not exist yet. A GitHub repository goes through `gh`
+ * when it is logged in, so a private one needs no other credentials.
+ * @param {{url:string, github:string|null}} spec @param {string} dir
+ */
+export async function clone(spec, dir) {
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const viaGh = spec.github && (await ghReady());
+  /** @type {[string, string[]]} */
+  const [cmd, args] = viaGh && spec.github ? ['gh', ['repo', 'clone', spec.github, dir]] : ['git', ['clone', '--', spec.url, dir]];
+  await new Promise((resolve, reject) =>
+    execFile(cmd, args, { timeout: 15 * 60 * 1000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (err, _out, stderr) => {
+      if (!err) return resolve(undefined);
+      fs.rmSync(dir, { recursive: true, force: true });
+      reject(new Error(gitError({ stderr, message: err.message }) || 'The clone failed'));
+    })
+  );
+}
+
+/**
+ * The person's own repositories on GitHub, newest first, through `gh`. Empty when `gh`
+ * is not logged in.
+ * @returns {Promise<{name:string, description:string, private:boolean, updatedAt:string}[]>}
+ */
+export function githubRepos() {
+  return new Promise((resolve) =>
+    execFile('gh', ['repo', 'list', '--limit', '200', '--json', 'nameWithOwner,description,isPrivate,updatedAt'], { timeout: 30000, maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+      if (err) return resolve([]);
+      try {
+        resolve(JSON.parse(String(out)).map((/** @type {any} */ r) => ({ name: r.nameWithOwner, description: r.description || '', private: !!r.isPrivate, updatedAt: r.updatedAt })));
+      } catch {
+        resolve([]);
+      }
+    })
+  );
+}
+
 /** @returns {Promise<boolean>} */
 export function ghReady() {
   return new Promise((resolve) => execFile('gh', ['auth', 'status'], { timeout: 10000 }, (err) => resolve(!err)));

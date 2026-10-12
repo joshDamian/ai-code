@@ -30,12 +30,28 @@ function Defaults() {
   const save = (b) => api.setDefaults(b).then(refresh).catch(toast);
   return html`
     <section class="section card">
-      <h2>New sessions start with</h2>
+      <h2>Defaults</h2>
       <div class="field"><span class="field-label">Model</span><${ModelPicker} providers=${providers} value=${{ providerId: d.providerId, modelId: d.modelId }} onChange=${(v) => save(v)} /></div>
+      <${ProjectsFolder} value=${d.projectsDir} onSave=${(projectsDir) => save({ projectsDir })} />
       <div class="field"><span class="field-label">Effort</span><${EffortPicker} value=${d.effort} onChange=${(effort) => save({ effort })} /></div>
       <div class="field"><span class="field-label">Permissions</span><${ModePicker} value=${d.mode} onChange=${(mode) => save({ mode })} /></div>
       <p class="muted">Sessions load the project's <code>.claude/</code> settings and CLAUDE.md, and your own <code>~/.claude/CLAUDE.md</code>. Your user <code>settings.json</code> is not loaded, so its <code>env</code> cannot redirect a provider.</p>
     </section>
+  `;
+}
+
+function ProjectsFolder({ value, onSave }) {
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+  return html`
+    <div class="field">
+      <span class="field-label">Projects folder</span>
+      <div class="row">
+        <input class="input mono-sm" style="flex:1" value=${text} onInput=${(e) => setText(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && onSave(text)} />
+        <button class="btn sm secondary" type="button" disabled=${text === value} onClick=${() => onSave(text)}>Save</button>
+      </div>
+      <span class="muted field-hint">Where cloned and new projects go, unless you choose somewhere else when adding one.</span>
+    </div>
   `;
 }
 

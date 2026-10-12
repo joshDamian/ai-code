@@ -2,7 +2,9 @@
 import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { env } from './env.mjs';
 import { Store } from './store.mjs';
 import { Runtime, MODES } from './runtime.mjs';
 import { providerReady } from './providers.mjs';
@@ -31,6 +33,16 @@ function effortOf(e) {
 /** @param {string} text */
 function slug(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '') || 'task';
+}
+
+/** @param {string} p */
+const expandHome = (p) => p.replace(/^~(?=$|\/)/, os.homedir());
+
+/** A folder name from a project or repository name: no separators, nothing hidden. @param {string} n */
+function safeName(n) {
+  const s = String(n).trim().replace(/[\/\\]+/g, '-').replace(/[^\w.\- ]+/g, '-').replace(/^[.\-\s]+/, '').slice(0, 100);
+  if (!s) throw fail('That name cannot be a folder name');
+  return s;
 }
 
 /** @param {string} msg @param {number} [status] */
@@ -62,7 +74,7 @@ export class Service extends EventEmitter {
    * @param {{name?:string, path:string, init?:boolean}} o
    */
   addProject(o) {
-    const dir = path.resolve(String(o.path || '').replace(/^~(?=$|\/)/, process.env.HOME || '~'));
+    const dir = path.resolve(expandHome(String(o.path || '')));
     if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw fail(`No such directory: ${dir}`);
     if (!g.isRepo(dir)) {
       if (!o.init) throw Object.assign(fail(`${dir} is not a git repository`), { code: 'NOT_A_REPO' });
@@ -76,6 +88,51 @@ export class Service extends EventEmitter {
     const existing = this.store.projectByPath(top);
     if (existing) return existing;
     return this.store.addProject({ name: o.name?.trim() || path.basename(top), path: top });
+  }
+
+  /** Where cloned and new projects go unless a person picks somewhere else. */
+  projectsDir() {
+    const set = this.store.getSetting('projects_dir') || env('PROJECTS_DIR');
+    return path.resolve(expandHome(set || path.join(os.homedir(), 'bench-projects')));
+  }
+
+  /**
+   * Clones a repository into `dir` (the projects folder by default) and registers it.
+   * @param {{repo:string, dir?:string, name?:string}} o
+   */
+  async cloneProject(o) {
+    let spec;
+    try {
+      spec = g.repoSpec(o.repo);
+    } catch (e) {
+      throw fail(/** @type {Error} */ (e).message);
+    }
+    const target = path.join(o.dir ? path.resolve(expandHome(o.dir)) : this.projectsDir(), safeName(o.name || spec.name));
+    if (fs.existsSync(target) && fs.readdirSync(target).length) throw Object.assign(fail(`${target} already exists and is not empty`, 409), { code: 'EXISTS', path: target });
+    try {
+      await g.clone(spec, target);
+    } catch (e) {
+      throw fail(/** @type {Error} */ (e).message);
+    }
+    return this.addProject({ path: target, name: o.name });
+  }
+
+  /**
+   * A new, empty project: a folder with a fresh repository and a first commit.
+   * @param {{name:string, dir?:string}} o
+   */
+  createProject(o) {
+    if (!o.name?.trim()) throw fail('Name the project');
+    const target = path.join(o.dir ? path.resolve(expandHome(o.dir)) : this.projectsDir(), safeName(o.name));
+    if (fs.existsSync(target) && fs.readdirSync(target).length) throw Object.assign(fail(`${target} already exists and is not empty`, 409), { code: 'EXISTS', path: target });
+    fs.mkdirSync(target, { recursive: true });
+    return this.addProject({ path: target, name: o.name.trim(), init: true });
+  }
+
+  /** @returns {Promise<{ready:boolean, repos:any[]}>} */
+  async githubRepos() {
+    if (!(await g.ghReady())) return { ready: false, repos: [] };
+    return { ready: true, repos: await g.githubRepos() };
   }
 
   /** Unregisters a project. Its directory, worktrees and branches are left alone. @param {string} id */
@@ -385,6 +442,7 @@ export class Service extends EventEmitter {
 
   defaults() {
     return {
+      projectsDir: this.projectsDir(),
       providerId: this.store.getSetting('default_provider') || DEFAULT_PROVIDER,
       modelId: this.store.getSetting('default_model') || null,
       mode: /** @type {PermissionMode} */ (this.store.getSetting('default_mode') || 'default'),
@@ -392,8 +450,9 @@ export class Service extends EventEmitter {
     };
   }
 
-  /** @param {{providerId?:string, modelId?:string|null, mode?:string, effort?:string|null}} o */
+  /** @param {{providerId?:string, modelId?:string|null, mode?:string, effort?:string|null, projectsDir?:string|null}} o */
   setDefaults(o) {
+    if (o.projectsDir !== undefined) this.store.setSetting('projects_dir', o.projectsDir ? path.resolve(expandHome(o.projectsDir)) : '');
     const effort = effortOf(o.effort);
     if (effort !== undefined) this.store.setSetting('default_effort', effort || '');
     if (o.providerId) this.store.setSetting('default_provider', o.providerId);
