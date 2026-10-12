@@ -1,20 +1,14 @@
 import fs from 'node:fs';
 import pty from 'node-pty';
-import { AMBIENT_ROUTING_VARS } from './agents.mjs';
+import { cleanEnv } from './providers.mjs';
 
-// Interactive shells in a task's directories, reachable over a WebSocket.
+// Interactive shells over a WebSocket: in a task's worktree, in a project's checkout,
+// or running `claude --resume` on a session's conversation.
 //
-// Everything this app ran before now was one-shot: runProcess in agents.mjs hands an
-// agent a pipe for stdin and stdout, which has no window size, no foreground process
-// group to deliver a signal to, and no way to address the cursor or clear the screen.
-// A person landing a branch or debugging in a `claude` session needs all three, so
-// this spawns a real PTY - node-pty is the only thing here that gives one.
-//
-// The lifetime rule is the tmux one, and it is the reason this module exists rather
-// than a pty per socket: a session is keyed by (task, directory) and outlives the tab
-// that opened it, so a `claude` session survives a browser refresh. A timer started
-// when the last reader leaves is what stops a shell nobody comes back to from living
-// in the server's process table for the rest of the day.
+// The lifetime rule is the tmux one: a shell is keyed by what it is for and outlives
+// the tab that opened it, so a refresh or a phone locking its screen comes back to the
+// same shell. A timer started when the last reader leaves stops a shell nobody comes
+// back to from living for the rest of the day.
 
 // How long a session with no reader is kept before it is killed. Long enough to
 // survive a refresh, a laptop lid, or a second look after lunch; short enough that a
@@ -25,33 +19,8 @@ const DEFAULT_REAP_MS = 10 * 60 * 1000;
 // in this terminal must not grow the server's heap until the process dies.
 const SCROLLBACK_CHARS = 256 * 1024;
 
-// Shells alive at once, across every task. Two directories per task is the normal
-// case, so this is several tasks' worth of terminals open at the same time. The cap
-// is here because the route that opens them is unauthenticated: without it, a bug in
-// a client is a fork bomb against the machine the dashboard runs on.
-const MAX_SESSIONS = 8;
-
-// The two directories a task's shell can be opened in.
-export const TERMINAL_TARGETS = ['worktree', 'parent'];
-
-// Which of them a task can actually offer, and why not when it cannot. Read by the
-// dashboard so it can render the picker without opening a socket, and by the upgrade
-// handler so a target the tab offers is a target the socket accepts: one function,
-// so the two cannot come to different conclusions.
-//
-// `repo` is the project's own checkout - the one the task's branch lands on, and so
-// the one `git merge` has to be run in. Not the directory the server was started
-// from: a project added at any other path is a different repository, and a shell
-// opened there would be a terminal in the wrong repo offering a merge that does
-// nothing.
-export function terminalTargets(task, repo) {
-  const dir = task.worktree || null;
-  const reason = !dir ? 'This task has no worktree yet.' : fs.existsSync(dir) ? null : 'The worktree directory is gone.';
-  return [
-    { id: 'worktree', label: 'Worktree', dir, available: !reason, reason },
-    { id: 'parent', label: 'Parent checkout', dir: repo, available: true, reason: null },
-  ];
-}
+// Shells alive at once. A cap, so a client bug cannot fork-bomb the machine.
+const MAX_SESSIONS = 12;
 
 // The environment the shell starts with. The ambient Anthropic routing is stripped for
 // the same reason childEnv strips it from an agent run: this shell is where a person
@@ -63,9 +32,8 @@ export function terminalTargets(task, repo) {
 // because an agent that could not bind was the thing that once killed the dashboard.
 // This is a person's own shell, and hiding their port from them would be a surprise
 // rather than a protection.
-function shellEnv() {
-  const env = { ...process.env };
-  for (const k of AMBIENT_ROUTING_VARS) delete env[k];
+function shellEnv(extra = {}) {
+  const env = { ...cleanEnv(), ...extra };
   // The emulator on the other end is xterm.js, and it is the terminal the shell is
   // actually talking to - so this is a fact about the tty, not a preference. It has to
   // be set rather than inherited: the server may have been started by launchd, where
@@ -152,8 +120,10 @@ export class TerminalSessions {
   // The session for (task, target), started if there is not one already. A session
   // whose shell has exited is dropped first: reattaching to a dead pty would give the
   // client a terminal that accepts keystrokes and answers none of them.
-  open({ taskId, target, cwd, cols = 80, rows = 24 }) {
-    const key = `${taskId}:${target}`;
+  // `command` is a shell line run by a login shell in place of an interactive one, so it
+  // finds what the person's PATH finds; `env` is laid over the clean environment.
+  /** @param {{key:string, cwd:string, command?:string|null, env?:Record<string,string>, cols?:number, rows?:number}} spec */
+  open({ key, cwd, command = null, env = {}, cols = 80, rows = 24 }) {
     const existing = this.sessions.get(key);
     if (existing && existing.alive) return existing;
     if (existing) this.#dispose(existing);
@@ -162,11 +132,11 @@ export class TerminalSessions {
     }
 
     ensureSpawnHelper();
-    const p = pty.spawn(loginShell(), [], { name: 'xterm-256color', cwd, cols, rows, env: shellEnv() });
+    const args = command ? ['-l', '-c', command] : ['-l'];
+    const file = loginShell();
+    const p = pty.spawn(file, args, { name: 'xterm-256color', cwd, cols, rows, env: shellEnv(env) });
     const session = {
       key,
-      taskId,
-      target,
       cwd,
       pty: p,
       cols,

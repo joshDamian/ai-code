@@ -1,1 +1,38 @@
-{"name":"ai-code","version":"1.0.0","private":true,"type":"module","bin":{"ai-code":"./bin/ai-code.js"},"scripts":{"test":"node --test tests/*.mjs","start":"node src/server.mjs","cli":"node src/cli.mjs"},"engines":{"node":">=22.5.0"},"dependencies":{"ink":"^5.2.1","ink-select-input":"^6.2.0","ink-spinner":"^5.0.0","ink-text-input":"^6.0.0","node-pty":"^1.1.0","react":"^18.3.1","react-dom":"^18.3.1","web-push":"^3.6.7","ws":"^8.21.3"}}
+{
+  "name": "ai-code",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ai-code": "./bin/ai-code.js"
+  },
+  "scripts": {
+    "start": "node src/cli.mjs serve",
+    "test": "node --test tests/*.test.mjs",
+    "typecheck": "tsc -p ."
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.296",
+    "@highlightjs/cdn-assets": "11.11.1",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "dompurify": "3.4.16",
+    "htm": "3.1.1",
+    "marked": "15.0.12",
+    "mermaid": "12.1.0",
+    "node-pty": "^1.1.0",
+    "preact": "10.29.8",
+    "qrcode": "1.5.4",
+    "web-push": "^3.6.7",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.8",
+    "@types/qrcode": "1.5.5",
+    "@types/ws": "8.18.1",
+    "typescript": "5.9.3"
+  }
+}

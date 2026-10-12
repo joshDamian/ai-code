@@ -1,621 +1,267 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
-import { Service, transitions } from './service.mjs';
-import { childEnv, providerEnv } from './agents.mjs';
+// @ts-check
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const a = process.argv.slice(2);
-// Constructing the Service opens the database, so every invocation - including a
-// read-only one - touches shared state. The store's reaper accounts for that.
-const s = new Service(process.env.AI_CODE_ROOT || process.cwd());
+// The command line. Most of the tool lives in the browser; this starts the server,
+// registers projects, pairs devices and installs the service.
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const appRoot = path.resolve(here, '..');
+const port = Number(process.env.PORT || 4317);
+const dataRoot = process.env.AI_CODE_ROOT || process.cwd();
+
+const HELP = `ai-code - a workbench for Claude sessions
+
+  ai-code serve                 run the server in the foreground (default)
+  ai-code open                  open the app in a browser
+  ai-code add <path> [name]     register a repository as a project (--init to git init it)
+  ai-code projects              list projects
+  ai-code share [--off]         publish the server on your tailnet (tailscale serve)
+  ai-code pair                  print a one-time link (and QR code) that pairs a device
+  ai-code devices               list paired devices
+  ai-code revoke <device-id>    unpair a device
+  ai-code service install       run the server at login and keep it running
+  ai-code service uninstall     remove that service
+  ai-code service status        whether the service is installed and running
+  ai-code doctor                check git, node, claude, gh and the providers
+  ai-code shell <provider> [..] an interactive \`claude\` billed to that provider
+
+Environment: PORT (default 4317), AI_CODE_ROOT (where the database lives),
+AI_CODE_PUBLIC_URL (the address other devices reach this server at).`;
+
+/** @param {unknown} x */
 const out = (x) => console.log(typeof x === 'string' ? x : JSON.stringify(x, null, 2));
 
-const HELP = `AI Code
-
-Project
-  init [name] [path]
-  projects
-Context
-  context init <project-id>
-  context enrich <project-id>
-Task
-  task create <project-id> <title> [--parent <task-id>]
-  task list [project-id] [--state <STATE>]
-  task show <id>
-  task status <id>
-  task active
-  task plan <id>
-  task approve <id>
-  task execute <id> [--background] [--force]
-  task review <id>
-  task repair <id>
-  task diff <id> [--to <branch>]
-  task port <id> [--to <branch>] [--dry-run] [--clean]
-  task cancel <id>
-  task close <id>
-  task link <id> [<parent-id>]
-  task feedback <id> <text>
-  task discuss <id> <text>
-  task resolve <id> [--option <n>] [text]
-Providers
-  provider list
-  provider add-claude
-  provider add-deepseek [model]
-  provider add-openrouter
-  provider add-fireworks
-  provider sync [provider-id]
-  provider test <provider-id> [model-id]
-  provider health [provider-id]
-  provider enable <provider-id>
-  provider disable <provider-id>
-Models
-  model list [provider-id]
-  model enable <model-id>
-  model disable <model-id>
-Routing
-  routing show
-  routing set <json-file>
-Runs
-  runs
-  usage [24h|7d|30d|all]
-  usage reprice
-Shell
-  shell <provider-id> [claude-args...]
-Ranker
-  eval [project-id] [--k <n>] [--limit <n>] [--config <json>]
-                     [--arms <json>] [--debug] [--json]
-Automation
-  automation list
-  automation add <name> <trigger> <action>
-  doctor
-  dashboard
-  web
-  tui`;
-
-// The Claude Code catalog. Every model runs through the same binary, so all of
-// them can drive tools; they differ on reasoning depth, speed and price.
-//
-// The cache rates are most of the bill, not a detail of it. An agent run is ~88%
-// cache reads by token, and Claude Code writes its cache with the one-hour TTL, so
-// a write is 2x the input rate. A read is 0.1x, except on the two models priced
-// below that ($0.20 on Opus 5.5, $0.25 on Fable 5.1). Without them a reviewer run
-// that the CLI itself priced at $0.77 was recorded as $0.07 - the output tokens and
-// nothing else. Checked against the CLI's own total_cost_usd on 2026-10-05: on every
-// run with no subagent and no resumed session, every model with runs matches it to the cent.
-//
-// `quality` is a relative judgment on a 10-point scale, and the routing strategies
-// lean on it: the frontier tier is 10, the previous Opus 9.5, Sonnet 5.5 9.
-const CLAUDE_MODELS = [
-  { id: 'anthropic:claude-opus-5', name: 'claude-opus-5', displayName: 'Claude Opus 5', providerModelId: 'claude-opus-5', invocationModelId: 'claude-opus-5', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 7, quality: 9.5, contextLength: 1000000, reasoning: 'frontier', toolUse: true, streaming: true, inputCostPerMTok: 5, cacheReadCostPerMTok: 0.5, cacheWriteCostPerMTok: 10, outputCostPerMTok: 25, billingMode: 'subscription', pricingSource: 'Anthropic official pricing', pricingUpdatedAt: '2026-08-24' },
-  { id: 'anthropic:claude-opus-5-5', name: 'claude-opus-5-5', displayName: 'Claude Opus 5.5', providerModelId: 'claude-opus-5-5', invocationModelId: 'claude-opus-5-5', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 7, quality: 10, contextLength: 1000000, reasoning: 'frontier', toolUse: true, streaming: true, inputCostPerMTok: 4, cacheReadCostPerMTok: 0.2, cacheWriteCostPerMTok: 8, outputCostPerMTok: 20, billingMode: 'subscription', pricingSource: 'Anthropic official pricing', pricingUpdatedAt: '2026-09-27' },
-  { id: 'anthropic:claude-opus-4-8', name: 'claude-opus-4-8', displayName: 'Claude Opus 4.8', providerModelId: 'claude-opus-4-8', invocationModelId: 'claude-opus-4-8', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 6, quality: 9.5, contextLength: 1000000, reasoning: 'frontier', toolUse: true, streaming: true, inputCostPerMTok: 5, cacheReadCostPerMTok: 0.5, cacheWriteCostPerMTok: 10, outputCostPerMTok: 25, billingMode: 'subscription', pricingSource: 'Anthropic official pricing', pricingUpdatedAt: '2026-08-24' },
-  { id: 'anthropic:claude-sonnet-5', name: 'claude-sonnet-5', displayName: 'Claude Sonnet 5', providerModelId: 'claude-sonnet-5', invocationModelId: 'claude-sonnet-5', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 9, quality: 8.5, contextLength: 1000000, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 2, cacheReadCostPerMTok: 0.2, cacheWriteCostPerMTok: 4, outputCostPerMTok: 10, billingMode: 'subscription', pricingSource: 'Anthropic official pricing', pricingUpdatedAt: '2026-08-10' },
-  { id: 'anthropic:claude-sonnet-5-5', name: 'claude-sonnet-5-5', displayName: 'Claude Sonnet 5.5', providerModelId: 'claude-sonnet-5-5', invocationModelId: 'claude-sonnet-5-5', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 9, quality: 9, contextLength: 1000000, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 2, cacheReadCostPerMTok: 0.2, cacheWriteCostPerMTok: 4, outputCostPerMTok: 10, billingMode: 'subscription', pricingSource: 'Anthropic official pricing', pricingUpdatedAt: '2026-10-03' },
-  { id: 'anthropic:claude-sonnet-4-6', name: 'claude-sonnet-4-6', displayName: 'Claude Sonnet 4.6', providerModelId: 'claude-sonnet-4-6', invocationModelId: 'claude-sonnet-4-6', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 8, quality: 8, contextLength: 1000000, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 3, cacheReadCostPerMTok: 0.3, cacheWriteCostPerMTok: 6, outputCostPerMTok: 15, billingMode: 'subscription', pricingSource: 'Anthropic official pricing', pricingUpdatedAt: '2026-05-12' },
-  { id: 'anthropic:claude-haiku-4-5-20251001', name: 'claude-haiku-4-5-20251001', displayName: 'Claude Haiku 4.5', providerModelId: 'claude-haiku-4-5-20251001', invocationModelId: 'claude-haiku-4-5-20251001', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 10, quality: 7, contextLength: 200000, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 1, cacheReadCostPerMTok: 0.1, cacheWriteCostPerMTok: 2, outputCostPerMTok: 5, billingMode: 'subscription', pricingSource: 'Anthropic official pricing', pricingUpdatedAt: '2026-10-05' },
-  { id: 'anthropic:claude-fable-5-1', name: 'claude-fable-5-1', displayName: 'Claude Fable 5.1', providerModelId: 'claude-fable-5-1', invocationModelId: 'claude-fable-5-1', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 5, quality: 10, contextLength: 1000000, reasoning: 'frontier', toolUse: true, streaming: true, inputCostPerMTok: 10, cacheReadCostPerMTok: 0.25, cacheWriteCostPerMTok: 20, outputCostPerMTok: 50, billingMode: 'subscription', pricingSource: 'Anthropic official pricing', pricingUpdatedAt: '2026-09-27' },
-];
-
-// DeepSeek is reached through Claude Code's Anthropic-compatible endpoint, which
-// is why these carry both cache and peak/off-peak rates.
-const DEEPSEEK_MODELS = [
-  { id: 'deepseek:deepseek-flash', name: 'deepseek-flash', displayName: 'DeepSeek V4.1 Flash', providerModelId: 'deepseek-flash', invocationModelId: 'deepseek-flash', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 10, quality: 7, contextLength: 1000000, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.15, outputCostPerMTok: 0.6, cacheReadCostPerMTok: 0.003, peakInputCostPerMTok: 0.3, peakOutputCostPerMTok: 1.2, peakCacheReadCostPerMTok: 0.006, billingMode: 'api', pricingSource: 'DeepSeek official pricing', pricingUpdatedAt: '2026-09-21' },
-  { id: 'deepseek:deepseek-v4-pro', name: 'deepseek-v4-pro', displayName: 'DeepSeek V4 Pro', providerModelId: 'deepseek-v4-pro', invocationModelId: 'deepseek-v4-pro', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 7, quality: 8, contextLength: 1000000, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 0.66, outputCostPerMTok: 1.98, cacheReadCostPerMTok: 0.022, peakInputCostPerMTok: 1.32, peakOutputCostPerMTok: 3.96, peakCacheReadCostPerMTok: 0.044, billingMode: 'api', pricingSource: 'DeepSeek official pricing', pricingUpdatedAt: '2026-09-21' },
-];
-
-// OpenRouter gives access to models from multiple providers through one key.
-// The invocationModelId is what OpenRouter expects; the id is namespaced for
-// the local database.
-//
-// Every slug here is checked against OpenRouter's live catalog (`/api/v1/models`)
-// rather than against a model page that outlives the endpoint it names - a slug
-// retired upstream is a connection test that 400s with "No endpoints found", which
-// is what `mistralai/codestral-2501` became.
-//
-// The Claude entries are the path this integration is built for: Claude Code talking
-// to OpenRouter's Anthropic endpoint needs no translation, so these are what a run
-// should reach for and what the connection test defaults to (the list is ordered by
-// name, and `claude-*` sorts first). The rest are best-effort - they are reached
-// through that same Anthropic skin, which has to translate another vendor's tool
-// calls, so a model whose calls it cannot translate fails mid-run rather than at
-// connection time. They carry `coding` alone because of it: an implementer executes
-// a plan the routing tier already wrote, while planning and review stay on the
-// models whose protocol is not in question.
-const OPENROUTER_MODELS = [
-  { id: 'openrouter:anthropic/claude-opus-5', name: 'claude-opus-5', displayName: 'Claude Opus 5', providerModelId: 'anthropic/claude-opus-5', invocationModelId: 'anthropic/claude-opus-5', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 7, quality: 9.5, contextLength: 1000000, reasoning: 'frontier', toolUse: true, streaming: true, inputCostPerMTok: 5, outputCostPerMTok: 25, cacheReadCostPerMTok: 0.5, cacheWriteCostPerMTok: 10, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
-  { id: 'openrouter:anthropic/claude-opus-4.8', name: 'claude-opus-4.8', displayName: 'Claude Opus 4.8', providerModelId: 'anthropic/claude-opus-4.8', invocationModelId: 'anthropic/claude-opus-4.8', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 6, quality: 9.5, contextLength: 1000000, reasoning: 'frontier', toolUse: true, streaming: true, inputCostPerMTok: 5, outputCostPerMTok: 25, cacheReadCostPerMTok: 0.5, cacheWriteCostPerMTok: 10, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
-  { id: 'openrouter:anthropic/claude-sonnet-5', name: 'claude-sonnet-5', displayName: 'Claude Sonnet 5', providerModelId: 'anthropic/claude-sonnet-5', invocationModelId: 'anthropic/claude-sonnet-5', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 9, quality: 8.5, contextLength: 1000000, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 2, outputCostPerMTok: 10, cacheReadCostPerMTok: 0.2, cacheWriteCostPerMTok: 4, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
-  { id: 'openrouter:anthropic/claude-sonnet-4.6', name: 'claude-sonnet-4.6', displayName: 'Claude Sonnet 4.6', providerModelId: 'anthropic/claude-sonnet-4.6', invocationModelId: 'anthropic/claude-sonnet-4.6', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 8, quality: 8, contextLength: 1000000, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 3, outputCostPerMTok: 15, cacheReadCostPerMTok: 0.3, cacheWriteCostPerMTok: 6, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
-  { id: 'openrouter:anthropic/claude-haiku-4.5', name: 'claude-haiku-4.5', displayName: 'Claude Haiku 4.5', providerModelId: 'anthropic/claude-haiku-4.5', invocationModelId: 'anthropic/claude-haiku-4.5', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 10, quality: 7, contextLength: 200000, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 1, outputCostPerMTok: 5, cacheReadCostPerMTok: 0.1, cacheWriteCostPerMTok: 2, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
-  { id: 'openrouter:google/gemini-2.5-pro', name: 'gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', providerModelId: 'google/gemini-2.5-pro', invocationModelId: 'google/gemini-2.5-pro', capabilities: ['coding'], speed: 8, quality: 9, contextLength: 1000000, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 1.25, outputCostPerMTok: 10, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
-  { id: 'openrouter:google/gemini-2.5-flash', name: 'gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', providerModelId: 'google/gemini-2.5-flash', invocationModelId: 'google/gemini-2.5-flash', capabilities: ['coding'], speed: 10, quality: 8, contextLength: 1000000, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.15, outputCostPerMTok: 0.6, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
-  { id: 'openrouter:meta-llama/llama-4-maverick', name: 'llama-4-maverick', displayName: 'Llama 4 Maverick', providerModelId: 'meta-llama/llama-4-maverick', invocationModelId: 'meta-llama/llama-4-maverick', capabilities: ['coding'], speed: 9, quality: 8, contextLength: 1000000, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.2, outputCostPerMTok: 0.6, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
-  { id: 'openrouter:qwen/qwen3-235b-a22b', name: 'qwen3-235b', displayName: 'Qwen 3 235B', providerModelId: 'qwen/qwen3-235b-a22b', invocationModelId: 'qwen/qwen3-235b-a22b', capabilities: ['coding'], speed: 7, quality: 9, contextLength: 131072, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 0.7, outputCostPerMTok: 2.8, billingMode: 'api', pricingSource: 'OpenRouter pricing', pricingUpdatedAt: '2026-09-24' },
-];
-
-// Fireworks' serverless catalog, which is the cash fallback for when the Claude
-// subscription is spent: the three strong models carry every capability so plan and
-// review still have somewhere to go, and the cheap ones are the implement/repair
-// end. Kimi K3 and GLM 5.3 are also the two the subscription-free tiers of other
-// vendors route to, which is why they are here at their own prices rather than
-// through OpenRouter.
-//
-// Prices are from docs.fireworks.ai/serverless/pricing on 2026-10-05, standard
-// (not Priority, Fast or US-only) rates. Cached input is billed at the discount on
-// the row, and Fireworks reports no cache-write tokens at all - a new prefix is
-// billed as input - so a row with no cacheWriteCostPerMTok is priced correctly.
-//
-// DeepSeek V4.1 Flash is deliberately absent: Fireworks charges about twice what
-// the direct DeepSeek provider charges for the same model, and the direct provider
-// is what the fallback chain already reaches.
-//
-// The `quality` numbers are first judgments, not measurements: no run in this
-// pipeline has been observed on any of these models yet. They sit below the Claude
-// models they would replace, so a healthy subscription keeps the plan and the
-// review, and the first quota-exhausted fallback is where the replay calibration
-// (src/ranker-eval.mjs) has evidence to correct them.
-const FIREWORKS_MODELS = [
-  // FireRouter is not a model but a per-turn router across the serverless models
-  // below, billed at whatever model it routes to. Its catalog row is a fiction the
-  // scorer needs: pricing is pooled from its likely targets (GLM 5.3 through Kimi
-  // K3), `quality` sits below Opus but above any single open model, because most
-  // turns land on one of those two tiers. `provider sync` must not price-reconcile
-  // this row (see syncProviderModels), since no published rate exists to match.
-  { id: 'fireworks:accounts/fireworks/routers/firerouter', name: 'firerouter', displayName: 'FireRouter', providerModelId: 'accounts/fireworks/routers/firerouter', invocationModelId: 'accounts/fireworks/routers/firerouter', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 7, quality: 8.75, contextLength: 1048576, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 0.8, cacheReadCostPerMTok: 0.15, outputCostPerMTok: 4, billingMode: 'api', pricingSource: 'FireRouter - varies by routed model (pooled estimate)', pricingUpdatedAt: '2026-10-05' },
-  { id: 'fireworks:accounts/fireworks/models/kimi-k3', name: 'kimi-k3', name: 'kimi-k3', displayName: 'Kimi K3', providerModelId: 'accounts/fireworks/models/kimi-k3', invocationModelId: 'accounts/fireworks/models/kimi-k3', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 6, quality: 9, contextLength: 1048576, reasoning: 'frontier', toolUse: true, streaming: true, inputCostPerMTok: 3, cacheReadCostPerMTok: 0.3, outputCostPerMTok: 15, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
-  { id: 'fireworks:accounts/fireworks/models/glm-5p3', name: 'glm-5p3', displayName: 'GLM 5.3', providerModelId: 'accounts/fireworks/models/glm-5p3', invocationModelId: 'accounts/fireworks/models/glm-5p3', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 7, quality: 8.5, contextLength: 1048576, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 1.4, cacheReadCostPerMTok: 0.26, outputCostPerMTok: 4.4, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
-  { id: 'fireworks:accounts/fireworks/models/qwen3p8-max', name: 'qwen3p8-max', displayName: 'Qwen 3.8 Max', providerModelId: 'accounts/fireworks/models/qwen3p8-max', invocationModelId: 'accounts/fireworks/models/qwen3p8-max', capabilities: ['planning', 'coding', 'review', 'repair'], speed: 7, quality: 8.5, contextLength: 262144, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 2, cacheReadCostPerMTok: 0.25, outputCostPerMTok: 6, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
-  { id: 'fireworks:accounts/fireworks/models/minimax-m3', name: 'minimax-m3', displayName: 'MiniMax M3', providerModelId: 'accounts/fireworks/models/minimax-m3', invocationModelId: 'accounts/fireworks/models/minimax-m3', capabilities: ['coding', 'repair'], speed: 8, quality: 7.5, contextLength: 512000, reasoning: 'strong', toolUse: true, streaming: true, inputCostPerMTok: 0.3, cacheReadCostPerMTok: 0.06, outputCostPerMTok: 1.2, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
-  { id: 'fireworks:accounts/fireworks/models/glm-5p3-flash', name: 'glm-5p3-flash', displayName: 'GLM 5.3 Flash', providerModelId: 'accounts/fireworks/models/glm-5p3-flash', invocationModelId: 'accounts/fireworks/models/glm-5p3-flash', capabilities: ['coding', 'repair'], speed: 9, quality: 7, contextLength: 1048576, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.15, cacheReadCostPerMTok: 0.03, outputCostPerMTok: 0.5, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
-  { id: 'fireworks:accounts/fireworks/models/gpt-oss-120b', name: 'gpt-oss-120b', displayName: 'GPT OSS 120B', providerModelId: 'accounts/fireworks/models/gpt-oss-120b', invocationModelId: 'accounts/fireworks/models/gpt-oss-120b', capabilities: ['coding'], speed: 9, quality: 6.5, contextLength: 131072, reasoning: 'moderate', toolUse: true, streaming: true, inputCostPerMTok: 0.15, cacheReadCostPerMTok: 0.015, outputCostPerMTok: 0.6, billingMode: 'api', pricingSource: 'Fireworks serverless pricing', pricingUpdatedAt: '2026-10-05' },
-];
-
-// What each provider's models should be, keyed by the id `add-*` writes. `provider
-// sync` reads it, so there is one place that knows what a provider's list is.
-const CATALOGS = {
-  'anthropic-claude-code': CLAUDE_MODELS,
-  'deepseek-claude-code': DEEPSEEK_MODELS,
-  'openrouter': OPENROUTER_MODELS,
-  'fireworks': FIREWORKS_MODELS,
-};
-
-// Commands the task namespace accepts. `execute` and the planning verbs are async;
-// the state-machine verbs are not.
-const TASK_OPS = ['plan', 'approve', 'execute', 'implement', 'test', 'review', 'repair', 'reject', 'replan', 'retry', 'refine', 'diff', 'port', 'cancel', 'close', 'link', 'feedback', 'discuss', 'resolve'];
-// The steps the server will run as a background job. `port` is not one: a job
-// carries no options, so a target branch would need a column on `jobs` and a step
-// in the runner, and a merge is a decision rather than a long agent run.
-const QUEUEABLE = new Set(['execute', 'implement', 'test', 'review', 'repair', 'retry']);
-
-const port = Number(process.env.PORT || 4317);
-
-// Hands a job to the dashboard server. `--background` cannot run the work here:
-// this process exits as soon as it has printed, and a queue in a process that is
-// about to exit is a queue nobody ever drains. Spawning a server instead would
-// mean orphan processes and port arbitration for no benefit.
-async function enqueueRemote(taskId, kind) {
-  const path = kind === 'execute' ? 'execute/background' : kind;
+/** A call to the running server, over loopback, which needs no token. @param {string} method @param {string} p @param {unknown} [body] */
+async function api(method, p, body) {
   let res;
   try {
-    res = await fetch(`http://127.0.0.1:${port}/api/tasks/${taskId}/${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ background: true }),
+    res = await fetch(`http://127.0.0.1:${port}${p}`, {
+      method,
+      headers: body === undefined ? {} : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
-    throw new Error(`no dashboard server on :${port}; start one with \`ai-code web\`, or drop --background`);
+    throw new Error(`No server on port ${port}. Start it with \`ai-code serve\` or \`ai-code service install\`.`);
   }
-  const j = await res.json();
-  if (!res.ok) throw new Error(j.error || `server returned ${res.status}`);
-  return j;
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error || `Server answered ${res.status}`);
+  return data;
 }
 
-async function taskCommand(sub, rest) {
-  if (sub === 'create') {
-    // Scanned and stripped before the text is joined, so a description is the words
-    // around the flag rather than whatever survived it. Scanned over `words` rather
-    // than `rest` so the indices are relative to the text and the project id - which
-    // is always rest[0] - is never one of the two that come out.
-    const words = rest.slice(1);
-    const pi = words.indexOf('--parent');
-    const parentId = pi >= 0 ? words[pi + 1] : undefined;
-    if (pi >= 0 && (!parentId || parentId.startsWith('--'))) throw new Error('--parent needs a task id');
-    const text = (pi >= 0 ? words.filter((_, i) => i !== pi && i !== pi + 1) : words).join(' ');
-    const t = s.createTask(rest[0], text, { parentId });
-    return out(s.prepare(t.id));
-  }
-  if (sub === 'list') {
-    const si = rest.indexOf('--state');
-    const state = si >= 0 ? rest[si + 1] : undefined;
-    if (si >= 0 && (!state || state.startsWith('--'))) throw new Error('--state needs a value');
-    if (state && !transitions[state]) throw new Error(`Invalid state ${state}; valid states are ${Object.keys(transitions).join(', ')}`);
-    const pid = rest[0] && !rest[0].startsWith('--') ? rest[0] : undefined;
-    return out(s.store.listTasks(pid, state));
-  }
-  // `live` and `revision` come along because they are the two things a task's own row
-  // cannot answer: whether a run is in flight right now, and what the current plan
-  // changed. Both are null or empty on a task that has neither.
-  if (sub === 'show') {
-    const task = s.task(rest[0]);
-    // The parent row rather than only its id, for the same reason the server's
-    // `show` carries it: the id alone is not what a reader wants to see next to a
-    // task, and resolving it is one lookup this end already has.
-    return out({ task, runs: s.store.listRuns(rest[0]), live: s.liveRun(rest[0]), revision: s.revision(task), parent: task.parent_id ? s.store.getTask(task.parent_id) || null : null });
-  }
-  // What a background job is doing, which the run rows alone do not answer: a
-  // queued job has no run yet, and the job is what says so.
-  if (sub === 'status') return out({ task: s.task(rest[0]), jobs: s.store.listJobs(rest[0]), runs: s.store.listRuns(rest[0]) });
-  if (sub === 'active') return out(s.store.activeJobs());
-  if (!TASK_OPS.includes(sub)) return null;
-  const id = rest[0];
-  // Overrides the refusal to execute a plan whose read files are still dirty.
-  // Named rather than silent, so a verb that cannot act on it says so instead of
-  // accepting the flag and doing nothing.
-  const force = rest.includes('--force');
-  if (force && !['execute', 'implement'].includes(sub)) throw new Error(`--force is not supported for task ${sub}`);
-  // Flags are positional scans of the same array, so the id stays rest[0] and a
-  // flag's value is whatever follows it. Named rather than silent, so a verb that
-  // cannot act on one says so instead of accepting it and doing nothing.
-  const at = rest.indexOf('--to');
-  const to = at >= 0 ? rest[at + 1] : undefined;
-  const dryRun = rest.includes('--dry-run');
-  const clean = rest.includes('--clean');
-  if (at >= 0 && (!to || to.startsWith('--'))) throw new Error('--to needs a branch name');
-  if (at >= 0 && !['diff', 'port'].includes(sub)) throw new Error(`--to is not supported for task ${sub}`);
-  if (dryRun && sub !== 'port') throw new Error(`--dry-run is not supported for task ${sub}`);
-  if (clean && sub !== 'port') throw new Error(`--clean is not supported for task ${sub}`);
-  // `resolve`'s option, numbered from 0 as the stored decision numbers them. The
-  // words around the flag are the instruction, so the flag and its value come out of
-  // the same array the text is read from rather than out of the task id's slot.
-  const oi = rest.indexOf('--option');
-  const option = oi >= 0 ? Number(rest[oi + 1]) : null;
-  if (oi >= 0 && !Number.isInteger(option)) throw new Error('--option needs an option number');
-  if (oi >= 0 && sub !== 'resolve') throw new Error(`--option is not supported for task ${sub}`);
-  const words = rest.slice(1).filter((_, i) => !(oi >= 0 && (i === oi - 1 || i === oi)));
-  if (rest.includes('--background')) {
-    if (!QUEUEABLE.has(sub)) throw new Error(`--background is not supported for task ${sub}`);
-    // A job carries no options: enqueue takes a task and a kind, the runner's step
-    // passes neither, and the jobs table has no column to hold one.
-    if (force) throw new Error('--force cannot be combined with --background; run it in the foreground');
-    return out(await enqueueRemote(id, sub));
-  }
-  const r =
-    sub === 'plan' ? await s.plan(id)
-    : sub === 'approve' ? s.approve(id)
-    : sub === 'execute' ? await s.execute(id, { force })
-    : sub === 'implement' ? await s.implement(id, { force })
-    : sub === 'test' ? await s.runTests(id)
-    : sub === 'review' ? await s.review(id)
-    : sub === 'repair' ? await s.repair(id)
-    : sub === 'reject' ? s.reject(id)
-    : sub === 'replan' ? s.replan(id)
-    : sub === 'retry' ? await s.retry(id)
-    : sub === 'refine' ? await s.refine(id, rest.slice(1).join(' '))
-    : sub === 'diff' ? s.diff(id, { to })
-    : sub === 'port' ? await s.port(id, { to, dryRun, clean })
-    : sub === 'cancel' ? s.cancelTask(id)
-    : sub === 'close' ? s.closeTask(id)
-    // No second argument is the clear, which is how a link nobody meant is removed.
-    : sub === 'link' ? s.linkTask(id, rest[1] || null)
-    : sub === 'feedback' ? await s.feedback(id, rest.slice(1).join(' '))
-    // The decision gate's two verbs. A discussion answers a comment without moving
-    // the task; a resolve is the instruction that starts the repair, and it is
-    // blocking for the length of that cycle.
-    : sub === 'discuss' ? await s.discussReview(id, rest.slice(1).join(' '))
-    : sub === 'resolve' ? await s.resolveReview(id, { option, text: words.join(' ') })
-    // Named rather than left to the last arm. This chain used to end in cancelTask,
-    // so any verb added to TASK_OPS without a line here cancelled the task.
-    : (() => { throw new Error(`Unhandled task operation: ${sub}`); })();
-  return out(r);
+async function service() {
+  const { Service } = await import('./service.mjs');
+  return new Service(dataRoot);
 }
 
-// `add-*` is create-only. Re-running one looks like the way to refresh a provider
-// whose catalog has moved on, and it is not: the provider row is written with
-// INSERT OR REPLACE, so a second run silently resets config the user has since
-// edited. `provider sync` is the refresh, and this error is how they hear about it.
-function createOnly(id) {
-  if (s.store.getProvider(id)) throw new Error(`Provider '${id}' already exists; run \`provider sync ${id}\` to refresh its models`);
-}
+// -- the OS service -------------------------------------------------------------------------
 
-async function providerCommand(sub, rest) {
-  if (sub === 'list') return out({ providers: s.store.listProviders(), models: s.store.listModels() });
+const LABEL = 'com.ai-code.server';
+const OLD_LABEL = 'com.ai-code.supervisor';
+const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`);
+const unit = path.join(os.homedir(), '.config', 'systemd', 'user', 'ai-code.service');
 
-  if (sub === 'add-claude') {
-    createOnly('anthropic-claude-code');
-    s.addProvider({ id: 'anthropic-claude-code', name: 'Anthropic / Claude Code', kind: 'claude-code', enabled: true, config: { routable: true, billingMode: 'subscription' } });
-    for (const m of CLAUDE_MODELS) s.addModel({ ...m, providerId: 'anthropic-claude-code' });
-    return out(s.store.getProvider('anthropic-claude-code'));
-  }
+/** @param {string} s */
+const xml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-  if (sub === 'add-deepseek') {
-    createOnly('deepseek-claude-code');
-    s.addProvider({ id: 'deepseek-claude-code', name: 'DeepSeek via Claude Code', kind: 'deepseek', enabled: true, config: { apiKeyEnv: 'DEEPSEEK_API_KEY', effort: 'max', routable: true, billingMode: 'api' } });
-    for (const m of DEEPSEEK_MODELS) s.addModel({ ...m, providerId: 'deepseek-claude-code' });
-    return out(s.store.getProvider('deepseek-claude-code'));
-  }
-
-  if (sub === 'add-openrouter') {
-    createOnly('openrouter');
-    s.addProvider({ id: 'openrouter', name: 'OpenRouter', kind: 'openrouter', enabled: true, config: { apiKeyEnv: 'OPENROUTER_API_KEY', effort: 'max', routable: true, billingMode: 'api' } });
-    for (const m of OPENROUTER_MODELS) s.addModel({ ...m, providerId: 'openrouter' });
-    return out(s.store.getProvider('openrouter'));
-  }
-
-  if (sub === 'add-fireworks') {
-    createOnly('fireworks');
-    s.addProvider({ id: 'fireworks', name: 'Fireworks', kind: 'fireworks', enabled: true, config: { apiKeyEnv: 'FIREWORKS_API_KEY', effort: 'max', routable: true, billingMode: 'api' } });
-    for (const m of FIREWORKS_MODELS) s.addModel({ ...m, providerId: 'fireworks' });
-    return out(s.store.getProvider('fireworks'));
-  }
-
-  // The command that is *not* create-only: it reconciles the model rows a provider
-  // already has against its catalog, adding what is missing and deleting what is no
-  // longer there. Naming one that is not installed is a mistake worth reporting; an
-  // unqualified run covers the providers this install actually has, because an
-  // install with one provider must not have to name it to use the command.
-  if (sub === 'sync') {
-    const named = rest[0];
-    if (named && !CATALOGS[named]) throw new Error(`Unknown provider '${named}'; syncable providers: ${Object.keys(CATALOGS).join(', ')}`);
-    if (named && !s.store.getProvider(named)) throw new Error(`Provider '${named}' not found; add it first with provider add-claude, add-deepseek, add-openrouter or add-fireworks`);
-    const ids = named ? [named] : Object.keys(CATALOGS).filter((id) => s.store.getProvider(id));
-    const synced = ids.map((id) => s.syncProviderModels(id, CATALOGS[id]));
-    return out(named ? synced[0] : synced);
-  }
-
-  if (sub === 'test') return out(await s.testProvider(rest[0], rest[1]));
-  if (sub === 'health') {
-    // The circuit-breaker state is otherwise only visible in the two UIs, and this
-    // is the command a user reaches for when routing has gone somewhere unexpected.
-    const all = s.providerHealthList();
-    if (rest[0]) {
-      const one = all.find((h) => h.providerId === rest[0]);
-      if (!one) return null;
-      return out(one);
+function serviceInstall() {
+  const node = process.execPath;
+  const server = path.join(appRoot, 'src', 'server.mjs');
+  // The PATH of this shell goes with it: the service starts `claude`, `git` and `gh`, and
+  // a service manager gives a job almost no PATH of its own.
+  /** @type {Record<string, string>} */
+  const env = { AI_CODE_ROOT: dataRoot, PORT: String(port), PATH: process.env.PATH || '/usr/bin:/bin' };
+  for (const k of ['DEEPSEEK_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'AI_CODE_PUBLIC_URL']) if (process.env[k]) env[k] = String(process.env[k]);
+  if (process.platform === 'darwin') {
+    const logs = path.join(os.homedir(), 'Library', 'Logs', 'ai-code');
+    fs.mkdirSync(logs, { recursive: true });
+    fs.mkdirSync(path.dirname(plist), { recursive: true });
+    const domain = `gui/${process.getuid?.()}`;
+    // The supervisor of the old version held the same port.
+    const old = path.join(os.homedir(), 'Library', 'LaunchAgents', `${OLD_LABEL}.plist`);
+    if (fs.existsSync(old)) {
+      spawnSync('launchctl', ['bootout', `${domain}/${OLD_LABEL}`]);
+      fs.rmSync(old);
+      console.log(`Removed the old supervisor (${OLD_LABEL}).`);
     }
-    return out(all);
+    fs.writeFileSync(
+      plist,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${LABEL}</string>
+  <key>ProgramArguments</key><array><string>${xml(node)}</string><string>${xml(server)}</string></array>
+  <key>EnvironmentVariables</key><dict>${Object.entries(env).map(([k, v]) => `<key>${k}</key><string>${xml(v)}</string>`).join('')}</dict>
+  <key>WorkingDirectory</key><string>${xml(dataRoot)}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${xml(path.join(logs, 'server.log'))}</string>
+  <key>StandardErrorPath</key><string>${xml(path.join(logs, 'server.log'))}</string>
+</dict>
+</plist>
+`
+    );
+    spawnSync('launchctl', ['bootout', `${domain}/${LABEL}`]);
+    const r = spawnSync('launchctl', ['bootstrap', domain, plist], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`launchctl bootstrap failed: ${r.stderr}`);
+    console.log(`Installed ${plist}\nThe server runs at login and restarts if it stops. Logs: ${logs}/server.log`);
+    return;
   }
-  if (sub === 'enable' || sub === 'disable') return out(s.updateProvider(rest[0], { enabled: sub === 'enable' }));
-  return null;
+  if (process.platform === 'linux') {
+    fs.mkdirSync(path.dirname(unit), { recursive: true });
+    fs.writeFileSync(
+      unit,
+      `[Unit]
+Description=AI Code
+After=network-online.target
+
+[Service]
+ExecStart=${node} ${server}
+WorkingDirectory=${dataRoot}
+${Object.entries(env).map(([k, v]) => `Environment=${JSON.stringify(`${k}=${v}`)}`).join('\n')}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+`
+    );
+    for (const args of [['--user', 'daemon-reload'], ['--user', 'enable', '--now', 'ai-code.service'], ['--user', 'restart', 'ai-code.service']]) {
+      const r = spawnSync('systemctl', args, { encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(`systemctl ${args.join(' ')} failed: ${r.stderr}`);
+    }
+    console.log(`Installed ${unit}\nTo keep it running after you log out: sudo loginctl enable-linger ${os.userInfo().username}\nLogs: journalctl --user -u ai-code -f`);
+    return;
+  }
+  throw new Error(`No service support for ${process.platform}; run \`ai-code serve\` under your own process manager.`);
 }
 
-// An interactive claude session wired to one provider, which is what makes a session
-// typed by hand bill the same way a routed run does.
-//
-// The environment is the pair the runner already builds: `providerEnv` translates the
-// provider row into the ANTHROPIC_* variables claude reads, and `childEnv` strips the
-// ambient routing a person's shell may carry. Composing them here rather than writing
-// a second translation for the wrapper is the whole point - the wrapper used to source
-// a file nothing in the repo writes, and fell back to the subscription login when it
-// was absent. It also means a provider with no key fails loudly instead of silently
-// running on the subscription.
-async function shellCommand(providerId, args) {
-  if (!providerId) throw new Error('shell needs a provider id; try `shell deepseek-claude-code`');
-  const provider = s.store.getProvider(providerId);
-  if (!provider) throw new Error(`Provider '${providerId}' not found; add it first with provider add-deepseek, add-openrouter, add-fireworks or add-claude`);
-  if (!provider.enabled) throw new Error(`Provider '${providerId}' is disabled; run \`provider enable ${providerId}\` to use it`);
-
-  const models = s.store.listModels(providerId);
-  if (!models.length) throw new Error(`Provider '${providerId}' has no models; run \`provider sync ${providerId}\` to load its catalog`);
-  const enabled = models.filter((m) => m.enabled);
-  // The cheap end of what the provider offers, which is the tier an implementation
-  // run is routed to; `unknown price sorts last` rather than first, so a row with no
-  // published cost is never picked over one that has a price. A `--model` in the
-  // passthrough args overrides it, because claude's own flag beats the env default.
-  const model = [...(enabled.length ? enabled : models)].sort(
-    (x, y) => (x.inputCostPerMTok ?? Infinity) - (y.inputCostPerMTok ?? Infinity)
-  )[0];
-
-  const child = spawn('claude', args, { env: childEnv(providerEnv(provider, model)), stdio: 'inherit' });
-  // Ctrl-C reaches the child through the process group it shares with this one; the
-  // forward is for a signal delivered to this pid alone, and it is what keeps this
-  // process alive to report the session's exit code rather than dying first.
-  const forward = (sig) => child.kill(sig);
-  process.on('SIGINT', forward);
-  process.on('SIGTERM', forward);
-  const code = await new Promise((resolve, reject) => {
-    child.on('error', reject);
-    child.on('close', resolve);
-  });
-  process.off('SIGINT', forward);
-  process.off('SIGTERM', forward);
-  process.exitCode = code ?? 1;
+function serviceUninstall() {
+  if (process.platform === 'darwin') {
+    spawnSync('launchctl', ['bootout', `gui/${process.getuid?.()}/${LABEL}`]);
+    fs.rmSync(plist, { force: true });
+  } else if (process.platform === 'linux') {
+    spawnSync('systemctl', ['--user', 'disable', '--now', 'ai-code.service']);
+    fs.rmSync(unit, { force: true });
+    spawnSync('systemctl', ['--user', 'daemon-reload']);
+  }
+  console.log('Service removed.');
 }
 
-// One readiness attempt, bounded. A port held by something that accepts the
-// connection and then never answers does not fail the request, it hangs it.
-async function reachable(path, ms = 1000) {
+async function serviceStatus() {
+  const installed = process.platform === 'darwin' ? fs.existsSync(plist) : fs.existsSync(unit);
+  let running = null;
   try {
-    return await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(ms) });
+    running = await api('GET', '/api/server/status');
+  } catch {
+    /* not running */
+  }
+  out({ installed, file: process.platform === 'darwin' ? plist : unit, running: !!running, ...(running ? { pid: running.pid, version: running.version, root: running.root } : {}) });
+}
+
+// -- commands ---------------------------------------------------------------------------------
+
+function tailscaleUrl() {
+  try {
+    const name = JSON.parse(execFileSync('tailscale', ['status', '--json'], { encoding: 'utf8' }))?.Self?.DNSName?.replace(/\.$/, '');
+    return name ? `https://${name}` : null;
   } catch {
     return null;
   }
 }
 
-// The TUI's own wait, for the same reason it has one: a start is asynchronous, and
-// the browser should open on a dashboard rather than on whatever the browser does
-// with a refused connection.
-async function waitForServer(attempts = 25) {
-  for (let i = 0; i < attempts; i++) {
-    await new Promise((r) => setTimeout(r, 200));
-    if ((await reachable('/api/overview'))?.ok) return true;
-  }
-  return false;
-}
-
-function openInBrowser(url) {
-  out(`AI Code Mission Control: ${url}`);
-  // Darwin has a command for this. Elsewhere the URL above is the answer, which is
-  // what a terminal on those platforms does with it anyway.
-  if (process.platform === 'darwin') spawn('open', [url], { stdio: 'ignore', detached: true }).unref();
-}
-
-// `ai-code web` - the dashboard, opened, with a server started if there is not one.
-//
-// The ladder is ordered by how much has to be done: a server already answering, then
-// a supervisor holding the port on its behalf, then starting one here. It is the
-// counterpart to the dashboard's own Start button, for the person at a terminal
-// rather than in a browser - which is also the answer the stopped panel gives, so the
-// two name the same command.
-async function webCommand() {
-  const url = `http://localhost:${port}`;
-  if ((await reachable('/api/overview'))?.ok) return openInBrowser(url);
-
-  const sup = await reachable('/api/supervisor/status');
-  if (sup?.ok && sup.headers.get('x-ai-code-supervisor')) {
-    // The supervisor owns the listener, so the supervisor is the process that has to
-    // spawn the server - this one cannot bind a port that is already bound.
-    const started = await fetch(`http://127.0.0.1:${port}/api/supervisor/start`, { method: 'POST' }).catch(() => null);
-    if (!started?.ok) throw new Error(`the supervisor on :${port} refused the start (${started ? started.status : 'no answer'})`);
-    if (await waitForServer()) return openInBrowser(url);
-    throw new Error(`the server did not come up on :${port}; its output is in the supervisor's log`);
-  }
-
-  // Nothing is listening and nothing can be asked to start one, so this starts it.
-  // Detached, because a command that opened a browser and then held the terminal
-  // would be `dashboard` with a surprise in it.
-  const child = spawn(process.execPath, [new URL('./server.mjs', import.meta.url).pathname], {
-    detached: true,
-    stdio: 'ignore',
-    env: { ...process.env, AI_CODE_ROOT: process.env.AI_CODE_ROOT || s.root, PORT: String(port) },
-  });
-  child.unref();
-  if (await waitForServer()) return openInBrowser(url);
-  throw new Error(`the server did not come up on :${port}; run \`ai-code dashboard\` to see why`);
+/**
+ * An interactive `claude` on one provider: its cheapest enabled model, with the ambient
+ * routing a shell may carry stripped, so a key that is missing fails loudly instead of
+ * falling back to the subscription login. `--model` in the arguments still wins.
+ * @param {string|undefined} providerId @param {string[]} args
+ */
+async function shell(providerId, args) {
+  if (!providerId) throw new Error('Usage: ai-code shell <provider-id> [claude args]');
+  const { Store } = await import('./store.mjs');
+  const { cleanEnv, providerEnv } = await import('./providers.mjs');
+  const store = new Store(dataRoot);
+  const provider = store.getProvider(providerId);
+  if (!provider) throw new Error(`No provider ${providerId}`);
+  const models = store.listModels(providerId).filter((m) => m.enabled);
+  const model = models.sort((a, b) => (a.input_cost_per_mtok ?? Infinity) - (b.input_cost_per_mtok ?? Infinity))[0] || null;
+  const r = spawnSync('claude', args, { stdio: 'inherit', env: { ...cleanEnv(), ...providerEnv(provider, model) } });
+  process.exitCode = r.status ?? 1;
 }
 
 async function main() {
-  const [cmd, sub, ...rest] = a;
-
-  if (!cmd || cmd === 'help' || cmd === '--help') return out(HELP);
-
-  if (cmd === 'init') {
-    const p = s.initProject(sub || 'project', rest[0] || process.cwd());
-    s.contextInit(p.id);
-    return out(p);
-  }
-  if (cmd === 'projects') return out(s.store.listProjects());
-  if (cmd === 'context' && sub === 'init') return out(s.contextInit(rest[0]));
-  // Opt-in and LLM-backed, unlike `context init`, which is deterministic.
-  if (cmd === 'context' && sub === 'enrich') return out(await s.contextEnrich(rest[0]));
-  // A null result means the subcommand was not recognised, so control falls
-  // through to the unknown-command error at the bottom rather than printing null.
-  if (cmd === 'task') {
-    const r = await taskCommand(sub, rest);
-    if (r !== null) return r;
-  }
-  if (cmd === 'provider') {
-    const r = await providerCommand(sub, rest);
-    if (r !== null) return r;
-  }
-
-  if (cmd === 'model') {
-    if (sub === 'list') return out(s.store.listModels(rest[0]));
-    if (sub === 'enable' || sub === 'disable') return out(s.updateModel(rest[0], { enabled: sub === 'enable' }));
-  }
-
-  // Not through `out`: this command prints nothing of its own, and the session it
-  // launches owns the terminal for as long as it runs.
-  if (cmd === 'shell') return shellCommand(sub, rest);
-
-  if (cmd === 'routing' && sub === 'show') return out(s.getRouting());
-  if (cmd === 'routing' && sub === 'set') {
-    const fs = await import('node:fs');
-    return out(s.saveRouting(JSON.parse(fs.readFileSync(rest[0], 'utf8'))));
-  }
-  if (cmd === 'eval') {
-    const { plannerCases, evaluate } = await import('./ranker-eval.mjs');
-    const projects = s.store.listProjects();
-    const pid = sub && !sub.startsWith('--') ? sub : undefined;
-    // The project id is optional, so a leading flag lands in `sub` and the rest of
-    // the scan would start one argument late. Putting it back keeps every flag a
-    // positional scan of one array, which is how the rest of this file reads them.
-    const argv = pid === undefined && sub !== undefined ? [sub, ...rest] : rest;
-    const project = pid ? projects.find((p) => p.id === pid || p.name === pid) : projects[0];
-    if (!project) throw Error(`Unknown project: ${sub}`);
-    const value = (name) => {
-      const i = argv.indexOf(name);
-      if (i < 0) return undefined;
-      const v = argv[i + 1];
-      // Named rather than silent, so a flag that cannot act says so instead of
-      // being accepted and ignored.
-      if (v === undefined || v.startsWith('--')) throw new Error(`${name} needs a value`);
-      return v;
-    };
-    const num = (name) => {
-      const v = value(name);
-      if (v === undefined) return undefined;
-      const n = Number(v);
-      if (!Number.isInteger(n) || n < 1) throw new Error(`${name} needs a positive integer`);
-      return n;
-    };
-    const parseJson = (name) => {
-      const v = value(name);
-      if (v === undefined) return undefined;
-      try {
-        return JSON.parse(v);
-      } catch (e) {
-        throw new Error(`${name} is not valid JSON: ${e.message}`);
-      }
-    };
-    const cases = plannerCases(s.store, project);
-    const arms = parseJson('--arms');
-    const config = parseJson('--config');
-    const k = num('--k');
-    const limit = num('--limit');
-    // §5.14's key, as its own flag because sweeping it is the whole point of the
-    // piece and `--config '{"widen":4}'` is long enough to be typed wrong. It merges
-    // into `--config` rather than replacing it, so an arm that needs both still
-    // needs one flag.
-    const widen = num('--widen');
-    if (arms !== undefined && !Array.isArray(arms)) throw new Error('--arms needs a JSON array');
-    const result = evaluate(project, cases, {
-      ...(k ? { k } : {}),
-      ...(limit ? { limit } : {}),
-      ...(argv.includes('--debug') ? { debug: true } : {}),
-      ...(config || widen ? { config: { ...(config || {}), ...(widen ? { widen } : {}) } } : {}),
-      ...(arms ? { arms } : {}),
-    });
-    // The summary carries how many runs fed it, because a metric over four runs
-    // and a metric over four hundred read the same and mean different things. The
-    // arms and the rows are the instrument: without them a sweep is two CLI runs
-    // against two trees, and §5.12 item 5 says those are two measurements.
-    if (arms) {
-      return out({
-        cases: cases.length,
-        contentHash: result.contentHash,
-        arms: result.arms.map(({ rows, ...arm }) => ({ ...arm, runs: rows.length, ...(argv.includes('--debug') ? { rows } : {}) })),
-      });
-    }
-    if (!argv.includes('--json') && !argv.includes('--debug')) return out({ cases: cases.length, ...result.summary });
-    return out({ cases: cases.length, k: result.k, limit: result.limit, contentHash: result.contentHash, ...result.summary, rows: result.rows });
-  }
-  if (cmd === 'runs') return out(s.store.listRuns());
-  // The period is the second word, which the destructuring above names `sub`. It was
-  // read from `rest[0]`, the third, so `usage 30d` and `usage all` printed 7d.
-  if (cmd === 'usage' && sub === 'reprice') return out(s.repriceRuns());
-  if (cmd === 'usage') return out(s.usage(sub || '7d'));
-  if (cmd === 'automation' && sub === 'list') return out(s.store.listAutomations());
-  if (cmd === 'automation' && sub === 'add') {
-    return out(s.store.addAutomation({ id: s.store.id(), name: rest[0], trigger: rest[1], action: rest.slice(2).join(' '), enabled: true, createdAt: new Date().toISOString() }));
-  }
-  if (cmd === 'doctor') return out(await s.doctor());
-
-  // `dashboard` starts the server in this process; `tui` starts the server too if
-  // it cannot find one already listening; `web` opens the dashboard in a browser,
-  // starting a server behind it if one is not already there.
-  if (cmd === 'dashboard') {
+  const [cmd = 'serve', ...rest] = process.argv.slice(2);
+  if (cmd === 'help' || cmd === '--help' || cmd === '-h') return out(HELP);
+  if (cmd === 'serve' || cmd === 'web' || cmd === 'dashboard') {
+    process.env.AI_CODE_ROOT = dataRoot;
     await import('./server.mjs');
     return;
   }
-  if (cmd === 'web') return webCommand();
-  if (cmd === 'tui') {
-    const { startTUI } = await import('./tui/app.mjs');
-    return startTUI(s);
+  if (cmd === 'open') {
+    spawnSync(process.platform === 'darwin' ? 'open' : 'xdg-open', [`http://localhost:${port}`]);
+    return;
   }
-
-  throw Error(`Unknown command: ${cmd} ${sub || ''}`);
+  if (cmd === 'add' || cmd === 'init') {
+    // `init <name> <path>` is the old spelling; `add <path> [name]` the new one.
+    const [a, b] = rest.filter((x) => !x.startsWith('--'));
+    const [dir, name] = cmd === 'init' ? [b, a] : [a, b];
+    if (!dir) throw new Error('Usage: ai-code add <path> [name]');
+    const s = await service();
+    out(s.addProject({ path: dir, name, init: rest.includes('--init') }));
+    s.shutdown();
+    return;
+  }
+  if (cmd === 'projects') {
+    const s = await service();
+    out(s.store.listProjects());
+    s.shutdown();
+    return;
+  }
+  if (cmd === 'pair') {
+    const r = await api('POST', '/api/pairing', {});
+    if (!r.urls.length) {
+      out(`Pairing code: ${r.code} (valid 10 minutes)\nNo address for other devices is known. Run \`ai-code share\`, or set AI_CODE_PUBLIC_URL, then try again.`);
+      return;
+    }
+    const QRCode = (await import('qrcode')).default;
+    console.log(await QRCode.toString(r.urls[0], { type: 'terminal', small: true }));
+    out(`Open on the device you want to pair (valid 10 minutes, works once):\n${r.urls.join('\n')}`);
+    return;
+  }
+  if (cmd === 'share') {
+    const args = rest.includes('--off') ? ['serve', '--https=443', 'off'] : ['serve', '--bg', '--https=443', `http://127.0.0.1:${port}`];
+    const r = spawnSync('tailscale', args, { stdio: 'inherit' });
+    if (r.error) throw new Error('tailscale is not installed. See https://tailscale.com/download');
+    if (r.status !== 0) process.exit(r.status || 1);
+    if (!rest.includes('--off')) out(`Shared on your tailnet: ${tailscaleUrl() || '(see `tailscale serve status`)'}\nNext: \`ai-code pair\` to let a device in.`);
+    return;
+  }
+  if (cmd === 'devices') return out(await api('GET', '/api/devices'));
+  if (cmd === 'revoke') return out(await api('DELETE', `/api/devices/${encodeURIComponent(rest[0] || '')}`));
+  if (cmd === 'doctor') {
+    const s = await service();
+    const { checks } = await s.doctor();
+    s.shutdown();
+    for (const c of checks) console.log(`${c.ok ? 'ok  ' : c.optional ? '--  ' : 'FAIL'} ${c.name}: ${c.detail}`);
+    if (checks.some((c) => !c.ok && !c.optional)) process.exitCode = 1;
+    return;
+  }
+  if (cmd === 'shell') return shell(rest[0], rest.slice(1));
+  if (cmd === 'service') {
+    if (rest[0] === 'install') return serviceInstall();
+    if (rest[0] === 'uninstall') return serviceUninstall();
+    if (rest[0] === 'status') return serviceStatus();
+  }
+  out(HELP);
+  process.exitCode = 2;
 }
 
 main().catch((e) => {
-  console.error(`AI Code: ${e.message}`);
-  process.exitCode = 1;
+  console.error(e.message);
+  process.exit(1);
 });

@@ -1,247 +1,423 @@
-import {execFileSync} from 'node:child_process';import fs from 'node:fs';import path from 'node:path';
-// 10 MiB, matching the buffer the test command already sets. Node's 1 MiB default
-// was reachable in theory before this and is reachable in practice now that a diff
-// is something a person asks for by name rather than a string a reviewer skims.
-export function git(cwd,args){return execFileSync('git',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe'],maxBuffer:10*1024*1024}).trim()}
-export function ensureGit(root){return git(root,['rev-parse','--show-toplevel'])}
-// The other half of ensureGit: a folder that is not a repository yet becomes one.
-// `-q` because git's own "Initialized empty Git repository" line is written to
-// stdout, and every helper here returns its caller's stdout.
-export function gitInit(root){return git(root,['init','-q'])}
-// Whether this repository has a commit. `head` throws in one that does not, which is
-// the difference between a repository a worktree can be cut from and a bare init.
-export function hasCommits(root){try{return !!head(root)}catch{return false}}
-export function status(root){return git(root,['status','--porcelain']).split('\n').filter(x=>x && !x.trimEnd().endsWith('.ai-code')).join('\n')}
-export function protectAiCode(root){const f=path.join(root,'.git','info','exclude');fs.mkdirSync(path.dirname(f),{recursive:true});let s=fs.existsSync(f)?fs.readFileSync(f,'utf8'):'';if(!s.split('\n').some(x=>x.trim()==='.ai-code/'))fs.appendFileSync(f,(s.endsWith('\n')||!s?'':'\n')+'.ai-code/\n')}
-export function head(root){return git(root,['rev-parse','HEAD'])}
-// Where every worktree cut from this repository lives, a task's and a plan's alike.
-export function worktreeRoot(root){return process.env.AI_CODE_WORKTREE_ROOT||path.join(path.dirname(root),`.ai-code-worktrees-${path.basename(root)}`)}
-// `at` pins the commit the branch is cut from: the attempts of one comparison all
-// start from the same one, whatever lands on the main branch while they are created.
-export function createWorktree(root,id,at=null){ensureGit(root);const base=at||head(root);const dir=path.join(worktreeRoot(root),id);const branch=`ai-code/${id}`;fs.mkdirSync(path.dirname(dir),{recursive:true});if(!fs.existsSync(dir))git(root,['worktree','add','-b',branch,dir,base]);linkDeps(root,dir);return {dir,branch,base}}
-// The planner's disposable copy of the repository. It sits beside the task's own
-// worktree under a `plan-` name, detached rather than on a branch: nothing made in
-// it is ever kept, so a branch would be one more ref to clean up for no reader.
-//
-// It has to show the planner what the planner used to see, which is the live tree
-// with its uncommitted work - the plan-base gate and the read set both assume that.
-// So HEAD is checked out and the checkout's dirty and untracked files are copied
-// over it. A path that is dirty because it was deleted is deleted here too. A
-// collapsed `?? dir/` entry is skipped, because the untracked enumeration names
-// every file inside it.
-//
-// Reused rather than recreated when it already exists: a refine plans again in the
-// copy the first plan left, scratch files included. The forced checkout is what
-// brings its tracked files back to today's HEAD, so a refine still plans against
-// the tree as it is now.
-export const PLAN_WORKTREE_PREFIX='plan-';
-export function planWorktreeDir(root,id){return path.join(worktreeRoot(root),`${PLAN_WORKTREE_PREFIX}${id}`)}
-export function createPlanWorktree(root,id){
-  ensureGit(root);
-  const base=head(root);
-  const dir=planWorktreeDir(root,id);
-  fs.mkdirSync(path.dirname(dir),{recursive:true});
-  if(fs.existsSync(dir))git(dir,['checkout','--force','--quiet','--detach',base]);
-  else git(root,['worktree','add','--quiet','--detach',dir,base]);
-  for(const p of dirtyAndUntracked(root)){
-    const from=path.join(root,p);const to=path.join(dir,p);
-    let st=null;try{st=fs.lstatSync(from)}catch{}
-    if(!st){fs.rmSync(to,{recursive:true,force:true});continue}
-    if(st.isDirectory())continue;
-    fs.mkdirSync(path.dirname(to),{recursive:true});
-    fs.rmSync(to,{force:true});
-    fs.cpSync(from,to,{verbatimSymlinks:true});
+// @ts-check
+import { execFileSync, execFile } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+/** @typedef {import('./contract.mjs').GitState} GitState */
+/** @typedef {import('./contract.mjs').GitBranch} GitBranch */
+
+// Git, run as a child process. Synchronous for the local reads and writes, which are
+// fast; asynchronous for anything that talks to a remote, which may not be.
+
+/** @param {string} cwd @param {string[]} args @param {{env?:NodeJS.ProcessEnv, input?:string}} [o] */
+export function git(cwd, args, o = {}) {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    maxBuffer: 64 * 1024 * 1024,
+    env: o.env || process.env,
+    input: o.input,
+  }).trimEnd();
+}
+
+/** The error git printed, rather than Node's "Command failed: git ..." wrapper. @param {any} e */
+export function gitError(e) {
+  const text = String(e?.stderr || e?.stdout || e?.message || e).trim();
+  return text.replace(/^(error|fatal): /gm, '').split('\n').slice(0, 6).join('\n');
+}
+
+/** @param {string} cwd @param {string[]} args @param {number} [timeoutMs] @returns {Promise<string>} */
+export function gitAsync(cwd, args, timeoutMs = 120000) {
+  return new Promise((resolve, reject) => {
+    // No prompt for credentials: a server has nobody at the terminal to answer one.
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+    execFile('git', args, { cwd, env, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) reject(Object.assign(new Error(gitError({ stderr, stdout, message: err.message })), { code: 'GIT' }));
+      else resolve(String(stdout).trimEnd());
+    });
+  });
+}
+
+/** @param {string} dir */
+export function isRepo(dir) {
+  try {
+    return git(dir, ['rev-parse', '--is-inside-work-tree']) === 'true';
+  } catch {
+    return false;
   }
-  linkDeps(root,dir);
-  return {dir,base};
 }
-// Safe to call for a task that never had one. A directory git no longer tracks is
-// removed by hand and the registration pruned, so a half-deleted copy cannot make
-// the next `worktree add` for the same task fail.
-export function removePlanWorktree(root,id){
-  const dir=planWorktreeDir(root,id);
-  if(!fs.existsSync(dir))return false;
-  try{git(root,['worktree','remove','--force',dir])}
-  catch{fs.rmSync(dir,{recursive:true,force:true});try{git(root,['worktree','prune'])}catch{}}
-  return true;
+
+/** @param {string} dir */
+export const topLevel = (dir) => git(dir, ['rev-parse', '--show-toplevel']);
+
+/** @param {string} dir @param {string} [ref] @returns {string|null} */
+export function revParse(dir, ref = 'HEAD') {
+  try {
+    return git(dir, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]) || null;
+  } catch {
+    return null;
+  }
 }
-// The task ids that have a planning copy on disk, for the startup sweep.
-export function planWorktreeIds(root){
-  try{return fs.readdirSync(worktreeRoot(root)).filter((n)=>n.startsWith(PLAN_WORKTREE_PREFIX)).map((n)=>n.slice(PLAN_WORKTREE_PREFIX.length))}catch{return []}
+
+/** @param {string} dir @returns {string|null} */
+export function currentBranch(dir) {
+  try {
+    return git(dir, ['symbolic-ref', '--short', '-q', 'HEAD']) || null;
+  } catch {
+    return null;
+  }
 }
-// A worktree shares the repo's package.json but not its node_modules (gitignored).
-// Without this, every test step and every implementer that imports a dependency
-// fails on ERR_MODULE_NOT_FOUND. A symlink is instant and always in sync.
-//
-// The link must also be invisible to git. A project's `node_modules/` ignore rule
-// matches directories only, and a symlink is not one, so the link showed up as an
-// untracked file and port committed it: a dangling absolute path in kron, novara and
-// ai-code branches, and in novara's history. `/node_modules` in the repository's own
-// exclude file matches the link too, and that file is never part of a diff. It is
-// written before the link, so no moment exists in which the link is unignored.
-function linkDeps(root,dir){const nm=path.join(root,'node_modules');const target=path.join(dir,'node_modules');if(fs.existsSync(nm)&&!fs.existsSync(target)){excludeLine(root,'/node_modules');try{fs.symlinkSync(nm,target,'junction')}catch{/* race or permission — the install step will catch it */}}}
-// Appends one pattern to the repository's .git/info/exclude unless it is there. The
-// exclude file lives in the common git directory, so every worktree reads it.
-export function excludeLine(root,line){const f=path.join(root,'.git','info','exclude');try{fs.mkdirSync(path.dirname(f),{recursive:true});const s=fs.existsSync(f)?fs.readFileSync(f,'utf8'):'';if(s.split('\n').some((x)=>x.trim()===line))return;fs.appendFileSync(f,(s.endsWith('\n')||!s?'':'\n')+line+'\n')}catch{/* a .git file (a worktree root) has no info dir to write; nothing to protect here */}}
-// Against a ref, not against the index. `git diff` alone compares the worktree to
-// the index, so staging or committing the work makes it empty - which hands the
-// reviewer a blank page, and a blank page is a PASS. Against a ref it reads the
-// same before and after a materialize, and survives the worktree being removed.
-export function diffAgainst(dir,ref){return git(dir,['diff','--no-color',ref])}
-// What a range of commits carries, for the work a branch holds in several commits
-// rather than in the one a port wrote. Read from the repository rather than from a
-// worktree, because the branch outlives the directory it was cut into.
-export function diffBetween(root,from,to){return git(root,['diff','--no-color',from,to])}
-// The same diff, narrowed to named paths. What one agent's turn changed, told apart
-// from the work its predecessors left in the same worktree: a repair is verified
-// against its own part of the tree, and handing it the whole diff again is what made
-// the review that followed a repair a second review of everything. An untracked path
-// carries no diff at all, which is why the caller keeps the status lines - they are
-// the only thing that names a file the turn created.
-export function diffPaths(dir,ref,paths){return paths.length?git(dir,['diff','--no-color',ref,'--',...paths]):''}
-// The content of every path the worktree has changed, keyed by path. The dirty set
-// alone cannot say whether anything moved between two moments: the files a repair is
-// sent to fix are dirty before it starts, so a name list that reads the same
-// afterwards is exactly the state a repair that did nothing leaves behind. Hashes
-// rather than mtimes, because an editor rewrite that changes nothing is not a change.
-//
-// One `hash-object` for the whole set rather than one per file: a repair is bracketed
-// by two of these, and a worktree with a hundred dirty paths would otherwise pay two
-// hundred process spawns for a fact a single call answers.
-// NULL when git will not hash the set at all - a submodule path, a file removed
-// underneath the call - because one unhashable path fails the batch for every path
-// in it. The caller reads null as "not measured" and falls back to what it did
-// before there was a delta, rather than failing a repair that has already run.
-export function worktreeHashes(dir){
-const paths=dirtyPaths(dir);
-if(!paths.length)return{};
-try{const shas=git(dir,['hash-object','--',...paths]).split('\n');
-return Object.fromEntries(paths.map((p,i)=>[p,shas[i]]))}catch{return null}}
-// The difference between two of those, either way: a path the agent edited or
-// created, and one it reverted to HEAD. Both are it having done something, and both
-// belong in the delta a review of that turn reads.
-export function changedPaths(before,after){return[...new Set([...Object.keys(before),...Object.keys(after)])].filter((p)=>before[p]!==after[p]).sort()}
-// The porcelain tail that used to be appended to the diff. Kept separate because
-// it is not a diff: it is the only thing that names an untracked file at all,
-// since no diff carries one's contents.
-// Not through git(), which trims: an unstaged modification is reported as
-// ` M path`, and the leading space is the entire difference between "you edited
-// this" and "you staged this". Trimming it rewrites the first entry's meaning.
-export function statusPaths(dir){const s=execFileSync('git',['status','--short'],{cwd:dir,encoding:'utf8',stdio:['ignore','pipe','pipe']});return s.trim()?s.trimEnd().split('\n'):[]}
-export function changedFiles(dir){const s=git(dir,['status','--porcelain']);return s?s.split('\n').filter(Boolean):[]}
-// Files git does not track but does not ignore either: what a commit of the
-// worktree would add. Bare paths, so it does not go through the porcelain line
-// form, which quotes a name containing a space.
-export function untracked(dir){const s=git(dir,['ls-files','--others','--exclude-standard']);return s?s.split('\n').filter(Boolean):[]}
-// Bare paths, one per dirty entry, for comparing one snapshot of the tree with
-// another. changedFiles above returns porcelain lines, which cannot be compared
-// as a set. The -z form cannot go through git() either: an unstaged modification
-// begins with a space, and git() trims. A rename or copy carries its source as
-// the next NUL-terminated entry with no status prefix at all, so pair-skipping
-// keeps the destination - the path that exists now.
-export function dirtyPaths(root){const s=execFileSync('git',['status','--porcelain','-z'],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe']});const parts=s.split('\0').filter(Boolean);const out=[];for(let i=0;i<parts.length;i++){const line=parts[i];const p=line.slice(3);
-// -z lists a rename as destination then source, both NUL-terminated, with the
-// status prefix only on the destination - and in the opposite order to the line
-// form, which reads `old -> new`. So the path is read before the source is
-// skipped; skipping first and reading after keeps the path that no longer exists.
-if(/^[RC]/.test(line))i++;
-if(p&&!p.includes('.ai-code'))out.push(p)}return out}
-// The dirty set widened with the per-file untracked enumeration. porcelain
-// collapses an entirely-untracked directory to one `?? dir/` entry, so a
-// before/after comparison built on it alone reads the same string before and
-// after a write into one. The ls-files enumeration lists one path per file,
-// which is what makes a new file inside an already-dirty directory visible.
-// The `.ai-code` filter matches dirtyPaths' own, and --exclude-standard is
-// what keeps ignored directories (node_modules) out of the widened half.
-export function dirtyAndUntracked(root) {
-  return [...new Set([...dirtyPaths(root), ...untracked(root).filter((p) => !p.includes('.ai-code'))])];
+
+/** @param {string} dir @param {string} a @param {string} b */
+export function isAncestor(dir, a, b) {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: dir, stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
 }
-// The paths that differ between two commits. What tells a file whose uncommitted
-// content was committed from one whose uncommitted content is still missing.
-export function changedBetween(root,from,to){if(from===to)return[];const s=git(root,['diff','--name-only',from,to]);return s?s.split('\n').filter(Boolean):[]}
-// The change one commit carries, against its parent. What a port left behind when the
-// worktree that made it is gone: the directory is removed once the work is on the
-// branch, and reading the change off the commit is what keeps a screen showing the work
-// rather than an empty pane that reads as the work being lost. A commit with no parent
-// has nothing to compare against and reports empty rather than failing.
-export function commitDiff(root,commit){try{return git(root,['diff','--no-color',`${commit}^`,commit])}catch{return ''}}
-// The checked-out branch, or null when HEAD is detached. symbolic-ref fails there,
-// where --abbrev-ref would return the literal string "HEAD" and hand the caller a
-// target branch by that name.
-export function currentBranch(root){try{return git(root,['symbolic-ref','--short','HEAD'])}catch{return null}}
-// A ref that resolves, or null. The existence test: a plan base can stop resolving
-// (rebase, gc, a deleted branch) and every caller of this is a read-only report
-// that must degrade rather than throw.
-export function revParse(root,ref){try{return git(root,['rev-parse','--verify','--quiet',`${ref}^{commit}`])}catch{return null}}
-// Whether `a` can reach `b`. This is the fast-forward test, and it is not the same
-// question as `base_commit === targetTip`: a worktree reused after a replan sits
-// on an older commit than the base_commit that was rewritten underneath it, and
-// moving a branch on the equality answer rewinds the target.
-//
-// merge-base --is-ancestor answers with its exit code, so unlike every other
-// helper here a false answer arrives as an exception rather than an empty string.
-export function isAncestor(root,a,b){try{execFileSync('git',['merge-base','--is-ancestor',a,b],{cwd:root,stdio:['ignore','pipe','pipe']});return true}catch{return false}}
-// Where two branches diverged. Computed rather than taken from base_commit, so it
-// stays true for a task whose worktree predates a replan.
-export function mergeBase(root,a,b){try{return git(root,['merge-base',a,b])}catch{return null}}
-// The commit on `ref` whose message carries `marker`, or null. A commit AI Code made
-// for a task says which task in its message, and that is the only record that
-// survives the work being merged: once the work is in the target, the branch tip and
-// the fork point are the same commit, so neither one says whether this task ever
-// published anything. Fixed strings because a task id is data, not a pattern.
-export function findCommit(root,ref,marker){try{return git(root,['rev-list','-1','--fixed-strings','--grep',marker,ref])||null}catch{return null}}
-export function branches(root){const s=git(root,['for-each-ref','--format=%(refname:short)','refs/heads']);return s?s.split('\n').filter(Boolean):[]}
-// Branches checked out in any worktree, this repository's or another's. git branch
-// -f refuses to move one of these, so a port that means to land on the target has
-// to know before it tries.
-export function checkedOut(root){return git(root,['worktree','list','--porcelain']).split('\n').filter((l)=>l.startsWith('branch refs/heads/')).map((l)=>l.slice('branch refs/heads/'.length))}
-// The merge performed in the object store: no worktree, no index, nothing left on
-// disk to clean up and nothing to collide with on a retry. A conflict is the
-// non-zero exit rather than a failure, and its stdout is the answer - a tree line
-// then one entry per conflicted path, mode, oid, stage, tab, path, where stage 2
-// is ours and 3 is theirs. Deduped because a content conflict lists all three.
-export function mergeTree(root,a,b){
-try{return{clean:true,tree:git(root,['merge-tree','--write-tree',a,b]).split('\n')[0],conflicts:[]}}
-catch(e){const out=String(e.stdout||'');const lines=out.split('\n');const conflicts=[...new Set(lines.slice(1).map((l)=>{const m=l.match(/^\d{6} [0-9a-f]+ \d\t(.+)$/);return m?m[1]:null}).filter(Boolean))];return{clean:false,tree:lines[0]||null,conflicts}}}
-// A commit for a merge that was never checked out anywhere. Without this the only
-// way to turn a merge-tree result into something a branch can point at is to
-// materialize it in a worktree - which is the directory and cleanup this avoids.
-export function commitTree(root,tree,parents,msg){return git(root,['commit-tree',tree,...parents.flatMap((p)=>['-p',p]),'-m',msg])}
-export function setBranch(root,name,ref){return git(root,['branch','-f',name,ref])}
-// Publishes the worktree - untracked files included, which no diff carries. Only
-// called once the caller has established there is something to commit: `git
-// commit` with an empty index exits non-zero, and git() does not catch.
-export function commitAll(dir,msg){git(dir,['add','-A']);git(dir,['commit','-m',msg]);return head(dir)}
-// The first commit of a folder `git init` has just made, and the one commit the rest
-// of the workflow cannot do without: `createWorktree` cuts from HEAD, and a repository
-// with no commits has no HEAD to cut from.
-//
-// The identity is supplied only when git has none of its own - `git config user.email`
-// reads local, then global, then system, and exits non-zero when none of them sets one.
-// A person's own name is what a commit of their work should carry, so this is not a
-// default: it is what lets a machine with no git config at all still get a repository
-// rather than a dead end at the first task.
-export function commitInitial(dir,msg){
-git(dir,['add','-A']);
-const named=hasIdentity(dir);
-git(dir,[...(named?[]:['-c','user.email=ai-code@localhost','-c','user.name=AI Code']),'commit','-m',msg]);
-return head(dir)}
-function hasIdentity(dir){try{return !!git(dir,['config','user.email'])}catch{return false}}
-export function removeWorktree(root,dir){return git(root,['worktree','remove','--force',dir])}
-// The commit that first put a task's work into the destination. A fast-forward makes
-// that the task's own commit, because nothing separate was written to carry it; a merge
-// makes it the merge commit, which is the one a `git log` of the destination shows and
-// the one a revert or a bisect would point at. So the merge is looked for first and the
-// task's commit is the answer when there is none - naming the newest commit on the path
-// instead would name whatever landed after it.
-export function landingCommit(root,taskTip,targetTip){
-if(!taskTip||!targetTip)return null;
-try{
-const merges=git(root,['rev-list','--merges','--ancestry-path',`${taskTip}..${targetTip}`]).split('\n').filter(Boolean);
-return merges.length?merges[merges.length-1]:taskTip}catch{return null}}
-// A commit as a surface has to name it: the short hash a person types, the full one a
-// tool takes, and the subject line that makes it recognisable. One place, so every
-// surface names the same commit the same way.
-export function commitRef(root,ref){
-if(!ref)return null;
-try{const [sha,...rest]=git(root,['log','-1','--format=%H%n%s',ref]).trim().split('\n');return {sha,short:sha.slice(0,7),subject:rest.join(' ')||''}}catch{return null}}
+
+/** @param {string} dir @param {string} a @param {string} b @returns {string|null} */
+export function mergeBase(dir, a, b) {
+  try {
+    return git(dir, ['merge-base', a, b]) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** @param {string} dir @param {string} range */
+const count = (dir, range) => Number(git(dir, ['rev-list', '--count', range])) || 0;
+
+/** @param {string} dir */
+export function hasRemote(dir) {
+  try {
+    return !!git(dir, ['remote']);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The working tree in one read: branch, upstream, ahead/behind, and the paths that
+ * differ from HEAD. `git status --porcelain=v2 --branch -z` carries all of it.
+ * @param {string} dir
+ */
+export function status(dir) {
+  const out = git(dir, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all']);
+  const parts = out.split('\0');
+  /** @type {{branch:string|null, head:string|null, upstream:string|null, ahead:number, behind:number, dirty:string[], conflicted:string[]}} */
+  const s = { branch: null, head: null, upstream: null, ahead: 0, behind: 0, dirty: [], conflicted: [] };
+  for (let i = 0; i < parts.length; i++) {
+    const line = parts[i];
+    if (!line) continue;
+    if (line.startsWith('# branch.oid ')) s.head = line.slice(13) === '(initial)' ? null : line.slice(13);
+    else if (line.startsWith('# branch.head ')) s.branch = line.slice(14) === '(detached)' ? null : line.slice(14);
+    else if (line.startsWith('# branch.upstream ')) s.upstream = line.slice(18);
+    else if (line.startsWith('# branch.ab ')) {
+      const m = /\+(\d+) -(\d+)/.exec(line);
+      if (m) [s.ahead, s.behind] = [Number(m[1]), Number(m[2])];
+    } else if (line.startsWith('1 ')) s.dirty.push(line.split(' ').slice(8).join(' '));
+    else if (line.startsWith('2 ')) {
+      // A rename: the new path here, the old one in the next NUL-separated field.
+      s.dirty.push(line.split(' ').slice(9).join(' '));
+      i++;
+    } else if (line.startsWith('u ')) {
+      const p = line.split(' ').slice(10).join(' ');
+      s.conflicted.push(p);
+      s.dirty.push(p);
+    } else if (line.startsWith('? ')) s.dirty.push(line.slice(2));
+  }
+  return s;
+}
+
+/**
+ * Branches a task can start from or a checkout can switch to. A remote branch with no
+ * local counterpart is listed once, marked, so choosing it can create the local one.
+ * Task branches are left out: offering one as a base is offering a task's own branch.
+ * @param {string} dir @returns {GitBranch[]}
+ */
+export function branches(dir) {
+  const cur = currentBranch(dir);
+  const local = git(dir, ['for-each-ref', '--format=%(refname:short)', '--sort=-committerdate', 'refs/heads']).split('\n').filter(Boolean);
+  const remote = git(dir, ['for-each-ref', '--format=%(refname:short)', '--sort=-committerdate', 'refs/remotes'])
+    .split('\n')
+    .filter((r) => r && !r.endsWith('/HEAD') && r.includes('/'));
+  const have = new Set(local);
+  /** @type {GitBranch[]} */
+  const out = local.filter((b) => !b.startsWith('ai-code/')).map((name) => ({ name, remoteOnly: false, current: name === cur }));
+  for (const r of remote) {
+    const name = r.slice(r.indexOf('/') + 1);
+    if (have.has(name) || name.startsWith('ai-code/')) continue;
+    have.add(name);
+    out.push({ name, remoteOnly: true, current: false });
+  }
+  return out;
+}
+
+/** The checkout state a project page shows. @param {string} dir @returns {GitState} */
+export function gitState(dir) {
+  const s = status(dir);
+  return { ...s, branches: branches(dir), hasRemote: hasRemote(dir) };
+}
+
+/** Where each branch is checked out, across the repository's worktrees. @param {string} dir @returns {Map<string,string>} */
+export function checkedOutAt(dir) {
+  const map = new Map();
+  let at = null;
+  for (const l of git(dir, ['worktree', 'list', '--porcelain']).split('\n')) {
+    if (l.startsWith('worktree ')) at = l.slice(9);
+    else if (l.startsWith('branch refs/heads/') && at) map.set(l.slice(18), at);
+  }
+  return map;
+}
+
+/**
+ * Makes a local branch for one that exists only on a remote. A no-op for a local one.
+ * @param {string} dir @param {string} name
+ */
+export function ensureLocalBranch(dir, name) {
+  if (revParse(dir, `refs/heads/${name}`)) return;
+  const remote = git(dir, ['for-each-ref', '--format=%(refname:short)', `refs/remotes/*/${name}`]).split('\n').filter(Boolean)[0];
+  if (!remote) throw new Error(`No branch named ${name}`);
+  git(dir, ['branch', '--track', name, remote]);
+}
+
+/**
+ * Switches the checkout. Refuses over uncommitted changes unless `stash`, which keeps
+ * them in a named stash entry, because a switch that silently carried them would put
+ * one branch's half-done work on another.
+ * @param {string} dir @param {string} name @param {{create?:boolean, from?:string, stash?:boolean}} [o]
+ */
+export function checkout(dir, name, o = {}) {
+  const s = status(dir);
+  if (s.conflicted.length) throw new Error(`Resolve the conflicts first: ${s.conflicted.join(', ')}`);
+  let stashed = false;
+  if (s.dirty.length) {
+    if (!o.stash) throw Object.assign(new Error(`${s.dirty.length} uncommitted change${s.dirty.length === 1 ? '' : 's'} on ${s.branch || 'HEAD'}`), { code: 'DIRTY', dirty: s.dirty });
+    git(dir, ['stash', 'push', '--include-untracked', '-m', `ai-code: switching from ${s.branch || 'HEAD'} to ${name}`]);
+    stashed = true;
+  }
+  try {
+    if (o.create) git(dir, ['switch', '-c', name, ...(o.from ? [o.from] : [])]);
+    else {
+      ensureLocalBranch(dir, name);
+      git(dir, ['switch', name]);
+    }
+  } catch (e) {
+    if (stashed) git(dir, ['stash', 'pop']);
+    throw new Error(gitError(e));
+  }
+  return { branch: name, stashed };
+}
+
+/** @param {string} dir */
+export const fetchAll = (dir) => gitAsync(dir, ['fetch', '--all', '--prune']);
+
+/** Fast-forward only: a pull that would merge is a decision, not a refresh. @param {string} dir */
+export const pull = (dir) => gitAsync(dir, ['pull', '--ff-only']);
+
+/** @param {string} dir @param {string} branch */
+export async function push(dir, branch) {
+  const remote = git(dir, ['remote']).split('\n')[0] || 'origin';
+  return gitAsync(dir, ['push', '-u', remote, branch]);
+}
+
+/** Stages everything, untracked included, and commits. Null when there is nothing. @param {string} dir @param {string} message */
+export function commitAll(dir, message) {
+  if (!status(dir).dirty.length) return null;
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-q', '-m', message]);
+  return git(dir, ['rev-parse', 'HEAD']);
+}
+
+// -- worktrees ------------------------------------------------------------------
+
+/** Where a project's task worktrees go: beside the checkout, never inside it. @param {string} repo */
+export function worktreeRoot(repo) {
+  return process.env.AI_CODE_WORKTREE_ROOT || path.join(path.dirname(repo), `.ai-code-worktrees-${path.basename(repo)}`);
+}
+
+/**
+ * A new branch at `base`, checked out in its own directory. The checkout's
+ * node_modules is linked in, so a task can run the project's tests without an install.
+ * @param {string} repo @param {string} dir @param {string} branch @param {string} base
+ */
+export function createWorktree(repo, dir, branch, base) {
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  git(repo, ['worktree', 'add', '-q', '-b', branch, dir, base]);
+  const nm = path.join(repo, 'node_modules');
+  const link = path.join(dir, 'node_modules');
+  if (fs.existsSync(nm) && !fs.existsSync(link)) {
+    excludeLine(repo, '/node_modules');
+    try {
+      fs.symlinkSync(nm, link, 'junction');
+    } catch {
+      /* the task can install its own */
+    }
+  }
+}
+
+/** @param {string} repo @param {string} dir */
+export function removeWorktree(repo, dir) {
+  if (fs.existsSync(dir)) git(repo, ['worktree', 'remove', '--force', dir]);
+  else git(repo, ['worktree', 'prune']);
+}
+
+/** @param {string} repo @param {string} branch */
+export function deleteBranch(repo, branch) {
+  git(repo, ['branch', '-D', branch]);
+}
+
+/** A line in the repository's own ignore file, which is never committed. @param {string} repo @param {string} line */
+export function excludeLine(repo, line) {
+  try {
+    const common = git(repo, ['rev-parse', '--git-common-dir']);
+    const f = path.resolve(repo, common, 'info', 'exclude');
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    const s = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
+    if (s.split('\n').some((x) => x.trim() === line)) return;
+    fs.appendFileSync(f, (s && !s.endsWith('\n') ? '\n' : '') + line + '\n');
+  } catch {
+    /* nothing to protect */
+  }
+}
+
+// -- diffs ----------------------------------------------------------------------
+
+/**
+ * The working tree against `ref`, new files included. Read through a throwaway index so
+ * the person's own staging is never touched: `git add -A` into a copy, then diff it.
+ * @param {string} dir @param {string} ref @param {string[]} [extra] extra `git diff` flags
+ */
+function diffWorking(dir, ref, extra = []) {
+  const tmp = path.join(os.tmpdir(), `ai-code-index-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  const env = { ...process.env, GIT_INDEX_FILE: tmp };
+  try {
+    git(dir, ['read-tree', ref], { env });
+    git(dir, ['add', '-A'], { env });
+    return git(dir, ['diff', '--cached', '--no-color', '--no-ext-diff', ...extra, ref], { env });
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+/** @param {string} dir @param {string} ref */
+export const workingDiff = (dir, ref) => diffWorking(dir, ref);
+
+/** Files, lines added and removed, against `ref`. @param {string} dir @param {string} ref */
+export function workingStat(dir, ref) {
+  const out = { files: 0, added: 0, removed: 0 };
+  for (const row of diffWorking(dir, ref, ['--numstat']).split('\n').filter(Boolean)) {
+    const [a, r] = row.split('\t');
+    out.files++;
+    out.added += Number(a) || 0;
+    out.removed += Number(r) || 0;
+  }
+  return out;
+}
+
+// -- merging --------------------------------------------------------------------
+
+/**
+ * The tree a merge of `b` into `a` would produce, without touching any checkout.
+ * @param {string} dir @param {string} a @param {string} b
+ */
+export function mergeTree(dir, a, b) {
+  try {
+    return { clean: true, tree: git(dir, ['merge-tree', '--write-tree', a, b]).split('\n')[0], conflicts: /** @type {string[]} */ ([]) };
+  } catch (e) {
+    const lines = String(/** @type {any} */ (e).stdout || '').split('\n');
+    const conflicts = [...new Set(lines.slice(1).map((l) => /^\d{6} [0-9a-f]+ \d\t(.+)$/.exec(l)?.[1]).filter(Boolean))];
+    return { clean: false, tree: lines[0] || null, conflicts: /** @type {string[]} */ (conflicts) };
+  }
+}
+
+/**
+ * Lands `branch` on `target`. `merge` keeps the task's commits under a merge commit
+ * (or fast-forwards when it can); `squash` lands them as one commit.
+ *
+ * Where the target is checked out somewhere, git itself does the merge there, so the
+ * files on disk move with the branch and git refuses on its own if local changes would
+ * be overwritten. Where it is not, the merge is written with merge-tree and
+ * commit-tree, and only the ref moves.
+ *
+ * @param {string} repo @param {{branch:string, target:string, message:string, strategy?:'merge'|'squash'}} o
+ * @returns {{commit:string, fastForward:boolean}}
+ */
+export function land(repo, { branch, target, message, strategy = 'merge' }) {
+  const tip = revParse(repo, `refs/heads/${branch}`);
+  const base = revParse(repo, `refs/heads/${target}`);
+  if (!tip || !base) throw new Error(`Cannot find ${tip ? target : branch}`);
+  if (isAncestor(repo, tip, base)) throw Object.assign(new Error(`${target} already contains ${branch}`), { code: 'MERGED' });
+  const m = mergeTree(repo, base, tip);
+  if (!m.clean) throw Object.assign(new Error(`Conflicts with ${target}: ${m.conflicts.join(', ')}`), { code: 'CONFLICT', conflicts: m.conflicts });
+  const ff = strategy === 'merge' && isAncestor(repo, base, tip);
+  const at = checkedOutAt(repo).get(target);
+  if (at) {
+    try {
+      if (strategy === 'squash') {
+        git(at, ['merge', '--squash', branch]);
+        git(at, ['commit', '-q', '-m', message]);
+      } else git(at, ['merge', ff ? '--ff-only' : '--no-ff', '--no-edit', '-m', message, branch]);
+    } catch (e) {
+      try {
+        git(at, strategy === 'squash' ? ['reset', '--merge'] : ['merge', '--abort']);
+      } catch {
+        /* nothing was started */
+      }
+      throw Object.assign(new Error(`git refused to merge in ${at}: ${gitError(e)}`), { code: 'CHECKOUT' });
+    }
+    return { commit: git(at, ['rev-parse', 'HEAD']), fastForward: ff };
+  }
+  const commit = ff ? tip : git(repo, ['commit-tree', /** @type {string} */ (m.tree), '-p', base, ...(strategy === 'squash' ? [] : ['-p', tip]), '-m', message]);
+  git(repo, ['update-ref', `refs/heads/${target}`, commit, base]);
+  return { commit, fastForward: ff };
+}
+
+/**
+ * Brings the target's new commits into a task's worktree. A conflict is left in the
+ * worktree, where the task's session can resolve it.
+ * @param {string} dir @param {string} target
+ */
+export function mergeInto(dir, target) {
+  try {
+    git(dir, ['merge', '--no-edit', target]);
+    return { ok: true, conflicts: /** @type {string[]} */ ([]) };
+  } catch (e) {
+    const conflicts = status(dir).conflicted;
+    if (conflicts.length) return { ok: false, conflicts };
+    throw new Error(gitError(e));
+  }
+}
+
+/** @param {string} dir */
+export function abortMerge(dir) {
+  git(dir, ['merge', '--abort']);
+}
+
+/** How a task's branch stands against its base. @param {string} dir the task worktree @param {string} branch @param {string} target */
+export function compare(dir, branch, target) {
+  const ahead = count(dir, `${target}..${branch}`);
+  const behind = count(dir, `${branch}..${target}`);
+  return { ahead, behind };
+}
+
+// -- GitHub -----------------------------------------------------------------------
+
+/** @returns {Promise<boolean>} */
+export function ghReady() {
+  return new Promise((resolve) => execFile('gh', ['auth', 'status'], { timeout: 10000 }, (err) => resolve(!err)));
+}
+
+/** @param {string} dir @param {{head:string, base:string, title:string, body:string}} o @returns {Promise<string>} */
+export function createPullRequest(dir, { head, base, title, body }) {
+  return new Promise((resolve, reject) =>
+    execFile('gh', ['pr', 'create', '--head', head, '--base', base, '--title', title, '--body', body], { cwd: dir, timeout: 60000 }, (err, stdout, stderr) =>
+      err ? reject(new Error(String(stderr || err.message).trim())) : resolve(String(stdout).trim().split('\n').pop() || '')
+    )
+  );
+}
