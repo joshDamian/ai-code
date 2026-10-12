@@ -157,11 +157,15 @@ WantedBy=default.target
       { mode: 0o600 }
     );
     fs.chmodSync(unit, 0o600);
+    // Before the commands, not after: `systemctl --user` needs a running user manager,
+    // which a VPS with no login session and no linger does not have. There the first
+    // command throws, and a reminder printed afterwards is never seen.
+    console.log(`To keep it running after you log out: sudo loginctl enable-linger ${os.userInfo().username}\nIf systemctl cannot reach the user bus, run that first and install again.`);
     for (const args of [['--user', 'daemon-reload'], ['--user', 'enable', '--now', 'bench.service'], ['--user', 'restart', 'bench.service']]) {
       const r = spawnSync('systemctl', args, { encoding: 'utf8' });
       if (r.status !== 0) throw new Error(`systemctl ${args.join(' ')} failed: ${r.stderr}`);
     }
-    console.log(`Installed ${unit}\nTo keep it running after you log out: sudo loginctl enable-linger ${os.userInfo().username}\nLogs: journalctl --user -u bench -f`);
+    console.log(`Installed ${unit}\nLogs: journalctl --user -u bench -f`);
     return;
   }
   throw new Error(`No service support for ${process.platform}; run \`bench serve\` under your own process manager.`);
