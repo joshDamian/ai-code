@@ -111,9 +111,18 @@ function serviceInstall() {
       { mode: 0o600 }
     );
     fs.chmodSync(plist, 0o600);
+    // bootout returns before the old job has unloaded, and a bootstrap in that window
+    // fails with "5: Input/output error". So wait for it to go, then retry a few times.
     spawnSync('launchctl', ['bootout', `${domain}/${LABEL}`]);
-    const r = spawnSync('launchctl', ['bootstrap', domain, plist], { encoding: 'utf8' });
-    if (r.status !== 0) throw new Error(`launchctl bootstrap failed: ${r.stderr}`);
+    const sleep = (/** @type {number} */ ms) => spawnSync('sleep', [String(ms / 1000)]);
+    for (let i = 0; i < 20 && spawnSync('launchctl', ['print', `${domain}/${LABEL}`]).status === 0; i++) sleep(250);
+    let r;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      r = spawnSync('launchctl', ['bootstrap', domain, plist], { encoding: 'utf8' });
+      if (r.status === 0) break;
+      sleep(1000);
+    }
+    if (r?.status !== 0) throw new Error(`launchctl bootstrap failed: ${r?.stderr}. Retry with: launchctl bootstrap ${domain} ${plist}`);
     console.log(`Installed ${plist}\nThe server runs at login and restarts if it stops. Logs: ${logs}/server.log`);
     return;
   }
