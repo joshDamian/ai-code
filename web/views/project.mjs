@@ -271,7 +271,7 @@ function CheckoutDiff({ projectId, onClose }) {
 function NewTask({ projectId, git }) {
   const providers = useStore((s) => s.providers);
   const defaults = useStore((s) => s.defaults);
-  const key = `ai-code:new-task:${projectId}`;
+  const key = `bench:new-task:${projectId}`;
   const [prompt, setPrompt] = useState(() => recall(key, ''));
   const [title, setTitle] = useState('');
   const [base, setBase] = useState(null);

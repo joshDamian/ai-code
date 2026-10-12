@@ -97,7 +97,7 @@ function Devices() {
   return html`
     <section class="section card">
       <h2>Devices</h2>
-      <p class="muted">This machine's own browser needs no pairing. Any other device pairs once with a one-time link, reached over your tailnet (<code>ai-code share</code>).</p>
+      <p class="muted">This machine's own browser needs no pairing. Any other device pairs once with a one-time link, reached over your tailnet (<code>bench share</code>).</p>
       ${devices.length
         ? html`<div class="list">
             ${devices.map(
@@ -120,7 +120,7 @@ function Devices() {
             <div class="stack">
               ${pairing.urls.length
                 ? pairing.urls.map((u) => html`<code class="pair-url">${u}</code>`)
-                : html`<p>No address for other devices is known. On the server run <code>ai-code share</code>, or set <code>AI_CODE_PUBLIC_URL</code>, then pair again. Code: <code>${pairing.code}</code></p>`}
+                : html`<p>No address for other devices is known. On the server run <code>bench share</code>, or set <code>BENCH_PUBLIC_URL</code>, then pair again. Code: <code>${pairing.code}</code></p>`}
               <p class="muted">Open it on the other device within 10 minutes. It works once.</p>
             </div>
           </div>`
@@ -260,11 +260,11 @@ function Server() {
   return html`
     <section class="section card">
       <h2>Server</h2>
-      <p class="muted mono-sm">ai-code ${server.version} · up ${formatDuration(server.uptimeMs)} · pid ${server.pid} · data in ${server.root}</p>
+      <p class="muted mono-sm">bench ${server.version} · up ${formatDuration(server.uptimeMs)} · pid ${server.pid} · data in ${server.root}</p>
       ${server.supervised
         ? html`<p class="muted">Running as a ${server.supervised} service, which starts it again whenever it stops.</p>
             <div class="row"><button class="btn secondary" type="button" disabled=${restarting} onClick=${restart}>${restarting ? 'Restarting…' : 'Restart server'}</button></div>`
-        : html`<div class="notice notice-warn">Not running as a service: if it stops, nothing starts it again, and it cannot be restarted from here. On the server, run <code>ai-code service install</code>.</div>`}
+        : html`<div class="notice notice-warn">Not running as a service: if it stops, nothing starts it again, and it cannot be restarted from here. On the server, run <code>bench service install</code>.</div>`}
     </section>
   `;
 }

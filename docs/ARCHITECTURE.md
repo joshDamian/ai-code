@@ -32,7 +32,7 @@ A session is a row plus, while in use, an open Agent SDK `query()` fed by an asy
 
 ## Tasks and git
 
-A task records its `base_branch` and `base_commit`, a branch `ai-code/<slug>-<id>`, and a worktree beside the checkout. The worktree is cut from the base ref, so the checkout never switches.
+A task records its `base_branch` and `base_commit`, a branch `bench/<slug>-<id>`, and a worktree beside the checkout. The worktree is cut from the base ref, so the checkout never switches.
 
 - **Changes** are the worktree, untracked files included, against the merge base with the base branch. They are read through a temporary index, so the person's own staging is untouched.
 - **Merge** commits any uncommitted work, checks for conflicts with `git merge-tree`, then lands the branch. If the base is checked out, git merges in that checkout and refuses to overwrite local changes there. If it is not, the commit is written with `commit-tree` and only the ref moves. Squash lands one commit.
@@ -45,11 +45,11 @@ Loopback requests from this machine's own browser need nothing. A request that c
 
 ## Lifecycle
 
-`ai-code service install` writes a launchd agent (macOS) or a systemd user unit (Linux) that restarts the server whenever it exits, and sets `AI_CODE_SERVICE` in its environment. `POST /api/server/restart` exits the process only when that variable is set; otherwise it answers 409, since a restart nothing completes is a stop. Live sessions die with the process and resume from Claude Code's transcript on their next message.
+`bench service install` writes a launchd agent (macOS) or a systemd user unit (Linux) that restarts the server whenever it exits, and sets `BENCH_SERVICE` in its environment. `POST /api/server/restart` exits the process only when that variable is set; otherwise it answers 409, since a restart nothing completes is a stop. Live sessions die with the process and resume from Claude Code's transcript on their next message.
 
 ## Data
 
-The database is `$AI_CODE_ROOT/.ai-code/ai-code.db`. A v1 (pipeline) database is upgraded in place on first start:
+The database is `$BENCH_ROOT/.bench/bench.db`. A v1 (pipeline) database is upgraded in place on first start:
 
 1. The file is snapshotted with `VACUUM INTO`.
 2. The pipeline tables are renamed `legacy_*`.

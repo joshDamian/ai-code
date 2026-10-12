@@ -10,6 +10,7 @@ import QRCode from 'qrcode';
 import { Service } from './service.mjs';
 import { TerminalSessions } from './terminal.mjs';
 import { providerEnv } from './providers.mjs';
+import { env } from './env.mjs';
 import { MODES } from './runtime.mjs';
 
 /** @typedef {import('./contract.mjs').ServerMessage} ServerMessage */
@@ -22,23 +23,23 @@ import { MODES } from './runtime.mjs';
 // `aic` cookie the pairing set or as a Bearer header. `tailscale serve` proxies to
 // loopback but keeps the tailnet hostname in Host, so a phone always presents a token.
 
-const root = process.env.AI_CODE_ROOT || process.cwd();
+const root = env('ROOT') || process.cwd();
 const port = Number(process.env.PORT ?? 4317);
-const host = process.env.AI_CODE_HOST || '127.0.0.1';
+const host = env('HOST') || '127.0.0.1';
 const loopbackBind = /^(localhost|127\.\d+\.\d+\.\d+|::1)$/.test(host);
-if (!loopbackBind && !process.env.AI_CODE_ALLOW_EXPOSED) {
+if (!loopbackBind && !env('ALLOW_EXPOSED')) {
   console.error(
-    `AI_CODE_HOST=${host} exposes the server beyond this machine. Prefer \`ai-code share\` (tailscale serve).\n` +
-      'Set AI_CODE_ALLOW_EXPOSED=1 to bind it anyway; every request will still need a paired device.'
+    `BENCH_HOST=${host} exposes the server beyond this machine. Prefer \`bench share\` (tailscale serve).\n` +
+      'Set BENCH_ALLOW_EXPOSED=1 to bind it anyway; every request will still need a paired device.'
   );
   process.exit(1);
 }
 
-// AI_CODE_FAKE_SDK=1 runs sessions on the scripted fake the tests use, for working on
+// BENCH_FAKE_SDK=1 runs sessions on the scripted fake the tests use, for working on
 // the interface without spending anything.
-const fake = process.env.AI_CODE_FAKE_SDK === '1' ? (await import('../tests/fake-sdk.mjs')).fakeQuery : undefined;
+const fake = env('FAKE_SDK') === '1' ? (await import('../tests/fake-sdk.mjs')).fakeQuery : undefined;
 const svc = new Service(root, fake ? { query: /** @type {any} */ (fake) } : {});
-const terminals = new TerminalSessions({ reapMs: Number(process.env.AI_CODE_TERMINAL_REAP_MS) || undefined });
+const terminals = new TerminalSessions({ reapMs: Number(env('TERMINAL_REAP_MS')) || undefined });
 const startedAt = Date.now();
 const webDir = new URL('../web/', import.meta.url).pathname;
 const modulesDir = new URL('../node_modules/', import.meta.url).pathname;
@@ -66,19 +67,20 @@ function fromLocalhost(req) {
 function presentedToken(req) {
   const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
   if (bearer) return bearer[1].trim();
-  const cookie = /(?:^|;\s*)aic=([^;]+)/.exec(req.headers.cookie || '');
+  // `aic` is the cookie's name from before the rename; a device paired then stays paired.
+  const cookie = /(?:^|;\s*)(?:bench|aic)=([^;]+)/.exec(req.headers.cookie || '');
   return cookie ? decodeURIComponent(cookie[1]) : '';
 }
 
 // An install-wide token from the environment still works, for scripts.
-const envToken = process.env.AI_CODE_TOKEN || null;
+const envToken = env('TOKEN') || null;
 
 /** @param {http.IncomingMessage} req @returns {{local:boolean, device:{id:string,name:string}|null}|null} */
 function who(req) {
   if (fromLocalhost(req)) return { local: true, device: null };
   const t = presentedToken(req);
   if (!t) return null;
-  if (envToken && t.length === envToken.length && crypto.timingSafeEqual(Buffer.from(t), Buffer.from(envToken))) return { local: false, device: { id: 'env', name: 'AI_CODE_TOKEN' } };
+  if (envToken && t.length === envToken.length && crypto.timingSafeEqual(Buffer.from(t), Buffer.from(envToken))) return { local: false, device: { id: 'env', name: 'BENCH_TOKEN' } };
   const d = svc.store.deviceByToken(t);
   return d ? { local: false, device: d } : null;
 }
@@ -264,7 +266,8 @@ function serveStatic(req, res, u) {
 /** The addresses a phone could reach this server at. */
 async function publicUrls() {
   const urls = [];
-  if (process.env.AI_CODE_PUBLIC_URL) urls.push(process.env.AI_CODE_PUBLIC_URL.replace(/\/$/, ''));
+  const configured = env('PUBLIC_URL');
+  if (configured) urls.push(configured.replace(/\/$/, ''));
   const ts = await new Promise((resolve) => execFile('tailscale', ['status', '--json'], { timeout: 5000 }, (err, out) => resolve(err ? null : out)));
   if (ts) {
     try {
@@ -379,14 +382,14 @@ route('POST', '/api/push/subscribe', ({ body }) => (svc.store.addPushSubscriptio
 route('POST', '/api/push/unsubscribe', ({ body }) => ({ ok: svc.store.deletePushSubscription(body.endpoint) > 0 }));
 
 // Whether something will start this process again after it exits: the service
-// definition `ai-code service install` writes says so.
-const supervised = process.env.AI_CODE_SERVICE || null;
+// definition `bench service install` writes says so.
+const supervised = env('SERVICE') || null;
 
 route('GET', '/api/server/status', () => ({ pid: process.pid, startedAt, uptimeMs: Date.now() - startedAt, version: pkg.version, root, terminals: terminals.size, supervised }));
 // Exits so the service manager starts a fresh process. Refused when nothing would, since
 // a restart that is really a stop leaves a phone with no way back.
 route('POST', '/api/server/restart', () => {
-  if (!supervised) throw Object.assign(new Error('Not running as a service, so nothing would start it again. Run `ai-code service install` on the server.'), { status: 409 });
+  if (!supervised) throw Object.assign(new Error('Not running as a service, so nothing would start it again. Run `bench service install` on the server.'), { status: 409 });
   setTimeout(shutdown, 100);
   return { ok: true };
 });
@@ -410,7 +413,7 @@ async function pair(req, res, u) {
   const token = crypto.randomBytes(32).toString('base64url');
   const device = svc.store.addDevice(String(body.name || 'Device').slice(0, 60), token);
   const secure = u.protocol === 'https:' || req.headers['x-forwarded-proto'] === 'https' || /\.ts\.net(:\d+)?$/.test(req.headers.host || '');
-  res.setHeader('set-cookie', `aic=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${secure ? '; Secure' : ''}`);
+  res.setHeader('set-cookie', `bench=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${secure ? '; Secure' : ''}`);
   json(res, { device });
 }
 
@@ -488,7 +491,7 @@ server.on('upgrade', (req, socket, head) => {
   }
 
   if (u.pathname === '/api/terminal') {
-    if (process.env.AI_CODE_DISABLE_TERMINAL) return refuse(socket, '403 Forbidden');
+    if (env('DISABLE_TERMINAL')) return refuse(socket, '403 Forbidden');
     const spec = terminalSpec(u);
     if ('error' in spec) return refuse(socket, spec.error);
     return wss.handleUpgrade(req, socket, head, (ws) => {
@@ -559,6 +562,6 @@ process.on('SIGTERM', shutdown);
 server.listen(port, host, () => {
   const a = server.address();
   const bound = a && typeof a === 'object' ? a.port : port;
-  console.log(`AI Code: http://localhost:${bound}`);
-  if (loopbackBind) console.log('Other devices: run `ai-code share`, then pair from Settings or `ai-code pair`.');
+  console.log(`Bench: http://localhost:${bound}`);
+  if (loopbackBind) console.log('Other devices: run `bench share`, then pair from Settings or `bench pair`.');
 });

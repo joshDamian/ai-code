@@ -242,7 +242,7 @@ export function connect() {
     sendWatch();
     // Whatever happened while disconnected is read fresh, and open panes reload.
     refresh();
-    window.dispatchEvent(new Event('ai-code:reconnected'));
+    window.dispatchEvent(new Event('bench:reconnected'));
   };
   ws.onmessage = (e) => {
     try {

@@ -62,7 +62,7 @@ export class Service extends EventEmitter {
     const top = g.topLevel(dir);
     if (!g.revParse(top)) {
       g.git(top, ['add', '-A']);
-      g.git(top, ['-c', 'user.email=ai-code@localhost', '-c', 'user.name=AI Code', 'commit', '-q', '--allow-empty', '-m', 'Initial commit']);
+      g.git(top, ['-c', 'user.email=bench@localhost', '-c', 'user.name=Bench', 'commit', '-q', '--allow-empty', '-m', 'Initial commit']);
     }
     const existing = this.store.projectByPath(top);
     if (existing) return existing;
@@ -171,7 +171,7 @@ export class Service extends EventEmitter {
     }
     const baseCommit = /** @type {string} */ (g.revParse(p.path, `refs/heads/${base}`));
     const id = this.store.id();
-    const branch = `ai-code/${slug(title)}-${id.slice(0, 6)}`;
+    const branch = `bench/${slug(title)}-${id.slice(0, 6)}`;
     const worktree = path.join(g.worktreeRoot(p.path), id);
     try {
       g.createWorktree(p.path, worktree, branch, baseCommit);

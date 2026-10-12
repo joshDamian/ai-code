@@ -46,7 +46,7 @@ export function Unpaired() {
     <div class="gate">
       <div class="card gate-card">
         <h1>This device is not paired</h1>
-        <p>On the machine running AI Code, open Settings and choose <strong>Pair a device</strong>, or run <code>ai-code pair</code>. Then open the link it gives you here.</p>
+        <p>On the machine running Bench, open Settings and choose <strong>Pair a device</strong>, or run <code>bench pair</code>. Then open the link it gives you here.</p>
       </div>
     </div>
   `;

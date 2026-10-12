@@ -1,0 +1,66 @@
+#!/bin/sh
+# Installs a snapshot of this checkout as the `bench` command.
+#
+#   bin/install             copy a release and write the command
+#   bin/install --service   also run the server at login (launchd or systemd)
+#
+# The release is a copy, so editing this checkout does not change what is installed;
+# run it again to update. `./dev/bench` always runs the checkout itself.
+set -eu
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+DEST="${BENCH_INSTALL_DIR:-${AI_CODE_INSTALL_DIR:-$HOME/bin}}"
+RELEASE_ROOT="${BENCH_RELEASE_DIR:-${AI_CODE_RELEASE_DIR:-$HOME/.local/share/bench/releases}}"
+DATA_ROOT="${BENCH_DATA_DIR:-${AI_CODE_DATA_DIR:-$HOME/.bench}}"
+
+SERVICE=0
+for arg in "$@"; do
+  case "$arg" in
+    --service) SERVICE=1 ;;
+    *) printf '%s\n' "install: unknown option: $arg" "usage: bin/install [--service]" >&2; exit 2 ;;
+  esac
+done
+
+command -v node >/dev/null || { echo "install: node is not on PATH" >&2; exit 1; }
+
+# Before the rename the data lived in ~/.ai-code. It moves once, with the server that
+# has it open stopped first, so nothing writes to it mid-move.
+OLD_DATA="$HOME/.ai-code"
+if [ "$DATA_ROOT" = "$HOME/.bench" ] && [ ! -e "$DATA_ROOT" ] && [ -d "$OLD_DATA" ]; then
+  if [ "$(uname)" = Darwin ]; then
+    for label in com.ai-code.server com.ai-code.supervisor; do launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true; done
+  else
+    systemctl --user stop ai-code.service 2>/dev/null || true
+  fi
+  sleep 2
+  mv "$OLD_DATA" "$DATA_ROOT"
+  printf '%s\n' "Moved $OLD_DATA to $DATA_ROOT"
+fi
+
+RELEASE="$RELEASE_ROOT/$(date +%Y%m%d%H%M%S)"
+mkdir -p "$DEST" "$RELEASE" "$DATA_ROOT"
+( cd "$ROOT" && tar --exclude='./.bench' --exclude='./.ai-code' --exclude='./node_modules' --exclude='./.git' -cf - . ) | ( cd "$RELEASE" && tar -xf - )
+( cd "$RELEASE" && npm install --omit=dev --ignore-scripts --no-audit --no-fund >/dev/null && node -e "
+  const fs = require('fs'), p = require('path');
+  const h = p.join('node_modules/node-pty/prebuilds', process.platform + '-' + process.arch, 'spawn-helper');
+  try { if (!(fs.statSync(h).mode & 0o111)) fs.chmodSync(h, 0o755); } catch {}
+" )
+
+cat > "$DEST/bench" <<SCRIPT
+#!/bin/sh
+export BENCH_ROOT="\${BENCH_ROOT:-\${AI_CODE_ROOT:-$DATA_ROOT}}"
+exec node "$RELEASE/src/cli.mjs" "\$@"
+SCRIPT
+chmod +x "$DEST/bench"
+# The command's name before the rename.
+printf '#!/bin/sh\nexec "%s/bench" "$@"\n' "$DEST" > "$DEST/ai-code"
+chmod +x "$DEST/ai-code"
+for wrapper in claude-expensive claude-cheap; do
+  [ -f "$ROOT/bin/$wrapper" ] && cp "$ROOT/bin/$wrapper" "$DEST/$wrapper" && chmod +x "$DEST/$wrapper"
+done
+
+printf '%s\n' "Installed: $RELEASE" "Command:   $DEST/bench" "Data:      $DATA_ROOT"
+if [ "$SERVICE" = 1 ]; then
+  BENCH_ROOT="$DATA_ROOT" "$DEST/bench" service install
+else
+  printf '%s\n' "Run it with \`bench serve\`, or keep it running with \`bench service install\`."
+fi

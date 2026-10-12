@@ -222,7 +222,7 @@ export class Runtime extends EventEmitter {
     if (!provider) throw new Error(`Provider ${s.provider_id} is gone; pick another`);
     const model = s.model_id ? this.store.getModel(s.model_id) || null : null;
     const project = this.store.getProject(s.project_id);
-    const env = { ...cleanEnv(), ...providerEnv(provider, model), CLAUDE_AGENT_SDK_CLIENT_APP: 'ai-code' };
+    const env = { ...cleanEnv(), ...providerEnv(provider, model), CLAUDE_AGENT_SDK_CLIENT_APP: 'bench' };
     const instructions = userInstructions();
     const memory = project && path.resolve(project.path) !== path.resolve(s.cwd) ? memoryDir(project.path) : null;
     fs.mkdirSync(this.attachmentsDir(s.id), { recursive: true });

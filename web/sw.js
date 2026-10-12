@@ -7,7 +7,7 @@
 // the web client is built not to do - and a subscribe POST answered from cache would
 // never reach the server at all.
 
-const CACHE = 'ai-code-shell-v2';
+const CACHE = 'bench-shell-v1';
 
 // The entry points only. The rest of the module graph is cached as it is fetched, which
 // keeps this list from having to name every view the app grows.
@@ -69,7 +69,7 @@ self.addEventListener('push', (e) => {
     // A payload that is not JSON is not one this server sent. The default below is
     // still a truthful notification.
   }
-  const title = data.title || 'AI Code';
+  const title = data.title || 'Bench';
   e.waitUntil(
     self.registration.showNotification(title, {
       body: data.body || '',

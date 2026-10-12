@@ -162,7 +162,7 @@ function Changes({ task, git, sessions, reload }) {
             Update from ${task.base_branch} to resolve them here first.
           </div>`
         : null}
-      ${diff === null ? html`<div class="muted">Loading…</div>` : diff ? html`<${DiffViewer} diff=${diff} nav storageKey=${`ai-code:viewed:${task.id}`} />` : html`<div class="muted pane-empty">No changes against ${task.base_branch} yet.</div>`}
+      ${diff === null ? html`<div class="muted">Loading…</div>` : diff ? html`<${DiffViewer} diff=${diff} nav storageKey=${`bench:viewed:${task.id}`} />` : html`<div class="muted pane-empty">No changes against ${task.base_branch} yet.</div>`}
     </div>
   `;
 }

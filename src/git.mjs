@@ -3,6 +3,7 @@ import { execFileSync, execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { env } from './env.mjs';
 
 /** @typedef {import('./contract.mjs').GitState} GitState */
 /** @typedef {import('./contract.mjs').GitBranch} GitBranch */
@@ -148,15 +149,18 @@ export function branches(dir) {
     .filter((r) => r && !r.endsWith('/HEAD') && r.includes('/'));
   const have = new Set(local);
   /** @type {GitBranch[]} */
-  const out = local.filter((b) => !b.startsWith('ai-code/')).map((name) => ({ name, remoteOnly: false, current: name === cur }));
+  const out = local.filter((b) => !isTaskBranch(b)).map((name) => ({ name, remoteOnly: false, current: name === cur }));
   for (const r of remote) {
     const name = r.slice(r.indexOf('/') + 1);
-    if (have.has(name) || name.startsWith('ai-code/')) continue;
+    if (have.has(name) || isTaskBranch(name)) continue;
     have.add(name);
     out.push({ name, remoteOnly: true, current: false });
   }
   return out;
 }
+
+/** A task's own branch: `bench/…`, or `ai-code/…` from before the rename. @param {string} b */
+const isTaskBranch = (b) => b.startsWith('bench/') || b.startsWith('ai-code/');
 
 /** The checkout state a project page shows. @param {string} dir @returns {GitState} */
 export function gitState(dir) {
@@ -198,7 +202,7 @@ export function checkout(dir, name, o = {}) {
   let stashed = false;
   if (s.dirty.length) {
     if (!o.stash) throw Object.assign(new Error(`${s.dirty.length} uncommitted change${s.dirty.length === 1 ? '' : 's'} on ${s.branch || 'HEAD'}`), { code: 'DIRTY', dirty: s.dirty });
-    git(dir, ['stash', 'push', '--include-untracked', '-m', `ai-code: switching from ${s.branch || 'HEAD'} to ${name}`]);
+    git(dir, ['stash', 'push', '--include-untracked', '-m', `bench: switching from ${s.branch || 'HEAD'} to ${name}`]);
     stashed = true;
   }
   try {
@@ -238,7 +242,7 @@ export function commitAll(dir, message) {
 
 /** Where a project's task worktrees go: beside the checkout, never inside it. @param {string} repo */
 export function worktreeRoot(repo) {
-  return process.env.AI_CODE_WORKTREE_ROOT || path.join(path.dirname(repo), `.ai-code-worktrees-${path.basename(repo)}`);
+  return env('WORKTREE_ROOT') || path.join(path.dirname(repo), `.bench-worktrees-${path.basename(repo)}`);
 }
 
 /**
@@ -294,7 +298,7 @@ export function excludeLine(repo, line) {
  * @param {string} dir @param {string} ref @param {string[]} [extra] extra `git diff` flags
  */
 function diffWorking(dir, ref, extra = []) {
-  const tmp = path.join(os.tmpdir(), `ai-code-index-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  const tmp = path.join(os.tmpdir(), `bench-index-${process.pid}-${Math.random().toString(36).slice(2)}`);
   const env = { ...process.env, GIT_INDEX_FILE: tmp };
   try {
     git(dir, ['read-tree', ref], { env });

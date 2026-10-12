@@ -50,10 +50,10 @@ export function SessionPane({ sessionId, onArchived }) {
       }
     });
     const again = () => load();
-    window.addEventListener('ai-code:reconnected', again);
+    window.addEventListener('bench:reconnected', again);
     return () => {
       off();
-      window.removeEventListener('ai-code:reconnected', again);
+      window.removeEventListener('bench:reconnected', again);
     };
   }, [sessionId]);
 
@@ -403,7 +403,7 @@ function readFile(file) {
 }
 
 function Composer({ session: s, commands }) {
-  const key = `ai-code:draft:${s.id}`;
+  const key = `bench:draft:${s.id}`;
   const [text, setText] = useState(() => recall(key, ''));
   const [images, setImages] = useState([]);
   const [sending, setSending] = useState(false);

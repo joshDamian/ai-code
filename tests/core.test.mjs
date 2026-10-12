@@ -36,7 +36,7 @@ function repo() {
 
 function setup() {
   const root = tmp('root');
-  process.env.AI_CODE_WORKTREE_ROOT = path.join(root, 'worktrees');
+  process.env.BENCH_WORKTREE_ROOT = path.join(root, 'worktrees');
   const svc = new Service(root, { query: fakeQuery });
   const dir = repo();
   const project = svc.addProject({ path: dir });
@@ -59,7 +59,7 @@ test('a task starts from a branch the checkout does not have out, and leaves the
   assert.equal(git(dir, 'branch', '--show-current'), 'main');
   assert.equal(task.base_branch, 'feature');
   assert.ok(fs.existsSync(path.join(task.worktree, 'f.txt')), 'the worktree is cut from feature');
-  assert.match(task.branch, /^ai-code\/fix-the-thing-/);
+  assert.match(task.branch, /^bench\/fix-the-thing-/);
   assert.equal(session.cwd, task.worktree);
   assert.equal(session.task_id, task.id);
   svc.shutdown();
@@ -254,7 +254,8 @@ test('a v1 database is backed up, its pipeline tables renamed, and live task wor
   const svc = new Service(root, { query: fakeQuery });
   const names = svc.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
   assert.ok(names.includes('legacy_tasks') && names.includes('legacy_runs'));
-  assert.ok(fs.readdirSync(path.join(root, '.ai-code')).some((f) => f.startsWith('ai-code.db.pre-v2-')));
+  assert.ok(fs.readdirSync(path.join(root, '.bench')).some((f) => f.startsWith('bench.db.pre-v2-')), 'the v1 data moved to .bench and was snapshotted');
+  assert.ok(!fs.existsSync(path.join(root, '.ai-code')));
   const t = svc.task('t1');
   assert.equal(t.state, 'active');
   assert.equal(t.base_branch, 'main');

@@ -1,4 +1,3 @@
 #!/bin/sh
-set -eu
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-exec node "$ROOT/src/cli.mjs" "$@"
+# The command's name before the rename.
+exec "$(dirname -- "$0")/bench" "$@"

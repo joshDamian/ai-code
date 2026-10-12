@@ -38,7 +38,7 @@ const HIGHLIGHT_LINES = 3000;
 
 // Whether the file list is hidden. One setting for every viewer, remembered in this
 // browser: it is a preference about the screen, not about a task.
-const WIDE_KEY = 'ai-code:diff-wide';
+const WIDE_KEY = 'bench:diff-wide';
 
 let hljsLoad = null;
 function loadHighlighter() {
@@ -71,7 +71,7 @@ function highlightFile(hljs, f) {
 const STATUS = { M: 'Modified', A: 'Added', D: 'Deleted', R: 'Renamed', U: 'Untracked' };
 
 function storeKey(key) {
-  return `ai-code:viewed:${key}`;
+  return `bench:viewed:${key}`;
 }
 
 // localStorage throws in some privacy modes; a viewer that cannot remember what was

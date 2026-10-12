@@ -16,7 +16,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aic-server-'));
 before(async () => {
   child = spawn(process.execPath, ['src/server.mjs'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, PORT: '0', AI_CODE_ROOT: root, AI_CODE_PUBLIC_URL: 'https://box.example.ts.net' },
+    env: { ...process.env, PORT: '0', BENCH_ROOT: root, BENCH_PUBLIC_URL: 'https://box.example.ts.net' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   port = await new Promise((resolve, reject) => {
@@ -85,6 +85,9 @@ test('a pairing code becomes a device cookie, once', async () => {
   assert.equal((await req('POST', '/api/pair', { host: REMOTE, body: { code: p.json.code, name: 'Again' } })).status, 401);
   const state = await req('GET', '/api/state', { host: REMOTE, cookie });
   assert.equal(state.status, 200);
+  assert.match(cookie, /^bench=/);
+  // A device paired before the rename carries the old cookie name.
+  assert.equal((await req('GET', '/api/state', { host: REMOTE, cookie: cookie.replace(/^bench=/, 'aic=') })).status, 200);
   assert.equal(state.json.me.device.name, 'Phone');
 });
 
@@ -145,7 +148,7 @@ test('under a service manager, a restart exits so the manager starts a fresh pro
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aic-svc-'));
   const proc = spawn(process.execPath, ['src/server.mjs'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, PORT: '0', AI_CODE_ROOT: dir, AI_CODE_SERVICE: 'test' },
+    env: { ...process.env, PORT: '0', BENCH_ROOT: dir, BENCH_SERVICE: 'test' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const p = await new Promise((resolve) => {

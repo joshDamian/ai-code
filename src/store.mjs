@@ -54,12 +54,13 @@ export const hash = (/** @type {string} */ s) => crypto.createHash('sha256').upd
 const now = () => new Date().toISOString();
 
 export class Store {
-  /** @param {string} root the directory the database lives under, in `.ai-code/` */
+  /** @param {string} root the directory the database lives under, in `.bench/` */
   constructor(root = process.cwd()) {
     this.root = root;
-    this.dir = path.join(root, '.ai-code');
+    this.dir = path.join(root, '.bench');
+    this.file = path.join(this.dir, 'bench.db');
+    Store.adoptOldName(root);
     fs.mkdirSync(this.dir, { recursive: true });
-    this.file = path.join(this.dir, 'ai-code.db');
     this.db = new DatabaseSync(this.file);
     // The server, the CLI and the tests may hold the file at once.
     this.db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;');
@@ -72,13 +73,30 @@ export class Store {
     this.#seedProviders();
   }
 
+  /**
+   * Before the rename the data lived in `.ai-code/ai-code.db`. It is moved, with its
+   * WAL and shared-memory files and the attachments beside it, the first time a store
+   * opens a root that has the old directory and not the new one.
+   * @param {string} root
+   */
+  static adoptOldName(root) {
+    const old = path.join(root, '.ai-code');
+    const dir = path.join(root, '.bench');
+    if (fs.existsSync(dir) || !fs.existsSync(path.join(old, 'ai-code.db'))) return;
+    fs.renameSync(old, dir);
+    for (const suffix of ['', '-wal', '-shm']) {
+      const from = path.join(dir, `ai-code.db${suffix}`);
+      if (fs.existsSync(from)) fs.renameSync(from, path.join(dir, `bench.db${suffix}`));
+    }
+  }
+
   // A v1 database has a `tasks` table without `base_branch`. Before touching it, the
   // whole file is copied with VACUUM INTO, which is a consistent snapshot even while
   // another process has it open; then the pipeline's tables are renamed out of the way.
   #migrate() {
     const cols = this.db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name);
     if (!cols.length || cols.includes('base_branch')) return;
-    const backup = path.join(this.dir, `ai-code.db.pre-v2-${Date.now()}`);
+    const backup = path.join(this.dir, `bench.db.pre-v2-${Date.now()}`);
     this.db.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`);
     const have = new Set(this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
     this.db.exec('BEGIN');

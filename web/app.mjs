@@ -57,17 +57,17 @@ function Sidebar({ route, onNavigate }) {
   const sessions = useStore((s) => s.sessions);
   const approvals = useStore((s) => s.approvals);
   const connected = useStore((s) => s.connected);
-  const [folded, setFolded] = useState(() => recall('ai-code:folded', {}));
+  const [folded, setFolded] = useState(() => recall('bench:folded', {}));
   const fold = (id) => {
     const next = { ...folded, [id]: !folded[id] };
     setFolded(next);
-    remember('ai-code:folded', next);
+    remember('bench:folded', next);
   };
 
   return html`
     <nav class="sidebar" aria-label="Projects">
       <div class="side-top">
-        <a class="logo" href="#/" onClick=${onNavigate}><span class="logo-mark">◆</span> AI Code</a>
+        <a class="logo" href="#/" onClick=${onNavigate}><span class="logo-mark">◆</span> Bench</a>
         ${!connected ? html`<span class="badge badge-warn" title="Reconnecting to the server">offline</span>` : null}
       </div>
       ${approvals.length ? html`<a class="side-waiting" href="#/" onClick=${onNavigate}><${Dot} status="waiting" /> ${approvals.length} waiting on you</a>` : null}
@@ -131,7 +131,7 @@ function App() {
   const [drawer, setDrawer] = useState(false);
 
   useEffect(() => {
-    document.title = route.view === 'home' ? 'AI Code' : `${heading} · AI Code`;
+    document.title = route.view === 'home' ? 'Bench' : `${heading} · Bench`;
   }, [heading, route.view]);
   useEffect(() => setDrawer(false), [location.hash]);
 

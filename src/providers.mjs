@@ -50,13 +50,13 @@ export function cleanEnv(base = process.env) {
  */
 export function providerEnv(provider, model) {
   const hosted = HOSTED[/** @type {keyof typeof HOSTED} */ (provider.kind)];
-  if (!hosted) return { AI_CODE_PROVIDER: provider.id };
+  if (!hosted) return { BENCH_PROVIDER: provider.id };
   const keyEnv = provider.config.apiKeyEnv || hosted.keyEnv;
   const key = process.env[keyEnv];
   if (!key) throw Object.assign(new Error(`Missing ${keyEnv} for the ${hosted.label} provider`), { code: 'AUTH_FAILURE' });
   const mid = model ? invocationId(model) : undefined;
   return {
-    AI_CODE_PROVIDER: provider.id,
+    BENCH_PROVIDER: provider.id,
     ANTHROPIC_BASE_URL: hosted.baseUrl,
     ANTHROPIC_AUTH_TOKEN: key,
     ...(mid
