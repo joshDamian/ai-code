@@ -69,6 +69,11 @@ export function providerEnv(provider, model) {
         }
       : {}),
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(provider.config.autoCompactWindow || 786432),
+    // Anthropic's experimental betas are not served by these endpoints. One of them,
+    // inline tools, replays a conversation's deferred-tool history as `tool_definition`
+    // blocks, and DeepSeek answers 422 to those - so a session started on the Claude
+    // login could not be continued here until this was set.
+    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
   };
 }
 

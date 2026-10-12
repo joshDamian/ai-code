@@ -135,6 +135,8 @@ test('mode and model changes reach the live session; a provider change restarts 
   const next = calls.at(-1).options;
   assert.equal(next.resume, svc.session(s.id).claude_session_id);
   assert.equal(next.env.ANTHROPIC_BASE_URL, 'https://api.deepseek.com/anthropic');
+  assert.equal(next.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, '1', 'a hosted endpoint gets no Anthropic betas');
+  assert.equal(live.options.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, undefined, 'the Claude login keeps them');
   delete process.env.DEEPSEEK_API_KEY;
   svc.shutdown();
 });
