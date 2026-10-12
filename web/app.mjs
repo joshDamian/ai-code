@@ -67,7 +67,7 @@ function Sidebar({ route, onNavigate }) {
   return html`
     <nav class="sidebar" aria-label="Projects">
       <div class="side-top">
-        <a class="logo" href="#/" onClick=${onNavigate}><span class="logo-mark">◆</span> Bench</a>
+        <a class="logo" href="#/" onClick=${onNavigate}><img class="logo-mark" src="/icons/favicon.svg" width="26" height="26" alt="" /> Bench</a>
         ${!connected ? html`<span class="badge badge-warn" title="Reconnecting to the server">offline</span>` : null}
       </div>
       ${approvals.length ? html`<a class="side-waiting" href="#/" onClick=${onNavigate}><${Dot} status="waiting" /> ${approvals.length} waiting on you</a>` : null}

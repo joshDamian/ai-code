@@ -7,11 +7,11 @@
 // the web client is built not to do - and a subscribe POST answered from cache would
 // never reach the server at all.
 
-const CACHE = 'bench-shell-v1';
+const CACHE = 'bench-shell-v2';
 
 // The entry points only. The rest of the module graph is cached as it is fetched, which
 // keeps this list from having to name every view the app grows.
-const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
+const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/favicon.svg', '/icons/badge-96.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(
@@ -74,7 +74,8 @@ self.addEventListener('push', (e) => {
     self.registration.showNotification(title, {
       body: data.body || '',
       icon: '/icons/icon-192.png',
-      badge: '/icons/icon-192.png',
+      // The status-bar badge on Android is drawn as a white-on-transparent mask.
+      badge: '/icons/badge-96.png',
       // Collapses repeats for the same task rather than stacking a lock screen full of
       // them, which is what a repair loop failing three times would otherwise do.
       tag: data.tag || title,
