@@ -355,6 +355,42 @@ const DOWNLOAD_ONLY = {
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 };
 
+// What a file is, for how the transcript presents it. Unknown extensions are 'other'.
+/** @type {Record<string, string>} */
+const KINDS = {
+  image: '.png .jpg .jpeg .gif .webp .avif .bmp .ico .svg',
+  pdf: '.pdf',
+  text: '.txt .log .md .csv .json .xml .html .htm',
+  archive: '.apk .aab .ipa .zip .gz .tgz .tar .7z .jar .wasm',
+  media: '.mp4 .webm .mp3 .wav',
+  document: '.docx .xlsx',
+};
+/** @param {string} file */
+const fileKind = (file) => {
+  const ext = path.extname(file).toLowerCase();
+  return Object.keys(KINDS).find((k) => ext && KINDS[k].split(' ').includes(ext)) || 'other';
+};
+
+/**
+ * Which of a session's files git tracks: those are its source, which Claude names all
+ * the time, not something it made to hand over. Null when the directory is not a
+ * repository, so the caller falls back to the kind of file.
+ * @param {string} cwd @param {string[]} files absolute
+ * @returns {Promise<Set<string>|null>}
+ */
+function trackedFiles(cwd, files) {
+  if (!files.length) return Promise.resolve(new Set());
+  return new Promise((resolve) =>
+    execFile('git', ['-C', cwd, 'ls-files', '-z', '--full-name', '--', ...files.map((f) => path.relative(cwd, f))], { maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+      if (err) return resolve(null);
+      execFile('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], (e2, top) => {
+        if (e2) return resolve(null);
+        resolve(new Set(String(out).split('\0').filter(Boolean).map((f) => path.join(String(top).trim(), f))));
+      });
+    })
+  );
+}
+
 /** @param {string} file */
 function fileType(file) {
   const ext = /** @type {keyof typeof OPENABLE} */ (path.extname(file).toLowerCase());
@@ -538,14 +574,29 @@ route('GET', '/api/sessions/:id/files', ({ req, res, params, u }) => sendSession
 // Which of the paths a transcript mentions are files, and what each is. The client
 // cannot stat and must not guess a type from a name, so it asks here, for all of a
 // transcript's paths at once. Anything missing, a directory, or out of reach is left out.
-route('POST', '/api/sessions/:id/files/stat', ({ params, body }) => {
-  svc.session(params[0]);
+//
+// `artifact` is whether the transcript should offer the file at all: something the
+// session made or was given - an attachment, a build output, anything git does not
+// track - rather than the source it is working on. Without a repository to ask, an
+// image, PDF, archive or document is one and text is not.
+route('POST', '/api/sessions/:id/files/stat', async ({ params, body }) => {
+  const s = svc.session(params[0]);
+  /** @type {string[]} */
   const paths = Array.isArray(body.paths) ? body.paths.slice(0, 500).map(String) : [];
-  /** @type {Record<string, {path:string, mime:string, size:number, open:boolean}>} */
-  const files = {};
+  const attachments = svc.runtime.attachmentsDir(s.id) + path.sep;
+  /** @type {[string, NonNullable<ReturnType<typeof sessionFile>>][]} */
+  const found = [];
   for (const p of paths) {
-    const f = sessionFile(params[0], p);
-    if (f) files[p] = { path: f.full, mime: f.mime, size: f.size, open: f.open };
+    const f = sessionFile(s.id, p);
+    if (f) found.push([p, f]);
+  }
+  const tracked = await trackedFiles(s.cwd, [...new Set(found.map(([, f]) => f.full))].filter((f) => !f.startsWith(attachments)));
+  /** @type {Record<string, {path:string, name:string, mime:string, size:number, open:boolean, kind:string, artifact:boolean}>} */
+  const files = {};
+  for (const [p, f] of found) {
+    const kind = fileKind(f.full);
+    const artifact = f.full.startsWith(attachments) || (tracked ? !tracked.has(f.full) : !['text', 'other'].includes(kind));
+    files[p] = { path: f.full, name: path.basename(f.full), mime: f.mime, size: f.size, open: f.open, kind, artifact };
   }
   return files;
 });

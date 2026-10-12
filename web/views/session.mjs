@@ -7,7 +7,7 @@ import { CopyButton } from '../components/copy.mjs';
 import { showToast } from '../components/toast.mjs';
 import { confirmAction } from '../components/confirm.mjs';
 import { TerminalPane } from '../components/terminal.mjs';
-import { FilesContext, useSessionFiles, FileActions, FileImage, LinkedText } from '../components/files.mjs';
+import { FilesContext, useSessionFiles, useViewer, FileViewer, FileButtons, FileThumb } from '../components/files.mjs';
 import { StatusBadge, ModelPicker, ModePicker, EffortPicker, MODES, Dialog, Icon } from '../components/ui.mjs';
 
 const toast = (e) => showToast(e.message || String(e), 'error');
@@ -27,7 +27,8 @@ export function SessionPane({ sessionId, onArchived }) {
   const scroller = useRef(null);
   const pinned = useRef(true);
   const files = useSessionFiles(sessionId, events);
-  const filesCtx = useMemo(() => ({ sessionId, files }), [sessionId, files]);
+  const [viewing, view, closeViewer] = useViewer();
+  const filesCtx = useMemo(() => ({ sessionId, files, view }), [sessionId, files]);
 
   const load = () =>
     api
@@ -169,6 +170,7 @@ export function SessionPane({ sessionId, onArchived }) {
               : html`<span>Archived. <button class="link-btn" type="button" onClick=${() => api.archiveSession(s.id, false).catch(toast)}>Unarchive</button> to continue.</span>`}
           </div>`
         : html`<${Composer} session=${s} commands=${loaded?.commands || []} />`}
+      ${viewing ? html`<${FileViewer} sessionId=${s.id} file=${viewing} onClose=${closeViewer} />` : null}
       ${terminal
         ? html`<${Dialog} wide title="claude --resume" onClose=${() => setTerminal(false)}>
             <p class="muted">The same conversation in Claude Code's own interface. Close this before sending from the composer again.</p>
@@ -316,9 +318,10 @@ function ToolCall({ call, result }) {
       detail = open ? html`<pre class="tool-out">${JSON.stringify(i, null, 2)}</pre>` : null;
   }
   const out = resultText(result);
-  // The file a Write, Edit or Read names gets its actions beside the header, which is a
-  // button and so cannot hold a link. A Write of an image shows the image.
-  const target = /^(Write|Edit|MultiEdit|Read)$/.test(call.name) && i.file_path && result && !failed ? String(i.file_path) : null;
+  // A Write that made an artifact gets View and Download beside its header - which is a
+  // button, so they cannot go inside it - and an image shows itself. A Write to source,
+  // and every Read and Edit, is work on the project, not something to hand over.
+  const target = call.name === 'Write' && i.file_path && result && !failed ? String(i.file_path) : null;
   return html`
     <div class="tool ${failed ? 'failed' : ''} ${result ? '' : 'pending'}">
       <div class="tool-row">
@@ -327,11 +330,11 @@ function ToolCall({ call, result }) {
           <span class="tool-name">${head}</span>
           ${!result ? html`<span class="dot dot-running"></span>` : failed ? html`<span class="tool-flag">error</span>` : null}
         </button>
-        ${target ? html`<${FileActions} token=${target} />` : null}
+        ${target ? html`<${FileButtons} token=${target} />` : null}
       </div>
-      ${target && call.name === 'Write' ? html`<${FileImage} token=${target} />` : null}
+      ${target ? html`<${FileThumb} token=${target} />` : null}
       ${detail}
-      ${open && out ? html`<pre class="tool-out ${failed ? 'bad' : ''}"><${LinkedText} text=${out} /></pre>` : null}
+      ${open && out ? html`<pre class="tool-out ${failed ? 'bad' : ''}">${out}</pre>` : null}
       ${!open && failed && out ? html`<pre class="tool-out bad">${out.slice(0, 600)}</pre>` : null}
     </div>
   `;

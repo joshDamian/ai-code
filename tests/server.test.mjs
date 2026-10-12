@@ -204,10 +204,12 @@ test('a session file opens inline in a sandbox, or downloads, and nothing outsid
   assert.equal(fromPhone.status, 200);
   assert.equal(fromPhone.headers['content-type'], 'image/png');
 
-  const stat = await req('POST', `/api/sessions/${session.json.id}/files/stat`, { body: { paths: ['shot.png', 'kron.apk', 'out', '../../etc/passwd', 'leak.txt', 'nope.txt'] } });
+  // The project's own files are tracked, so they are its source; one made afterwards is an artifact.
+  fs.writeFileSync(path.join(dir, 'out', 'kron-release.apk'), 'PK');
+  const stat = await req('POST', `/api/sessions/${session.json.id}/files/stat`, { body: { paths: ['shot.png', 'out/kron-release.apk', 'out', '../../etc/passwd', 'leak.txt', 'nope.txt'] } });
   assert.deepEqual(stat.json, {
-    'shot.png': { path: path.join(dir, 'shot.png'), mime: 'image/png', size: 8, open: true },
-    'kron.apk': { path: path.join(dir, 'kron.apk'), mime: 'application/vnd.android.package-archive', size: 2, open: false },
+    'shot.png': { path: path.join(dir, 'shot.png'), name: 'shot.png', mime: 'image/png', size: 8, open: true, kind: 'image', artifact: false },
+    'out/kron-release.apk': { path: path.join(dir, 'out', 'kron-release.apk'), name: 'kron-release.apk', mime: 'application/vnd.android.package-archive', size: 2, open: false, kind: 'archive', artifact: true },
   });
 });
 
