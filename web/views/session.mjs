@@ -7,6 +7,7 @@ import { CopyButton } from '../components/copy.mjs';
 import { showToast } from '../components/toast.mjs';
 import { confirmAction } from '../components/confirm.mjs';
 import { TerminalPane } from '../components/terminal.mjs';
+import { FilesContext, useSessionFiles, FileActions, FileImage, LinkedText } from '../components/files.mjs';
 import { StatusBadge, ModelPicker, ModePicker, EffortPicker, MODES, Dialog, Icon } from '../components/ui.mjs';
 
 const toast = (e) => showToast(e.message || String(e), 'error');
@@ -25,6 +26,8 @@ export function SessionPane({ sessionId, onArchived }) {
   const [terminal, setTerminal] = useState(false);
   const scroller = useRef(null);
   const pinned = useRef(true);
+  const files = useSessionFiles(sessionId, events);
+  const filesCtx = useMemo(() => ({ sessionId, files }), [sessionId, files]);
 
   const load = () =>
     api
@@ -152,7 +155,7 @@ export function SessionPane({ sessionId, onArchived }) {
       >
         ${more ? html`<button class="btn sm ghost earlier" type="button" onClick=${earlier}>Load earlier</button>` : null}
         ${events.length === 0 && loaded ? html`<div class="transcript-empty muted">Say what you want done. Claude works in <code>${s.cwd}</code>.</div>` : null}
-        <${Transcript} events=${events} />
+        <${FilesContext.Provider} value=${filesCtx}><${Transcript} events=${events} /><//>
         ${stream.thinking && !stream.text ? html`<div class="msg-thinking live"><span class="muted">Thinking…</span></div>` : null}
         ${stream.text ? html`<div class="msg assistant streaming"><${Markdown} text=${stream.text} /></div>` : null}
         ${s.status === 'running' && !stream.text ? html`<div class="working"><span class="dot dot-running"></span> Working…</div>` : null}
@@ -313,15 +316,22 @@ function ToolCall({ call, result }) {
       detail = open ? html`<pre class="tool-out">${JSON.stringify(i, null, 2)}</pre>` : null;
   }
   const out = resultText(result);
+  // The file a Write, Edit or Read names gets its actions beside the header, which is a
+  // button and so cannot hold a link. A Write of an image shows the image.
+  const target = /^(Write|Edit|MultiEdit|Read)$/.test(call.name) && i.file_path && result && !failed ? String(i.file_path) : null;
   return html`
     <div class="tool ${failed ? 'failed' : ''} ${result ? '' : 'pending'}">
-      <button class="tool-head" type="button" onClick=${() => setOpen((v) => !v)} aria-expanded=${open}>
-        <span class="tool-chev">${open ? '▾' : '▸'}</span>
-        <span class="tool-name">${head}</span>
-        ${!result ? html`<span class="dot dot-running"></span>` : failed ? html`<span class="tool-flag">error</span>` : null}
-      </button>
+      <div class="tool-row">
+        <button class="tool-head" type="button" onClick=${() => setOpen((v) => !v)} aria-expanded=${open}>
+          <span class="tool-chev">${open ? '▾' : '▸'}</span>
+          <span class="tool-name">${head}</span>
+          ${!result ? html`<span class="dot dot-running"></span>` : failed ? html`<span class="tool-flag">error</span>` : null}
+        </button>
+        ${target ? html`<${FileActions} token=${target} />` : null}
+      </div>
+      ${target && call.name === 'Write' ? html`<${FileImage} token=${target} />` : null}
       ${detail}
-      ${open && out ? html`<pre class="tool-out ${failed ? 'bad' : ''}">${out}</pre>` : null}
+      ${open && out ? html`<pre class="tool-out ${failed ? 'bad' : ''}"><${LinkedText} text=${out} /></pre>` : null}
       ${!open && failed && out ? html`<pre class="tool-out bad">${out.slice(0, 600)}</pre>` : null}
     </div>
   `;

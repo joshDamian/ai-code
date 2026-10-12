@@ -306,6 +306,130 @@ function serveStatic(req, res, u) {
   res.writeHead(404).end();
 }
 
+// -- session files ------------------------------------------------------------------------
+//
+// What a session built - an APK, a screenshot, a PDF - fetched from the transcript. A file
+// is served only from under the session's directory or its attachments folder, and only
+// by type: what the browser can show opens, everything else downloads.
+
+// The types a file may be opened as. Anything not here is served as a download, whatever
+// is asked for, so the browser never gets to guess at a session's bytes.
+const OPENABLE = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+  '.svg': 'image/svg+xml',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.log': 'text/plain; charset=utf-8',
+  '.md': 'text/plain; charset=utf-8',
+  '.csv': 'text/csv; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+};
+
+// Only named so a download says what it is. None of these is ever sent inline.
+const DOWNLOAD_ONLY = {
+  '.apk': 'application/vnd.android.package-archive',
+  '.aab': 'application/octet-stream',
+  '.ipa': 'application/octet-stream',
+  '.zip': 'application/zip',
+  '.gz': 'application/gzip',
+  '.tgz': 'application/gzip',
+  '.tar': 'application/x-tar',
+  '.7z': 'application/x-7z-compressed',
+  '.jar': 'application/java-archive',
+  '.wasm': 'application/wasm',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+};
+
+/** @param {string} file */
+function fileType(file) {
+  const ext = /** @type {keyof typeof OPENABLE} */ (path.extname(file).toLowerCase());
+  const open = OPENABLE[ext];
+  return { mime: open || DOWNLOAD_ONLY[/** @type {keyof typeof DOWNLOAD_ONLY} */ (ext)] || 'application/octet-stream', open: !!open };
+}
+
+/** @param {string} p */
+const real = (p) => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * The regular file a session may hand out at `p`, relative to its directory or absolute,
+ * or null. within() catches `..` and absolute paths elsewhere; the real path is checked
+ * too, because a symlink the session made inside its directory can point anywhere.
+ * @param {string} sessionId @param {string} p
+ */
+function sessionFile(sessionId, p) {
+  const s = svc.store.getSession(sessionId);
+  if (!s || !p) return null;
+  for (const base of [s.cwd, svc.runtime.attachmentsDir(s.id)]) {
+    const full = within(base, p);
+    const realBase = full && real(base);
+    const realFull = realBase && real(full);
+    if (!realBase || !realFull || !within(realBase, path.relative(realBase, realFull))) continue;
+    const st = fs.statSync(realFull, { throwIfNoEntry: false });
+    if (st?.isFile()) return { full, real: realFull, size: st.size, ...fileType(full) };
+  }
+  return null;
+}
+
+/** A Range header's one span, clamped to the file; null for none, false for one that cannot be met. @param {string|undefined} h @param {number} size */
+function byteRange(h, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(h || '');
+  if (!m || (!m[1] && !m[2])) return null;
+  const start = m[1] ? Number(m[1]) : Math.max(0, size - Number(m[2]));
+  const end = m[1] && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1;
+  return start <= end && start < size ? { start, end } : false;
+}
+
+// An inline response is same-origin with the dashboard. CSP sandbox gives it an opaque
+// origin with no scripts, so an HTML or SVG file the session wrote cannot act with the
+// person's cookie. A download is never rendered and needs none of that.
+/** @param {http.IncomingMessage} req @param {http.ServerResponse} res @param {string} sessionId @param {URL} u */
+function sendSessionFile(req, res, sessionId, u) {
+  const f = sessionFile(sessionId, u.searchParams.get('path') || '');
+  if (!f) return json(res, { error: 'Not found' }, 404);
+  const inline = f.open && u.searchParams.get('download') !== '1';
+  /** @type {Record<string, string|number>} */
+  const headers = { 'content-type': f.mime, 'x-content-type-options': 'nosniff', 'cache-control': 'private, no-cache', 'accept-ranges': 'bytes' };
+  if (inline) headers['content-security-policy'] = 'sandbox';
+  else {
+    const name = path.basename(f.full);
+    headers['content-disposition'] = `attachment; filename="${name.replace(/[^\x20-\x7e]|["\\]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  }
+  const range = byteRange(req.headers.range, f.size);
+  if (range === false) {
+    res.writeHead(416, { ...headers, 'content-range': `bytes */${f.size}` }).end();
+    return;
+  }
+  const span = range || { start: 0, end: f.size - 1 };
+  if (range) headers['content-range'] = `bytes ${span.start}-${span.end}/${f.size}`;
+  headers['content-length'] = f.size ? span.end - span.start + 1 : 0;
+  res.writeHead(range ? 206 : 200, headers);
+  if (req.method === 'HEAD' || !f.size) return res.end();
+  const stream = fs.createReadStream(f.real, { start: span.start, end: span.end });
+  stream.on('error', () => res.destroy());
+  stream.pipe(res);
+}
+
 /** The addresses a phone could reach this server at. */
 async function publicUrls() {
   const urls = [];
@@ -410,6 +534,21 @@ route('GET', '/api/sessions/:id', ({ params }) => ({
 }));
 route('GET', '/api/sessions/:id/events', ({ params, u }) => svc.events(params[0], { before: Number(u.searchParams.get('before')) || undefined, limit: Number(u.searchParams.get('limit')) || undefined }));
 route('POST', '/api/sessions/:id/messages', ({ params, body }) => svc.send(params[0], body.text, { images: body.images, files: body.files, uploads: body.uploads }));
+route('GET', '/api/sessions/:id/files', ({ req, res, params, u }) => sendSessionFile(req, res, params[0], u));
+// Which of the paths a transcript mentions are files, and what each is. The client
+// cannot stat and must not guess a type from a name, so it asks here, for all of a
+// transcript's paths at once. Anything missing, a directory, or out of reach is left out.
+route('POST', '/api/sessions/:id/files/stat', ({ params, body }) => {
+  svc.session(params[0]);
+  const paths = Array.isArray(body.paths) ? body.paths.slice(0, 500).map(String) : [];
+  /** @type {Record<string, {path:string, mime:string, size:number, open:boolean}>} */
+  const files = {};
+  for (const p of paths) {
+    const f = sessionFile(params[0], p);
+    if (f) files[p] = { path: f.full, mime: f.mime, size: f.size, open: f.open };
+  }
+  return files;
+});
 route('POST', '/api/sessions/:id/interrupt', async ({ params }) => ({ ok: await svc.interrupt(params[0]) }));
 route('PATCH', '/api/sessions/:id', ({ params, body }) => svc.updateSession(params[0], body));
 route('POST', '/api/sessions/:id/archive', ({ params, body }) => svc.archiveSession(params[0], body.archived !== false));

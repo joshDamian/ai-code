@@ -146,6 +146,71 @@ test('static files and vendored libraries are served, and nothing outside them',
   assert.equal((await req('GET', '/p/abc')).status, 200);
 });
 
+// A session's files: served from under its directory and nowhere else, opened only as a
+// type the browser can show safely, and then only in a sandbox.
+test('a session file opens inline in a sandbox, or downloads, and nothing outside its directory', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aic-files-'));
+  fs.writeFileSync(path.join(dir, 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]));
+  fs.writeFileSync(path.join(dir, 'page.html'), '<script>alert(1)</script>');
+  fs.writeFileSync(path.join(dir, 'kron.apk'), 'PK');
+  fs.mkdirSync(path.join(dir, 'out'));
+  fs.symlinkSync('/etc/passwd', path.join(dir, 'leak.txt'));
+  const project = await req('POST', '/api/projects', { body: { path: dir, init: true } });
+  assert.equal(project.status, 200, project.text);
+  const session = await req('POST', '/api/sessions', { body: { projectId: project.json.id } });
+  assert.equal(session.status, 200, session.text);
+  const url = (p, dl = '') => `/api/sessions/${session.json.id}/files?path=${encodeURIComponent(p)}${dl}`;
+
+  const png = await req('GET', url('shot.png'));
+  assert.equal(png.status, 200);
+  assert.equal(png.headers['content-type'], 'image/png');
+  assert.equal(png.headers['content-length'], '8');
+  assert.equal(png.headers['content-security-policy'], 'sandbox');
+  assert.equal(png.headers['x-content-type-options'], 'nosniff');
+  assert.equal(png.headers['content-disposition'], undefined);
+  // An absolute path inside the directory is the same file.
+  assert.equal((await req('GET', url(path.join(dir, 'shot.png')))).status, 200);
+
+  const html = await req('GET', url('page.html'));
+  assert.match(html.headers['content-type'], /text\/html/);
+  assert.equal(html.headers['content-security-policy'], 'sandbox');
+
+  const dl = await req('GET', url('shot.png', '&download=1'));
+  assert.equal(dl.headers['content-disposition'], `attachment; filename="shot.png"; filename*=UTF-8''shot.png`);
+  assert.equal(dl.headers['x-content-type-options'], 'nosniff');
+  // A type that is never opened downloads even when opening is asked for.
+  const apk = await req('GET', url('kron.apk'));
+  assert.equal(apk.headers['content-type'], 'application/vnd.android.package-archive');
+  assert.match(apk.headers['content-disposition'], /^attachment; filename="kron.apk"/);
+
+  const ranged = await new Promise((resolve) =>
+    http.get({ host: '127.0.0.1', port, path: url('shot.png'), headers: { host: `localhost:${port}`, range: 'bytes=2-5' } }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    })
+  );
+  assert.equal(ranged.status, 206);
+  assert.equal(ranged.headers['content-range'], 'bytes 2-5/8');
+  assert.deepEqual([...ranged.body], [0x4e, 0x47, 1, 2]);
+
+  for (const p of ['../../etc/passwd', '/etc/passwd', 'leak.txt', 'out', 'missing.png', '']) assert.equal((await req('GET', url(p))).status, 404, p);
+  assert.equal((await req('GET', `/api/sessions/nope/files?path=shot.png`)).status, 404);
+  assert.equal((await req('GET', url('shot.png'), { host: REMOTE })).status, 401);
+  // A paired phone's <img> and <a href> carry its cookie and nothing else, and that is enough.
+  const code = (await req('POST', '/api/pairing', { body: {} })).json.code;
+  const phone = (await req('POST', '/api/pair', { host: REMOTE, body: { code, name: 'Phone 2' } })).headers['set-cookie'][0].split(';')[0];
+  const fromPhone = await req('GET', url('shot.png'), { host: REMOTE, cookie: phone });
+  assert.equal(fromPhone.status, 200);
+  assert.equal(fromPhone.headers['content-type'], 'image/png');
+
+  const stat = await req('POST', `/api/sessions/${session.json.id}/files/stat`, { body: { paths: ['shot.png', 'kron.apk', 'out', '../../etc/passwd', 'leak.txt', 'nope.txt'] } });
+  assert.deepEqual(stat.json, {
+    'shot.png': { path: path.join(dir, 'shot.png'), mime: 'image/png', size: 8, open: true },
+    'kron.apk': { path: path.join(dir, 'kron.apk'), mime: 'application/vnd.android.package-archive', size: 2, open: false },
+  });
+});
+
 test('a restart is refused when no service manager would bring the server back', async () => {
   const status = await req('GET', '/api/server/status');
   assert.equal(status.json.supervised, null);

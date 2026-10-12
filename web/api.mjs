@@ -80,6 +80,7 @@ export const api = {
   events: (/** @type {string} */ id, /** @type {number} */ before) => get(`/api/sessions/${id}/events?before=${before}`),
   send: (/** @type {string} */ id, /** @type {string} */ text, /** @type {{media_type:string, data:string}[]} */ images = [], /** @type {{file:string, type?:string}[]} */ uploads = []) => post(`/api/sessions/${id}/messages`, { text, images, uploads }),
   upload,
+  fileStat: (/** @type {string} */ id, /** @type {string[]} */ paths) => post(`/api/sessions/${enc(id)}/files/stat`, { paths }),
   interrupt: (/** @type {string} */ id) => post(`/api/sessions/${id}/interrupt`),
   updateSession: (/** @type {string} */ id, /** @type {any} */ b) => patch(`/api/sessions/${id}`, b),
   archiveSession: (/** @type {string} */ id, archived = true) => post(`/api/sessions/${id}/archive`, { archived }),

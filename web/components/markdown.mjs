@@ -8,16 +8,22 @@
 // them and never before, and a block they cannot handle - a library that failed to
 // load, a diagram that does not parse, a language with no grammar - stays the plain
 // code block it already was.
-import { html, useRef, useEffect } from '../lib.mjs';
+import { html, useRef, useEffect, useContext } from '../lib.mjs';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { copyText, COPIED_MS, COPY_ICON, COPIED_ICON } from './copy.mjs';
+import { FilesContext, linkFiles } from './files.mjs';
 
 // A link in a plan points at the outside world. Following it in the dashboard's
 // own tab navigates away from a task mid-review with no way back, and rel=noopener
-// drops the window.opener handle it would otherwise hand the destination.
+// drops the window.opener handle it would otherwise hand the destination. A link to
+// download a session's file is the exception: in a new tab it flashes a blank page
+// before the save, so it stays in this one, where a download never navigates.
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-  if (node.tagName === 'A' && node.hasAttribute('href')) {
+  if (node.tagName === 'A' && /^\/api\/sessions\/[^/]+\/files\?(.*&)?download=1(&|$)/.test(node.getAttribute('href') || '')) {
+    node.setAttribute('download', '');
+    node.removeAttribute('target');
+  } else if (node.tagName === 'A' && node.hasAttribute('href')) {
     node.setAttribute('target', '_blank');
     node.setAttribute('rel', 'noopener noreferrer');
   }
@@ -160,8 +166,13 @@ async function highlightBlock(code, lang) {
 // container's contents. Work still in flight from an earlier version finds its block
 // gone from the page and drops itself, so a streamed answer never gets a diagram or
 // colour from text it no longer shows.
+//
+// Inside a session, paths that are files get their Open and Download links last. Those
+// arrive after the text does, from a stat; when they change the block is remounted, by
+// its key, so the links are added to fresh HTML and never twice to the same text.
 export function Markdown({ text, className = 'md' }) {
   const ref = useRef(null);
+  const files = useContext(FilesContext);
   const clean = text ? DOMPurify.sanitize(marked.parse(text), { USE_PROFILES: { html: true } }) : '';
   useEffect(() => {
     const root = ref.current;
@@ -172,7 +183,8 @@ export function Markdown({ text, className = 'md' }) {
       if (lang === 'mermaid') renderDiagram(code.parentElement, code);
       else if (lang) highlightBlock(code, lang);
     }
-  }, [clean]);
+    linkFiles(root, files);
+  }, [clean, files]);
   if (!text) return null;
-  return html`<div ref=${ref} class=${className} dangerouslySetInnerHTML=${{ __html: clean }} />`;
+  return html`<div key=${files?.files.size || 0} ref=${ref} class=${className} dangerouslySetInnerHTML=${{ __html: clean }} />`;
 }
