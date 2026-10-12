@@ -164,7 +164,15 @@ function Transcript({ events }) {
 function Entry({ event: e, results }) {
   const d = e.data;
   if (e.kind === 'user') {
-    return html`<div class="msg user"><div class="bubble">${d.images ? html`<span class="muted">[${d.images} image${d.images === 1 ? '' : 's'}] </span>` : null}<${Markdown} text=${d.text} /></div></div>`;
+    return html`<div class="msg user"><div class="bubble">
+      ${d.images || d.files?.length
+        ? html`<div class="attached">
+            ${d.images ? html`<span class="file-chip">${d.images} image${d.images === 1 ? '' : 's'}</span>` : null}
+            ${(d.files || []).map((f) => html`<span class="file-chip" title=${`${f.type || 'file'}, ${fileSize(f.size)}`}>${f.name}</span>`)}
+          </div>`
+        : null}
+      ${d.text ? html`<${Markdown} text=${d.text} />` : null}
+    </div></div>`;
   }
   if (e.kind === 'assistant') {
     const sub = !!d.parent;
@@ -366,15 +374,28 @@ function ApprovalPreview({ tool, input: i }) {
 
 // -- the composer --------------------------------------------------------------------------
 
-const MAX_IMAGE = 5 * 1024 * 1024;
+// Images up to this size go to Claude inline, as the API takes them. Anything else,
+// a bigger image included, is saved on the server for Claude to read.
+const INLINE_IMAGE = 5 * 1024 * 1024;
+const MAX_FILE = 20 * 1024 * 1024;
+const INLINE_TYPES = /^image\/(png|jpeg|gif|webp)$/;
 
-function readImage(file) {
+export function fileSize(n) {
+  if (n == null) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function readFile(file) {
   return new Promise((resolve, reject) => {
-    if (file.size > MAX_IMAGE) return reject(new Error(`${file.name} is over 5 MB`));
+    if (file.size > MAX_FILE) return reject(new Error(`${file.name} is over 20 MB`));
     const r = new FileReader();
     r.onload = () => {
       const [head, data] = String(r.result).split(',');
-      resolve({ media_type: /data:([^;]+)/.exec(head)?.[1] || file.type, data, name: file.name, url: r.result });
+      const media_type = /data:([^;]+)/.exec(head)?.[1] || file.type || 'application/octet-stream';
+      const inline = INLINE_TYPES.test(media_type) && file.size <= INLINE_IMAGE;
+      resolve({ media_type, data, name: file.name || 'pasted', size: file.size, inline, url: inline ? r.result : null });
     };
     r.onerror = () => reject(r.error);
     r.readAsDataURL(file);
@@ -386,6 +407,7 @@ function Composer({ session: s, commands }) {
   const [text, setText] = useState(() => recall(key, ''));
   const [images, setImages] = useState([]);
   const [sending, setSending] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const box = useRef(null);
   const file = useRef(null);
   const running = s.status === 'running' || s.status === 'waiting';
@@ -408,7 +430,12 @@ function Composer({ session: s, commands }) {
     if (sending || (!text.trim() && !images.length)) return;
     setSending(true);
     try {
-      await api.send(s.id, text, images.map(({ media_type, data }) => ({ media_type, data })));
+      await api.send(
+        s.id,
+        text,
+        images.filter((f) => f.inline).map(({ media_type, data }) => ({ media_type, data })),
+        images.filter((f) => !f.inline).map(({ name, media_type, data }) => ({ name, media_type, data }))
+      );
       setText('');
       setImages([]);
     } catch (e) {
@@ -421,10 +448,9 @@ function Composer({ session: s, commands }) {
 
   const attach = async (files) => {
     for (const f of files) {
-      if (!f.type.startsWith('image/')) continue;
       try {
-        const im = await readImage(f);
-        setImages((list) => [...list, im]);
+        const read = await readFile(f);
+        setImages((list) => [...list, read]);
       } catch (e) {
         toast(e);
       }
@@ -438,10 +464,32 @@ function Composer({ session: s, commands }) {
   };
 
   return html`
-    <div class="composer">
+    <div
+      class="composer ${dragging ? 'dragging' : ''}"
+      onDragOver=${(e) => {
+        if ([...(e.dataTransfer?.types || [])].includes('Files')) {
+          e.preventDefault();
+          setDragging(true);
+        }
+      }}
+      onDragLeave=${() => setDragging(false)}
+      onDrop=${(e) => {
+        if (!e.dataTransfer?.files?.length) return;
+        e.preventDefault();
+        setDragging(false);
+        attach([...e.dataTransfer.files]);
+      }}
+    >
       ${slash.length ? html`<div class="slash">${slash.map((c) => html`<button type="button" onClick=${() => setText(`/${c} `)}>/${c}</button>`)}</div>` : null}
       ${images.length
-        ? html`<div class="thumbs">${images.map((im, n) => html`<div class="thumb"><img src=${im.url} alt=${im.name} /><button type="button" aria-label="Remove" onClick=${() => setImages((l) => l.filter((_, j) => j !== n))}>×</button></div>`)}</div>`
+        ? html`<div class="thumbs">
+            ${images.map(
+              (im, n) => html`<div class="thumb ${im.inline ? '' : 'file'}" title=${`${im.name}, ${fileSize(im.size)}`}>
+                ${im.inline ? html`<img src=${im.url} alt=${im.name} />` : html`<span class="thumb-name">${im.name}</span><span class="muted">${fileSize(im.size)}</span>`}
+                <button type="button" aria-label=${`Remove ${im.name}`} onClick=${() => setImages((l) => l.filter((_, j) => j !== n))}>×</button>
+              </div>`
+            )}
+          </div>`
         : null}
       <div class="composer-row">
         <textarea
@@ -471,8 +519,8 @@ function Composer({ session: s, commands }) {
             }
           }}
         />
-        <input ref=${file} type="file" accept="image/*" multiple hidden onChange=${(e) => attach([...e.target.files])} />
-        <button class="btn ghost icon-only" type="button" aria-label="Attach an image" onClick=${() => file.current?.click()}><${Icon} name="attach" /></button>
+        <input ref=${file} type="file" multiple hidden onChange=${(e) => attach([...e.target.files])} />
+        <button class="btn ghost icon-only" type="button" aria-label="Attach files" title="Attach images, PDFs or any file (or drop them here)" onClick=${() => file.current?.click()}><${Icon} name="attach" /></button>
         ${running ? html`<button class="btn danger icon-only" type="button" aria-label="Stop" title="Stop (Esc)" onClick=${() => api.interrupt(s.id).catch(toast)}><${Icon} name="stop" /></button>` : null}
         <button class="btn icon-only" type="button" aria-label="Send" disabled=${sending || (!text.trim() && !images.length)} onClick=${send}><${Icon} name="send" /></button>
       </div>

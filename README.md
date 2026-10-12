@@ -5,7 +5,7 @@ A workbench for Claude sessions, served from your own machine or a VPS and used 
 - **Tasks.** A task is a branch cut from any base branch, in its own worktree, with Claude sessions working in it. Its work lands on that base only when you merge it.
 - **Sessions in the checkout.** For quick work directly in the project's checked-out branch, with no worktree.
 - **Git without a terminal.** Switch branches (with a stash prompt), fetch, pull, push and commit from the project page. A task's changes, updates from its base, conflicts, merge (or squash), push and pull request all live on the task page.
-- **Claude Code itself.** Sessions run on the Claude Agent SDK, so they behave as Claude Code does: the same tools, CLAUDE.md, slash commands and permission modes (Ask before edits, Accept edits, Plan, Auto, Bypass). Approvals, questions and plans appear as cards you answer from any device. Any session also opens as `claude --resume` in a terminal.
+- **Claude Code itself.** Sessions run on the Claude Agent SDK, so they behave as Claude Code does: the same tools, CLAUDE.md, slash commands and permission modes (Ask before edits, Accept edits, Plan, Auto, Bypass). Approvals, questions and plans appear as cards you answer from any device. Attach images, PDFs, Markdown or any file by paste, picker or drag and drop. Any session also opens as `claude --resume` in a terminal.
 - **Providers.** Each session picks a provider and model: your Claude login, DeepSeek, OpenRouter or Fireworks.
 
 ## Requirements

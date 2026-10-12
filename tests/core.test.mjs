@@ -282,3 +282,29 @@ test('pairing codes work once and devices can be revoked', () => {
   store.revokeDevice(d.id);
   assert.equal(store.deviceByToken('tok'), null);
 });
+
+test('attached files are saved where the session can read them, and named in the message', async () => {
+  const { svc, project } = setup();
+  const s = svc.createSession({ projectId: project.id });
+  const pdf = Buffer.from('%PDF-1.4 fake').toString('base64');
+  svc.send(s.id, 'summarise these', { files: [{ name: '../../notes.md', media_type: 'text/markdown', data: Buffer.from('# hi').toString('base64') }, { name: 'spec.pdf', media_type: 'application/pdf', data: pdf }] });
+  await until(() => svc.session(s.id).status === 'idle');
+  const dir = svc.runtime.attachmentsDir(s.id);
+  const saved = fs.readdirSync(dir).sort();
+  assert.equal(saved.length, 2);
+  assert.ok(saved.every((f) => !f.includes('/')), 'a name cannot climb out of the folder');
+  assert.ok(saved.some((f) => f.endsWith('-notes.md')));
+  assert.equal(fs.readFileSync(path.join(dir, saved.find((f) => f.endsWith('.pdf')))).toString(), '%PDF-1.4 fake');
+  assert.deepEqual(calls.at(-1).options.additionalDirectories, [dir]);
+  const user = svc.events(s.id).find((e) => e.kind === 'user');
+  assert.deepEqual(user.data.files.map((f) => f.name), ['notes.md', 'spec.pdf']);
+  assert.equal(user.data.text, 'summarise these', 'the stored message is what the person typed');
+  // The fake echoes what it was sent, so the reply shows the paths reached Claude.
+  const reply = svc.events(s.id).find((e) => e.kind === 'assistant').data.content[0].text;
+  assert.match(reply, new RegExp(`Attached files.*\\n- ${dir}/.*notes\\.md`, 's'));
+
+  assert.throws(() => svc.send(s.id, '', { files: [{ name: 'big.bin', data: Buffer.alloc(21 * 1024 * 1024).toString('base64') }] }), /over 20 MB/);
+  svc.deleteSession(s.id);
+  assert.ok(!fs.existsSync(dir), 'deleting the session removes its files');
+  svc.shutdown();
+});

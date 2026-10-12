@@ -30,6 +30,9 @@ const IDLE_MS = 30 * 60 * 1000;
 // A tool result is shown in the transcript, not replayed to the model from here, so a
 // huge one is cut to what a person would read.
 const RESULT_CHARS = 20000;
+// Attached files: per file, and per message.
+const MAX_FILE = 20 * 1024 * 1024;
+const MAX_FILES = 40 * 1024 * 1024;
 
 export const MODES = /** @type {const} */ (['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']);
 
@@ -160,24 +163,57 @@ export class Runtime extends EventEmitter {
     return this.live.get(id)?.commands || [];
   }
 
+  /** Where a session's attached files are kept. It is opened to the session, so reading them asks nothing. @param {string} id */
+  attachmentsDir(id) {
+    return path.join(this.store.dir, 'attachments', id);
+  }
+
+  /**
+   * Saves attached files under the session's attachments folder, and returns the lines
+   * that tell Claude where they are. Claude reads them with its own Read tool, which
+   * handles PDFs and text alike, so a long document costs context only when it is read.
+   * @param {string} id @param {{name:string, media_type?:string, data:string}[]} files
+   */
+  #saveFiles(id, files) {
+    const dir = this.attachmentsDir(id);
+    fs.mkdirSync(dir, { recursive: true });
+    let total = 0;
+    return files.map((f) => {
+      const bytes = Buffer.from(f.data, 'base64');
+      if (bytes.length > MAX_FILE) throw Object.assign(new Error(`${f.name} is over ${MAX_FILE / 1024 / 1024} MB`), { status: 413 });
+      total += bytes.length;
+      if (total > MAX_FILES) throw Object.assign(new Error(`Attachments over ${MAX_FILES / 1024 / 1024} MB in one message`), { status: 413 });
+      const safe = path.basename(String(f.name || 'file')).replace(/[^\w.\- ]+/g, '_').slice(-120) || 'file';
+      const file = path.join(dir, `${Date.now().toString(36)}-${safe}`);
+      fs.writeFileSync(file, bytes);
+      return { name: safe, path: file, size: bytes.length, type: f.media_type || '' };
+    });
+  }
+
   /**
    * One message from the person. Starts or resumes the session's query when none is open.
-   * @param {string} id @param {string} text @param {{images?: {media_type:string, data:string}[]}} [o]
+   * Images go inline; any other file is saved and named in the message.
+   * @param {string} id @param {string} text
+   * @param {{images?: {media_type:string, data:string}[], files?: {name:string, media_type?:string, data:string}[]}} [o]
    */
   send(id, text, o = {}) {
     const s = this.#session(id);
     if (s.archived_at) throw new Error('This session is archived');
     const images = o.images || [];
-    if (!text.trim() && !images.length) throw new Error('Nothing to send');
+    const saved = o.files?.length ? this.#saveFiles(id, o.files) : [];
+    if (!text.trim() && !images.length && !saved.length) throw new Error('Nothing to send');
+    const note = saved.length ? `\n\nAttached file${saved.length === 1 ? '' : 's'} (read ${saved.length === 1 ? 'it' : 'them'} as needed):\n${saved.map((f) => `- ${f.path}`).join('\n')}` : '';
+    const body = `${text}${note}`.trim();
     const live = this.live.get(id) || this.#start(s);
     /** @type {any[]} */
-    const content = [...images.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } })), ...(text.trim() ? [{ type: 'text', text }] : [])];
-    live.push({ type: 'user', message: { role: 'user', content: images.length ? content : text }, parent_tool_use_id: null });
+    const content = [...images.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } })), ...(body ? [{ type: 'text', text: body }] : [])];
+    live.push({ type: 'user', message: { role: 'user', content: images.length ? content : body }, parent_tool_use_id: null });
     live.turns++;
     live.lastUsed = Date.now();
-    this.#event(id, 'user', { text, images: images.length });
+    this.#event(id, 'user', { text, images: images.length, files: saved.map(({ name, size, type }) => ({ name, size, type })) });
     const first = !s.claude_session_id && this.store.listEvents(id, { limit: 2 }).length === 1;
-    this.#update(id, { status: this.#pendingFor(id) ? 'waiting' : 'running', error: null, ...(first && /^New (session|task)/.test(s.title) ? { title: titleFrom(text) } : {}) });
+    const title = text.trim() ? titleFrom(text) : saved.length ? titleFrom(saved.map((f) => f.name).join(', ')) : null;
+    this.#update(id, { status: this.#pendingFor(id) ? 'waiting' : 'running', error: null, ...(first && title && /^New (session|task)/.test(s.title) ? { title } : {}) });
   }
 
   /** @param {Session} s */
@@ -189,12 +225,14 @@ export class Runtime extends EventEmitter {
     const env = { ...cleanEnv(), ...providerEnv(provider, model), CLAUDE_AGENT_SDK_CLIENT_APP: 'ai-code' };
     const instructions = userInstructions();
     const memory = project && path.resolve(project.path) !== path.resolve(s.cwd) ? memoryDir(project.path) : null;
+    fs.mkdirSync(this.attachmentsDir(s.id), { recursive: true });
     const live = new Live(s.id);
     live.providerId = provider.id;
     this.live.set(s.id, live);
     /** @type {import('@anthropic-ai/claude-agent-sdk').Options} */
     const options = {
       cwd: s.cwd,
+      additionalDirectories: [this.attachmentsDir(s.id)],
       env,
       settingSources: ['project', 'local'],
       permissionMode: /** @type {PermissionMode} */ (s.permission_mode),

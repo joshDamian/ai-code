@@ -74,7 +74,7 @@ export const api = {
   createSession: (/** @type {any} */ b) => post('/api/sessions', b),
   session: (/** @type {string} */ id) => get(`/api/sessions/${id}`),
   events: (/** @type {string} */ id, /** @type {number} */ before) => get(`/api/sessions/${id}/events?before=${before}`),
-  send: (/** @type {string} */ id, /** @type {string} */ text, /** @type {{media_type:string, data:string}[]} */ images = []) => post(`/api/sessions/${id}/messages`, { text, images }),
+  send: (/** @type {string} */ id, /** @type {string} */ text, /** @type {{media_type:string, data:string}[]} */ images = [], /** @type {{name:string, media_type:string, data:string}[]} */ files = []) => post(`/api/sessions/${id}/messages`, { text, images, files }),
   interrupt: (/** @type {string} */ id) => post(`/api/sessions/${id}/interrupt`),
   updateSession: (/** @type {string} */ id, /** @type {any} */ b) => patch(`/api/sessions/${id}`, b),
   archiveSession: (/** @type {string} */ id, archived = true) => post(`/api/sessions/${id}/archive`, { archived }),

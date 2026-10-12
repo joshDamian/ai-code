@@ -176,7 +176,8 @@ function json(res, body, status = 200) {
   res.end(JSON.stringify(body ?? null));
 }
 
-const MAX_BODY = 25 * 1024 * 1024;
+// Room for 40 MB of attachments, base64-encoded.
+const MAX_BODY = 60 * 1024 * 1024;
 
 /** @param {http.IncomingMessage} req @returns {Promise<any>} */
 function readBody(req) {
@@ -346,7 +347,7 @@ route('GET', '/api/sessions/:id', ({ params }) => ({
   commands: svc.runtime.commands(params[0]),
 }));
 route('GET', '/api/sessions/:id/events', ({ params, u }) => svc.events(params[0], { before: Number(u.searchParams.get('before')) || undefined, limit: Number(u.searchParams.get('limit')) || undefined }));
-route('POST', '/api/sessions/:id/messages', ({ params, body }) => svc.send(params[0], body.text, { images: body.images }));
+route('POST', '/api/sessions/:id/messages', ({ params, body }) => svc.send(params[0], body.text, { images: body.images, files: body.files }));
 route('POST', '/api/sessions/:id/interrupt', async ({ params }) => ({ ok: await svc.interrupt(params[0]) }));
 route('PATCH', '/api/sessions/:id', ({ params, body }) => svc.updateSession(params[0], body));
 route('POST', '/api/sessions/:id/archive', ({ params, body }) => svc.archiveSession(params[0], body.archived !== false));
