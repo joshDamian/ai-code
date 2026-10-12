@@ -566,6 +566,8 @@ export class Service extends EventEmitter {
       checks.push({ name, ok: !!v, detail: v || 'not found', optional: name === 'gh' || name === 'tailscale' || name === 'claude' });
     }
     checks.push({ name: 'gh auth', ok: await g.ghReady(), detail: 'needed for pull requests', optional: true });
+    const { terminalsAvailable } = await import('./terminal.mjs');
+    checks.push({ name: 'terminal (node-pty)', ok: terminalsAvailable(), detail: terminalsAvailable() ? 'ready' : 'not built: install build-essential and python3, then re-run bin/install', optional: true });
     for (const p of this.store.listProviders()) {
       const r = providerReady(p);
       checks.push({ name: `provider: ${p.name}`, ok: r.ready, detail: r.reason || 'ready', optional: !p.enabled });

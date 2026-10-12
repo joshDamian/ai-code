@@ -71,4 +71,4 @@ npm run typecheck   # tsc over the files marked // @ts-check
 BENCH_FAKE_SDK=1 ./dev/bench serve   # the interface, with no model calls
 ```
 
-There is no build step. The browser loads Preact, htm and the other libraries from this server's `node_modules` through an import map. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+There is no build step. The browser loads Preact, htm and the other libraries from this server's `node_modules` through an import map. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [docs/VPS.md](docs/VPS.md) for a step-by-step VPS setup.

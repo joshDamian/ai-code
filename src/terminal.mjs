@@ -1,5 +1,15 @@
 import fs from 'node:fs';
-import pty from 'node-pty';
+// node-pty is native. Where it did not build, terminals are unavailable and the rest
+// of the server still runs, so it is loaded here rather than imported.
+/** @type {any} */
+let pty = null;
+let ptyError = null;
+try {
+  pty = (await import('node-pty')).default;
+} catch (e) {
+  ptyError = e;
+}
+export const terminalsAvailable = () => !!pty;
 import { cleanEnv } from './providers.mjs';
 
 // Interactive shells over a WebSocket: in a task's worktree, in a project's checkout,
@@ -131,6 +141,7 @@ export class TerminalSessions {
       throw new Error(`Too many terminals open (${this.sessions.size}); close one first`);
     }
 
+    if (!pty) throw new Error(`Terminals are unavailable: node-pty did not load (${ptyError?.message || 'unknown error'})`);
     ensureSpawnHelper();
     const args = command ? ['-l', '-c', command] : ['-l'];
     const file = loginShell();

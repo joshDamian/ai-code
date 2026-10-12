@@ -39,7 +39,9 @@ fi
 RELEASE="$RELEASE_ROOT/$(date +%Y%m%d%H%M%S)"
 mkdir -p "$DEST" "$RELEASE" "$DATA_ROOT"
 ( cd "$ROOT" && tar --exclude='./.bench' --exclude='./.ai-code' --exclude='./node_modules' --exclude='./.git' -cf - . ) | ( cd "$RELEASE" && tar -xf - )
-( cd "$RELEASE" && npm install --omit=dev --ignore-scripts --no-audit --no-fund >/dev/null && node -e "
+# Install scripts are skipped except node-pty's, which compiles the terminal's native
+# module where no prebuilt one exists (Linux). That needs a C++ toolchain and Python.
+( cd "$RELEASE" && npm install --omit=dev --ignore-scripts --no-audit --no-fund >/dev/null && { npm rebuild node-pty >/dev/null 2>&1 || echo "install: node-pty did not build; terminals will be unavailable (install build-essential and python3, then re-run)" >&2; } && node -e "
   const fs = require('fs'), p = require('path');
   const h = p.join('node_modules/node-pty/prebuilds', process.platform + '-' + process.arch, 'spawn-helper');
   try { if (!(fs.statSync(h).mode & 0o111)) fs.chmodSync(h, 0o755); } catch {}
