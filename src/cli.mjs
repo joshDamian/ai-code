@@ -90,6 +90,7 @@ function serviceInstall() {
       fs.rmSync(old);
       console.log(`Removed the old supervisor (${OLD_LABEL}).`);
     }
+    // Owner-only: it can carry provider API keys.
     fs.writeFileSync(
       plist,
       `<?xml version="1.0" encoding="UTF-8"?>
@@ -106,8 +107,10 @@ function serviceInstall() {
   <key>StandardErrorPath</key><string>${xml(path.join(logs, 'server.log'))}</string>
 </dict>
 </plist>
-`
+`,
+      { mode: 0o600 }
     );
+    fs.chmodSync(plist, 0o600);
     spawnSync('launchctl', ['bootout', `${domain}/${LABEL}`]);
     const r = spawnSync('launchctl', ['bootstrap', domain, plist], { encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`launchctl bootstrap failed: ${r.stderr}`);
@@ -131,8 +134,10 @@ RestartSec=3
 
 [Install]
 WantedBy=default.target
-`
+`,
+      { mode: 0o600 }
     );
+    fs.chmodSync(unit, 0o600);
     for (const args of [['--user', 'daemon-reload'], ['--user', 'enable', '--now', 'ai-code.service'], ['--user', 'restart', 'ai-code.service']]) {
       const r = spawnSync('systemctl', args, { encoding: 'utf8' });
       if (r.status !== 0) throw new Error(`systemctl ${args.join(' ')} failed: ${r.stderr}`);
