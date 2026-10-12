@@ -80,8 +80,11 @@ Clone and install it as a service:
 git clone https://github.com/joshDamian/ai-code.git ~/bench-src
 cd ~/bench-src
 npm install
+# Before --service, not after: the service runs under systemd's per-user manager, which a
+# fresh VPS has no login session for. Linger starts it and creates /run/user/$UID.
+sudo loginctl enable-linger $USER
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"   # where `systemctl --user` finds its bus
 bin/install --service
-sudo loginctl enable-linger $USER    # keeps the service running when you log out
 echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 ```
 
@@ -152,3 +155,4 @@ bin/install --service
 | Terminals don't open | `bench doctor` reports the terminal. Install `build-essential python3`, then re-run `bin/install --service` |
 | A hosted provider says its key is missing | Export the key in `~/.bashrc`, then re-run `bin/install --service`, which copies it into the service |
 | The service stops when you log out | `sudo loginctl enable-linger $USER` |
+| `bin/install --service` fails with `Failed to connect to user scope bus` | The user manager isn't running. `sudo loginctl enable-linger $USER`, `export XDG_RUNTIME_DIR="/run/user/$(id -u)"`, then re-run |
