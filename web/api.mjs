@@ -111,7 +111,7 @@ export function terminalUrl(q) {
  * @typedef {{
  *   ready: boolean, unauthorized: boolean, connected: boolean, error: string|null,
  *   projects: Project[], tasks: Task[], sessions: Session[], approvals: Approval[],
- *   providers: any[], defaults: {providerId:string, modelId:string|null, mode:string},
+ *   providers: any[], defaults: {providerId:string, modelId:string|null, mode:string, effort:string|null},
  *   me: {local:boolean, device:{id:string,name:string}|null} | null, push: string|null,
  *   gitTick: Record<string, number>
  * }} State
@@ -128,7 +128,7 @@ let state = {
   sessions: [],
   approvals: [],
   providers: [],
-  defaults: { providerId: '', modelId: null, mode: 'default' },
+  defaults: { providerId: '', modelId: null, mode: 'default', effort: null },
   me: null,
   push: null,
   gitTick: {},

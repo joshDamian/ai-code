@@ -6,7 +6,7 @@ import { confirmAction } from '../components/confirm.mjs';
 import { DiffViewer } from '../components/diff-viewer.mjs';
 import { MoreMenu } from '../components/menu.mjs';
 import { Time } from '../components/time.mjs';
-import { Dialog, Dot, ModelPicker, ModePicker, BranchPicker, sessionsStatus, TaskBadge, StatusBadge, Icon } from '../components/ui.mjs';
+import { Dialog, Dot, ModelPicker, ModePicker, EffortPicker, BranchPicker, sessionsStatus, TaskBadge, StatusBadge, Icon } from '../components/ui.mjs';
 import { TerminalPane } from '../components/terminal.mjs';
 
 const toast = (e) => showToast(e.message || String(e), 'error');
@@ -277,6 +277,7 @@ function NewTask({ projectId, git }) {
   const [base, setBase] = useState(null);
   const [model, setModel] = useState(null);
   const [mode, setMode] = useState(null);
+  const [effort, setEffort] = useState(undefined);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
   useEffect(() => remember(key, prompt || null), [prompt]);
@@ -287,7 +288,7 @@ function NewTask({ projectId, git }) {
   const start = async () => {
     setBusy(true);
     try {
-      const r = await api.createTask({ projectId, prompt, title, baseBranch, providerId: chosen.providerId, modelId: chosen.modelId, mode: mode || defaults.mode });
+      const r = await api.createTask({ projectId, prompt, title, baseBranch, providerId: chosen.providerId, modelId: chosen.modelId, mode: mode || defaults.mode, effort: effort === undefined ? defaults.effort : effort });
       setPrompt('');
       setTitle('');
       go(`#/p/${projectId}/t/${r.task.id}/s/${r.session.id}`);
@@ -315,6 +316,7 @@ function NewTask({ projectId, git }) {
               <label class="field"><span class="field-label">Title (optional)</span><input class="input" placeholder="From the first line" value=${title} onInput=${(e) => setTitle(e.target.value)} /></label>
               ${git?.branches?.length ? html`<div class="field"><span class="field-label">Branch from</span><${BranchPicker} branches=${git.branches} value=${baseBranch} onChange=${setBase} /></div>` : null}
               <div class="field"><span class="field-label">Model</span><${ModelPicker} providers=${providers} value=${chosen} onChange=${setModel} /></div>
+              <div class="field"><span class="field-label">Effort</span><${EffortPicker} value=${effort === undefined ? defaults.effort : effort} onChange=${setEffort} /></div>
               <div class="field"><span class="field-label">Permissions</span><${ModePicker} value=${mode || defaults.mode} onChange=${setMode} /></div>
             </div>
             <div class="row new-task-foot">

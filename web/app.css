@@ -843,9 +843,9 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
   .task-head{grid-template-columns:minmax(0,1fr);padding:var(--space-3)}
   .task-actions{grid-column:1;grid-row:auto;justify-content:flex-start}
   .task-tabs{padding:0 var(--space-2)}
-  .session-head{flex-wrap:nowrap;padding-top:var(--space-2);padding-bottom:var(--space-2)}
+  .session-head{padding-top:var(--space-2);padding-bottom:var(--space-2)}
   .task-view .session-title{display:none}
-  .session-controls{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;flex:1;justify-content:flex-start}
+  .session-controls{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;flex:1 1 100%;justify-content:flex-start}
   .session-controls .select-trigger{padding-top:var(--space-1);padding-bottom:var(--space-1);font-size:var(--text-sm)}
   .hide-narrow{display:none}
   .page-header h1{font-size:var(--text-lg)}

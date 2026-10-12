@@ -18,6 +18,15 @@ import * as g from './git.mjs';
 // 'git' when a project's repository may have moved.
 
 const DEFAULT_PROVIDER = 'anthropic-claude-code';
+// How hard the model thinks. Null leaves it to Claude Code's default for the model.
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+/** @param {unknown} e */
+function effortOf(e) {
+  if (e === undefined) return undefined;
+  if (e === null || e === '') return null;
+  if (!EFFORTS.includes(String(e))) throw fail(`Unknown effort ${e}; use one of ${EFFORTS.join(', ')}`);
+  return String(e);
+}
 
 /** @param {string} text */
 function slug(text) {
@@ -379,11 +388,14 @@ export class Service extends EventEmitter {
       providerId: this.store.getSetting('default_provider') || DEFAULT_PROVIDER,
       modelId: this.store.getSetting('default_model') || null,
       mode: /** @type {PermissionMode} */ (this.store.getSetting('default_mode') || 'default'),
+      effort: this.store.getSetting('default_effort') || null,
     };
   }
 
-  /** @param {{providerId?:string, modelId?:string|null, mode?:string}} o */
+  /** @param {{providerId?:string, modelId?:string|null, mode?:string, effort?:string|null}} o */
   setDefaults(o) {
+    const effort = effortOf(o.effort);
+    if (effort !== undefined) this.store.setSetting('default_effort', effort || '');
     if (o.providerId) this.store.setSetting('default_provider', o.providerId);
     if (o.modelId !== undefined) this.store.setSetting('default_model', o.modelId || '');
     if (o.mode && MODES.includes(/** @type {any} */ (o.mode))) this.store.setSetting('default_mode', o.mode);
@@ -417,7 +429,7 @@ export class Service extends EventEmitter {
       provider_id: providerId,
       model_id: modelId || null,
       permission_mode: mode,
-      effort: o.effort || null,
+      effort: (o.effort === undefined ? d.effort : effortOf(o.effort)) || null,
     });
     this.runtime.emit('session', s);
     if (o.prompt?.trim()) this.send(s.id, o.prompt);
@@ -441,6 +453,7 @@ export class Service extends EventEmitter {
       this.runtime.emit('session', this.store.updateSession(id, { title: patch.title.trim() }));
     }
     if (patch.mode) await this.runtime.setMode(id, patch.mode);
+    if (patch.effort !== undefined) patch = { ...patch, effort: effortOf(patch.effort) };
     if (patch.providerId !== undefined || patch.modelId !== undefined || patch.effort !== undefined) {
       const providerId = patch.providerId || this.session(id).provider_id;
       const provider = this.store.getProvider(providerId);

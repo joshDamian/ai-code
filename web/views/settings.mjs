@@ -5,7 +5,7 @@ import { showToast } from '../components/toast.mjs';
 import { confirmAction } from '../components/confirm.mjs';
 import { Toggle } from '../components/form.mjs';
 import { Time } from '../components/time.mjs';
-import { ModelPicker, ModePicker } from '../components/ui.mjs';
+import { ModelPicker, ModePicker, EffortPicker } from '../components/ui.mjs';
 
 const toast = (e) => showToast(e.message || String(e), 'error');
 
@@ -32,6 +32,7 @@ function Defaults() {
     <section class="section card">
       <h2>New sessions start with</h2>
       <div class="field"><span class="field-label">Model</span><${ModelPicker} providers=${providers} value=${{ providerId: d.providerId, modelId: d.modelId }} onChange=${(v) => save(v)} /></div>
+      <div class="field"><span class="field-label">Effort</span><${EffortPicker} value=${d.effort} onChange=${(effort) => save({ effort })} /></div>
       <div class="field"><span class="field-label">Permissions</span><${ModePicker} value=${d.mode} onChange=${(mode) => save({ mode })} /></div>
       <p class="muted">Sessions load the project's <code>.claude/</code> settings and CLAUDE.md, and your own <code>~/.claude/CLAUDE.md</code>. Your user <code>settings.json</code> is not loaded, so its <code>env</code> cannot redirect a provider.</p>
     </section>

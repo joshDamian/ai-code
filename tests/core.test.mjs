@@ -309,3 +309,28 @@ test('attached files are saved where the session can read them, and named in the
   assert.ok(!fs.existsSync(dir), 'deleting the session removes its files');
   svc.shutdown();
 });
+
+test('effort comes from the defaults, reaches the SDK, and a change restarts the session on resume', async () => {
+  const { svc, project } = setup();
+  assert.equal(svc.defaults().effort, null);
+  svc.setDefaults({ effort: 'high' });
+  const s = svc.createSession({ projectId: project.id });
+  assert.equal(s.effort, 'high');
+  svc.send(s.id, 'hi');
+  await until(() => svc.session(s.id).status === 'idle');
+  const first = calls.at(-1);
+  assert.equal(first.options.effort, 'high');
+
+  await svc.updateSession(s.id, { effort: 'max' });
+  assert.equal(first.closed, true, 'effort is fixed at spawn, so the process is replaced');
+  svc.send(s.id, 'again');
+  await until(() => calls.at(-1) !== first && svc.session(s.id).status === 'idle');
+  assert.equal(calls.at(-1).options.effort, 'max');
+  assert.equal(calls.at(-1).options.resume, svc.session(s.id).claude_session_id);
+
+  await svc.updateSession(s.id, { effort: null });
+  assert.equal(svc.session(s.id).effort, null, 'cleared back to the model default');
+  await assert.rejects(svc.updateSession(s.id, { effort: 'extreme' }), /Unknown effort/);
+  assert.throws(() => svc.setDefaults({ effort: 'extreme' }), /Unknown effort/);
+  svc.shutdown();
+});

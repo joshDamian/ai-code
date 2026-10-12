@@ -6,7 +6,7 @@ import { MoreMenu } from '../components/menu.mjs';
 import { showToast } from '../components/toast.mjs';
 import { confirmAction } from '../components/confirm.mjs';
 import { TerminalPane } from '../components/terminal.mjs';
-import { StatusBadge, ModelPicker, ModePicker, MODES, Dialog, Icon } from '../components/ui.mjs';
+import { StatusBadge, ModelPicker, ModePicker, EffortPicker, MODES, Dialog, Icon } from '../components/ui.mjs';
 
 const toast = (e) => showToast(e.message || String(e), 'error');
 
@@ -96,6 +96,7 @@ export function SessionPane({ sessionId, onArchived }) {
         </div>
         <div class="session-controls">
           <${ModelPicker} compact providers=${providers} value=${{ providerId: s.provider_id, modelId: s.model_id }} onChange=${(v) => api.updateSession(s.id, v).catch(toast)} />
+          <${EffortPicker} compact value=${s.effort} onChange=${(effort) => api.updateSession(s.id, { effort }).catch(toast)} />
           <${ModePicker} compact value=${s.permission_mode} onChange=${(mode) => api.updateSession(s.id, { mode }).catch(toast)} />
           <${MoreMenu}
             items=${[

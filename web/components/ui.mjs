@@ -99,6 +99,20 @@ export function ModelPicker({ providers, value, onChange, compact }) {
   `;
 }
 
+export const EFFORTS = [
+  { value: '', label: 'Default effort' },
+  { value: 'low', label: 'Low effort' },
+  { value: 'medium', label: 'Medium effort' },
+  { value: 'high', label: 'High effort' },
+  { value: 'xhigh', label: 'Extra-high effort' },
+  { value: 'max', label: 'Max effort' },
+];
+
+/** How hard the model thinks. Empty is Claude Code's own default for the model. */
+export function EffortPicker({ value, onChange, compact }) {
+  return html`<${Select} ariaLabel="Effort" inline=${compact} value=${value || ''} options=${EFFORTS} onChange=${(v) => onChange(v || null)} />`;
+}
+
 export function ModePicker({ value, onChange, compact }) {
   return html`<${Select} ariaLabel="Permission mode" inline=${compact} value=${value} options=${MODES.map((m) => ({ value: m.value, label: m.label }))} onChange=${onChange} />`;
 }
