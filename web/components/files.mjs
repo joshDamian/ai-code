@@ -33,9 +33,10 @@ export const fileUrl = (sessionId, f, download = false) => `/api/sessions/${enco
 const isImage = (/** @type {FileInfo} */ f) => f.open && f.mime.startsWith('image/');
 
 /**
- * Stats every path the events mention, in one request per batch of new ones. A path
- * that was not a file is asked about again once the session has done more - Claude
- * often names a file before the turn that writes it.
+ * Stats every path the events mention, newest first, in batches the server takes. A
+ * long session mentions many hundreds of candidates, most of them words, so a path is
+ * asked about once - and again, if it was not a file, only while the turn naming it is
+ * still going: Claude often names a file before the step that writes it.
  * @param {string} sessionId @param {any[]} events
  * @returns {Map<string, FileInfo>}
  */
@@ -48,18 +49,22 @@ export function useSessionFiles(sessionId, events) {
   }, [sessionId]);
   useEffect(() => {
     const done = events.filter((e) => e.kind === 'tool_result' || e.kind === 'result').length;
+    let turn = events.length;
+    while (turn > 0 && events[turn - 1].kind !== 'user') turn--;
     const want = new Set();
-    for (const e of events) for (const p of eventPaths(e)) want.add(p);
-    const fresh = [...want].filter((p) => !files.has(p) && asked.current.get(p) !== done);
-    if (!fresh.length) return;
+    for (let i = events.length - 1; i >= 0; i--) for (const p of eventPaths(events[i])) want.add(p);
+    const current = new Set(events.slice(turn).flatMap(eventPaths));
+    const fresh = [...want].filter((p) => !files.has(p) && (!asked.current.has(p) || (current.has(p) && asked.current.get(p) !== done)));
     for (const p of fresh) asked.current.set(p, done);
-    api
-      .fileStat(sessionId, fresh.slice(0, 500))
-      .then((found) => {
-        const hits = Object.entries(found || {});
-        if (hits.length) setFiles((m) => new Map([...m, ...hits]));
-      })
-      .catch(() => {});
+    for (let i = 0; i < fresh.length; i += 500) {
+      api
+        .fileStat(sessionId, fresh.slice(i, i + 500))
+        .then((found) => {
+          const hits = Object.entries(found || {});
+          if (hits.length) setFiles((m) => new Map([...m, ...hits]));
+        })
+        .catch(() => {});
+    }
   }, [sessionId, events]);
   return files;
 }
@@ -133,6 +138,17 @@ export function linkFiles(root, ctx) {
     const text = node.data;
     const hits = [...text.matchAll(PATH)].map((m) => ({ i: m.index ?? 0, t: m[0].replace(/[.]+$/, '') })).filter((h) => ctx.files.has(h.t));
     if (!hits.length) continue;
+    // Inside `code`, only a span that is the path and nothing else is linked, with its
+    // actions after the span: `bin/install --service` is a command, not a file to hand over.
+    const code = node.parentElement?.tagName === 'CODE' ? node.parentElement : null;
+    if (code) {
+      if (hits.length === 1 && hits[0].t === code.textContent?.trim()) {
+        const f = /** @type {FileInfo} */ (ctx.files.get(hits[0].t));
+        code.after(actionsNode(ctx, f, hits[0].t));
+        if (isImage(f)) blockOf(root, code)?.after(imageNode(ctx, f, hits[0].t));
+      }
+      continue;
+    }
     const frag = document.createDocumentFragment();
     let at = 0;
     for (const { i, t } of hits) {
@@ -140,11 +156,8 @@ export function linkFiles(root, ctx) {
       at = i + t.length;
     }
     frag.append(text.slice(at));
-    // Inside `code`, the actions go after the code span rather than in its monospace.
-    const code = node.parentElement?.tagName === 'CODE' && node.parentElement.childNodes.length === 1 ? node.parentElement : null;
     const block = blockOf(root, node);
-    if (code && hits.length === 1 && hits[0].t === text.trim()) code.after(actionsNode(ctx, /** @type {FileInfo} */ (ctx.files.get(hits[0].t)), hits[0].t));
-    else node.replaceWith(frag);
+    node.replaceWith(frag);
     for (const { t } of [...hits].reverse()) {
       const f = /** @type {FileInfo} */ (ctx.files.get(t));
       if (isImage(f) && block) block.after(imageNode(ctx, f, t));
