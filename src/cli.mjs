@@ -74,7 +74,9 @@ function serviceInstall() {
   // The PATH of this shell goes with it: the service starts `claude`, `git` and `gh`, and
   // a service manager gives a job almost no PATH of its own.
   /** @type {Record<string, string>} */
-  const env = { AI_CODE_ROOT: dataRoot, PORT: String(port), PATH: process.env.PATH || '/usr/bin:/bin' };
+  // AI_CODE_SERVICE tells the server a service manager will restart it, which is what
+  // makes the Restart button in Settings safe to offer.
+  const env = { AI_CODE_ROOT: dataRoot, PORT: String(port), PATH: process.env.PATH || '/usr/bin:/bin', AI_CODE_SERVICE: process.platform === 'darwin' ? 'launchd' : 'systemd' };
   for (const k of ['DEEPSEEK_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'AI_CODE_PUBLIC_URL']) if (process.env[k]) env[k] = String(process.env[k]);
   if (process.platform === 'darwin') {
     const logs = path.join(os.homedir(), 'Library', 'Logs', 'ai-code');

@@ -1,6 +1,6 @@
 // Providers, defaults, devices, notifications and the server's health.
-import { html, useEffect, useState, formatCost } from '../lib.mjs';
-import { api, useStore, refresh } from '../api.mjs';
+import { html, useEffect, useState, formatCost, formatDuration } from '../lib.mjs';
+import { api, useStore, refresh, reconnectNow } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { confirmAction } from '../components/confirm.mjs';
 import { Toggle } from '../components/form.mjs';
@@ -18,6 +18,7 @@ export function Settings() {
       <${Devices} />
       <${Notifications} />
       <${Usage} />
+      <${Server} />
       <${Doctor} />
     </div>
   `;
@@ -192,10 +193,8 @@ function Usage() {
 
 function Doctor() {
   const [checks, setChecks] = useState(null);
-  const [server, setServer] = useState(null);
   useEffect(() => {
     api.doctor().then((r) => setChecks(r.checks)).catch(toast);
-    api.status().then(setServer).catch(() => {});
   }, []);
   return html`
     <section class="section card">
@@ -203,7 +202,69 @@ function Doctor() {
       ${checks
         ? html`<div class="checks">${checks.map((c) => html`<div class="check-row"><span class=${c.ok ? 'good' : c.optional ? 'muted' : 'bad'}>${c.ok ? '✓' : c.optional ? '–' : '✗'}</span><strong>${c.name}</strong><span class="muted">${c.detail}</span></div>`)}</div>`
         : html`<span class="muted">Checking…</span>`}
-      ${server ? html`<p class="muted mono-sm">ai-code ${server.version} · pid ${server.pid} · data in ${server.root}</p>` : null}
+    </section>
+  `;
+}
+
+/** Resolves once the server answers again, after it was seen to go away. */
+async function backUp(oldPid, ms = 60000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      const s = await api.status();
+      if (s.pid !== oldPid) return true;
+    } catch {
+      /* still down */
+    }
+  }
+  return false;
+}
+
+function Server() {
+  const [server, setServer] = useState(null);
+  const [restarting, setRestarting] = useState(false);
+  const busy = useStore((s) => s.sessions.filter((x) => x.status === 'running' || x.status === 'waiting').length);
+  const load = () => api.status().then(setServer).catch(() => {});
+  useEffect(() => {
+    load();
+  }, []);
+
+  const restart = async () => {
+    const ok = await confirmAction({
+      title: 'Restart the server?',
+      body: busy
+        ? `${busy} session${busy === 1 ? ' is' : 's are'} mid-turn and will be stopped. Their conversations resume on the next message.`
+        : 'It is back in a few seconds. Open sessions resume on their next message.',
+      confirmLabel: 'Restart',
+      tone: busy ? 'danger' : 'default',
+    });
+    if (!ok) return;
+    setRestarting(true);
+    try {
+      await api.restart();
+    } catch (e) {
+      setRestarting(false);
+      return toast(e);
+    }
+    const back = await backUp(server.pid);
+    setRestarting(false);
+    if (back) {
+      showToast('Server restarted', 'success');
+      load();
+      reconnectNow();
+    } else showToast('The server has not come back. Check the service logs on the machine.', 'error');
+  };
+
+  if (!server) return null;
+  return html`
+    <section class="section card">
+      <h2>Server</h2>
+      <p class="muted mono-sm">ai-code ${server.version} · up ${formatDuration(server.uptimeMs)} · pid ${server.pid} · data in ${server.root}</p>
+      ${server.supervised
+        ? html`<p class="muted">Running as a ${server.supervised} service, which starts it again whenever it stops.</p>
+            <div class="row"><button class="btn secondary" type="button" disabled=${restarting} onClick=${restart}>${restarting ? 'Restarting…' : 'Restart server'}</button></div>`
+        : html`<div class="notice notice-warn">Not running as a service: if it stops, nothing starts it again, and it cannot be restarted from here. On the server, run <code>ai-code service install</code>.</div>`}
     </section>
   `;
 }

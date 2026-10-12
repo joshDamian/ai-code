@@ -131,3 +131,33 @@ test('static files and vendored libraries are served, and nothing outside them',
   // A client route falls back to the app.
   assert.equal((await req('GET', '/p/abc')).status, 200);
 });
+
+test('a restart is refused when no service manager would bring the server back', async () => {
+  const status = await req('GET', '/api/server/status');
+  assert.equal(status.json.supervised, null);
+  const r = await req('POST', '/api/server/restart', { body: {} });
+  assert.equal(r.status, 409);
+  assert.match(r.json.error, /service install/);
+  assert.equal((await req('GET', '/api/server/status')).status, 200, 'still up');
+});
+
+test('under a service manager, a restart exits so the manager starts a fresh process', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aic-svc-'));
+  const proc = spawn(process.execPath, ['src/server.mjs'], {
+    cwd: new URL('..', import.meta.url).pathname,
+    env: { ...process.env, PORT: '0', AI_CODE_ROOT: dir, AI_CODE_SERVICE: 'test' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const p = await new Promise((resolve) => {
+    let out = '';
+    proc.stdout.on('data', (d) => {
+      out += d;
+      const m = /localhost:(\d+)/.exec(out);
+      if (m) resolve(Number(m[1]));
+    });
+  });
+  const exited = new Promise((resolve) => proc.on('exit', (code) => resolve(code)));
+  const res = await fetch(`http://127.0.0.1:${p}/api/server/restart`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(res.status, 200);
+  assert.equal(await exited, 0);
+});

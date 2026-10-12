@@ -47,6 +47,8 @@ Or choose **Settings → Pair a device**. A paired device gets its own cookie. Y
 3. Run `sudo loginctl enable-linger $USER` so the user service survives logout.
 4. Run `ai-code share` and `ai-code pair`, then open the link on your phone.
 
+Under the service, **Settings → Server → Restart server** restarts it from any paired device: the server exits and the service manager starts a fresh one. Without the service the button is not offered, because nothing would start the server again.
+
 Hosted-provider keys (`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `FIREWORKS_API_KEY`) are read from the server's environment. `ai-code service install` copies them, with your PATH, into the service definition.
 
 ## Commands

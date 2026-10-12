@@ -377,7 +377,18 @@ route('GET', '/api/push/key', () => (vapid ? { key: vapid.publicKey } : Promise.
 route('POST', '/api/push/subscribe', ({ body }) => (svc.store.addPushSubscription(body), { ok: true }));
 route('POST', '/api/push/unsubscribe', ({ body }) => ({ ok: svc.store.deletePushSubscription(body.endpoint) > 0 }));
 
-route('GET', '/api/server/status', () => ({ pid: process.pid, startedAt, uptimeMs: Date.now() - startedAt, version: pkg.version, root, terminals: terminals.size }));
+// Whether something will start this process again after it exits: the service
+// definition `ai-code service install` writes says so.
+const supervised = process.env.AI_CODE_SERVICE || null;
+
+route('GET', '/api/server/status', () => ({ pid: process.pid, startedAt, uptimeMs: Date.now() - startedAt, version: pkg.version, root, terminals: terminals.size, supervised }));
+// Exits so the service manager starts a fresh process. Refused when nothing would, since
+// a restart that is really a stop leaves a phone with no way back.
+route('POST', '/api/server/restart', () => {
+  if (!supervised) throw Object.assign(new Error('Not running as a service, so nothing would start it again. Run `ai-code service install` on the server.'), { status: 409 });
+  setTimeout(shutdown, 100);
+  return { ok: true };
+});
 route('POST', '/api/server/shutdown', ({ auth }) => {
   if (!auth.local) throw Object.assign(new Error('Only from this machine'), { status: 403 });
   setTimeout(shutdown, 50);

@@ -96,6 +96,7 @@ export const api = {
   pushSubscribe: (/** @type {any} */ sub) => post('/api/push/subscribe', sub),
   pushUnsubscribe: (/** @type {string} */ endpoint) => post('/api/push/unsubscribe', { endpoint }),
   status: () => get('/api/server/status'),
+  restart: () => post('/api/server/restart'),
 };
 
 /** @param {URLSearchParams | Record<string,string>} q */
@@ -229,6 +230,8 @@ function onMessage(m) {
 }
 
 let retry = 0;
+/** @type {ReturnType<typeof setTimeout>|undefined} */
+let timer;
 export function connect() {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${scheme}//${location.host}/api/ws`);
@@ -252,9 +255,17 @@ export function connect() {
     if (socket !== ws) return;
     set({ connected: false });
     if (state.unauthorized) return;
-    retry = Math.min(retry + 1, 6);
-    setTimeout(connect, 500 * 2 ** retry);
+    retry = Math.min(retry + 1, 4);
+    timer = setTimeout(connect, 500 * 2 ** retry);
   };
+}
+
+/** Reconnects now rather than at the next backoff, when the server is known to be back. */
+export function reconnectNow() {
+  if (socket && socket.readyState <= 1) return;
+  clearTimeout(timer);
+  retry = 0;
+  connect();
 }
 
 // A phone that wakes from sleep has a socket that died silently; a ping finds out.
@@ -262,5 +273,5 @@ setInterval(() => {
   if (socket?.readyState === 1) socket.send(JSON.stringify({ type: 'ping' }));
 }, 25000);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && socket && socket.readyState > 1) connect();
+  if (document.visibilityState === 'visible') reconnectNow();
 });

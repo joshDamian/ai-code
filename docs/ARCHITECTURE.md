@@ -43,6 +43,10 @@ A task records its `base_branch` and `base_commit`, a branch `ai-code/<slug>-<id
 
 Loopback requests from this machine's own browser need nothing. A request that carries `X-Forwarded-For` or a Tailscale header is not loopback, whatever its Host says. Every other request needs a paired device's token: an HttpOnly, SameSite=Strict cookie set when a one-time pairing code is redeemed. Writes must be JSON. WebSockets must come from the same origin. Tokens and pairing codes are stored only as hashes.
 
+## Lifecycle
+
+`ai-code service install` writes a launchd agent (macOS) or a systemd user unit (Linux) that restarts the server whenever it exits, and sets `AI_CODE_SERVICE` in its environment. `POST /api/server/restart` exits the process only when that variable is set; otherwise it answers 409, since a restart nothing completes is a stop. Live sessions die with the process and resume from Claude Code's transcript on their next message.
+
 ## Data
 
 The database is `$AI_CODE_ROOT/.ai-code/ai-code.db`. A v1 (pipeline) database is upgraded in place on first start:
