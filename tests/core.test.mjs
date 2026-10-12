@@ -306,9 +306,37 @@ test('attached files are saved where the session can read them, and named in the
   const reply = svc.events(s.id).find((e) => e.kind === 'assistant').data.content[0].text;
   assert.match(reply, new RegExp(`Attached files.*\\n- ${dir}/.*notes\\.md`, 's'));
 
-  assert.throws(() => svc.send(s.id, '', { files: [{ name: 'big.bin', data: Buffer.alloc(21 * 1024 * 1024).toString('base64') }] }), /over 20 MB/);
+  assert.throws(() => svc.send(s.id, '', { files: [{ name: 'big.bin', data: Buffer.alloc(61 * 1024 * 1024).toString('base64') }] }), /over 60 MB/);
   svc.deleteSession(s.id);
   assert.ok(!fs.existsSync(dir), 'deleting the session removes its files');
+  svc.shutdown();
+});
+
+test('a large file is streamed to disk and attached by name, an APK included', async () => {
+  const { Readable } = await import('node:stream');
+  const { svc, project } = setup();
+  const s = svc.createSession({ projectId: project.id });
+  // Bigger than the 60 MB a base64 attachment may be.
+  const apk = Buffer.alloc(65 * 1024 * 1024, 7);
+  const up = await svc.runtime.receiveFile(s.id, '../app-release.apk', 'application/vnd.android.package-archive', Readable.from([apk.subarray(0, 1e6), apk.subarray(1e6)]));
+  assert.equal(up.name, 'app-release.apk');
+  assert.equal(up.size, apk.length);
+  assert.ok(!up.file.includes('/'));
+  const dir = svc.runtime.attachmentsDir(s.id);
+  assert.equal(fs.statSync(path.join(dir, up.file)).size, apk.length);
+
+  svc.send(s.id, 'what permissions does this ask for?', { uploads: [{ file: up.file, type: up.type }] });
+  await until(() => svc.session(s.id).status === 'idle');
+  const user = svc.events(s.id).find((e) => e.kind === 'user');
+  assert.deepEqual(user.data.files, [{ name: 'app-release.apk', size: apk.length, type: 'application/vnd.android.package-archive' }]);
+  const reply = svc.events(s.id).find((e) => e.kind === 'assistant').data.content[0].text;
+  assert.match(reply, /app-release\.apk/);
+  assert.match(reply, /zip archive/, 'Claude is told how to open an APK');
+
+  assert.throws(() => svc.send(s.id, 'x', { uploads: [{ file: '../../etc/passwd' }] }), /missing/);
+  assert.throws(() => svc.send(s.id, 'x', { uploads: [{ file: 'nope.apk' }] }), /missing/);
+  await assert.rejects(svc.runtime.receiveFile(s.id, 'empty.bin', '', Readable.from([])), /empty/);
+  assert.equal(fs.readdirSync(dir).length, 1, 'a failed upload leaves nothing behind');
   svc.shutdown();
 });
 

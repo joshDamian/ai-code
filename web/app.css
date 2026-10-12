@@ -787,9 +787,20 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .composer{border-top:1px solid var(--line);padding:var(--space-3) var(--space-5);padding-bottom:max(var(--space-3),env(safe-area-inset-bottom));background:var(--surface-rail);display:grid;gap:var(--space-2)}
 .composer>*{max-width:900px;width:100%;margin:0 auto;box-sizing:border-box}
 .composer.archived{text-align:center}
-.composer-row{display:flex;align-items:flex-end;gap:var(--space-2)}
-.composer-input{flex:1;resize:none;min-height:40px;max-height:280px;line-height:1.45;font-size:16px}
-.composer-foot{font-size:var(--text-xs);display:flex;gap:var(--space-1);align-items:center}
+/* The composer is one box: the text spans its full width, and the controls sit in a
+   slim bar underneath rather than beside it, so a phone keeps the whole line to type in. */
+.composer-box{display:grid;gap:0;background:var(--surface-0);border:1px solid var(--line);border-radius:var(--radius);transition:border-color var(--dur-fast) var(--ease)}
+.composer-box:focus-within{border-color:var(--accent-dim)}
+.composer-input{display:block;width:100%;box-sizing:border-box;resize:none;border:0;outline:none;background:transparent;color:var(--text);font-family:var(--font-ui);font-size:16px;line-height:1.45;padding:var(--space-3) var(--space-3) var(--space-1);min-height:44px;max-height:240px;overflow-y:auto}
+.composer-input::placeholder{color:var(--muted)}
+.composer-bar{display:flex;align-items:center;gap:var(--space-1);padding:var(--space-1)}
+.composer-bar .btn.icon-only{min-width:36px;min-height:36px;border-radius:50%}
+.composer-bar .send-btn:disabled{opacity:.35}
+.composer-gap{flex:1}
+.composer-hint{font-size:var(--text-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;margin-left:var(--space-2)}
+.mode-chip{font-size:var(--text-xs);font-weight:600;color:var(--muted);background:none;border:1px solid var(--line);border-radius:999px;padding:4px var(--space-3);white-space:nowrap;cursor:pointer}
+.mode-chip:hover{color:var(--text);border-color:var(--line-strong)}
+.composer-box .thumbs{padding:var(--space-3) var(--space-3) 0}
 .slash{display:flex;flex-wrap:wrap;gap:var(--space-1)}
 .slash button{font-family:var(--font-mono);font-size:var(--text-sm);padding:2px var(--space-2);border:1px solid var(--line);border-radius:var(--radius-sm)}
 .thumbs{display:flex;gap:var(--space-2);flex-wrap:wrap}
@@ -840,7 +851,9 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
   .drawer-open .sidebar{transform:none;box-shadow:var(--shadow-3)}
   .topbar{display:flex}
   .page{padding:var(--space-4)}
-  .session-head,.transcript,.composer,.changes{padding-left:var(--space-3);padding-right:var(--space-3)}
+  .session-head,.transcript,.changes{padding-left:var(--space-3);padding-right:var(--space-3)}
+  /* On a phone the composer runs nearly edge to edge. */
+  .composer{padding:var(--space-2);padding-bottom:max(var(--space-2),env(safe-area-inset-bottom))}
   .task-head{grid-template-columns:minmax(0,1fr);padding:var(--space-3)}
   .task-actions{grid-column:1;grid-row:auto;justify-content:flex-start}
   .task-tabs{padding:0 var(--space-2)}
@@ -866,6 +879,9 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .file-chip{font-size:var(--text-xs);font-family:var(--font-mono);padding:2px var(--space-2);border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--surface-1);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .thumb.file{display:grid;align-content:center;gap:2px;width:140px;height:56px;padding:var(--space-1) var(--space-2);box-sizing:border-box;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-1);font-size:var(--text-xs)}
 .thumb-name{font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.thumb.file{position:relative;overflow:visible}
+.thumb.uploading{border-style:dashed}
+.thumb-bar{position:absolute;left:0;bottom:0;height:2px;background:var(--accent);border-radius:0 0 0 var(--radius-sm);transition:width .2s linear}
 .composer.dragging{outline:2px dashed var(--accent-dim);outline-offset:-6px}
 /* Adding a project: tabs, the destination, the repository list. */
 .seg{display:flex;gap:2px;padding:3px;background:var(--surface-0);border:1px solid var(--line);border-radius:var(--radius-sm);overflow-x:auto}
@@ -883,3 +899,4 @@ button.side-settings{width:100%;text-align:left}
 .repo-list .browser-item{min-width:0}
 .repo-row{overflow:hidden}
 .repo-row .mono-sm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(pointer:coarse){.composer-bar .btn.icon-only{min-width:40px;min-height:40px}.mode-chip{padding:8px var(--space-3)}}

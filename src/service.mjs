@@ -495,7 +495,7 @@ export class Service extends EventEmitter {
     return this.session(s.id);
   }
 
-  /** @param {string} id @param {string} text @param {{images?: {media_type:string, data:string}[], files?: {name:string, media_type?:string, data:string}[]}} [o] */
+  /** @param {string} id @param {string} text @param {{images?: {media_type:string, data:string}[], files?: {name:string, media_type?:string, data:string}[], uploads?: {file:string, type?:string}[]}} [o] */
   send(id, text, o) {
     const s = this.session(id);
     if (s.task_id && this.task(s.task_id).state !== 'active') throw fail('The task is no longer active', 409);

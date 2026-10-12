@@ -11,7 +11,7 @@ import { Service } from './service.mjs';
 import { TerminalSessions } from './terminal.mjs';
 import { providerEnv } from './providers.mjs';
 import { env } from './env.mjs';
-import { MODES } from './runtime.mjs';
+import { MODES, MAX_UPLOAD } from './runtime.mjs';
 
 /** @typedef {import('./contract.mjs').ServerMessage} ServerMessage */
 
@@ -141,7 +141,7 @@ const sessionUrl = (s) => (s.task_id ? `/#/p/${s.project_id}/t/${s.task_id}/s/${
 
 // -- the event hub ----------------------------------------------------------------------
 
-/** @type {Set<import('ws').WebSocket & {watch?: Set<string>}>} */
+/** @type {Set<import('ws').WebSocket & {watch?: Set<string>, alive?: boolean}>} */
 const clients = new Set();
 
 /** @param {ServerMessage} msg @param {string} [sessionId] only to clients watching it */
@@ -150,14 +150,55 @@ function broadcast(msg, sessionId) {
   for (const ws of clients) {
     if (ws.readyState !== 1) continue;
     if (sessionId && !ws.watch?.has(sessionId)) continue;
+    // A client that has stopped reading (a phone asleep, a dead link) would have every
+    // message queued for it in memory. Past a point it is dropped; it reconnects and
+    // reloads what it missed.
+    if (ws.bufferedAmount > 4 * 1024 * 1024) {
+      ws.terminate();
+      continue;
+    }
     ws.send(text);
   }
 }
 
-svc.runtime.on('session', (s) => broadcast({ type: 'session', session: s }));
-svc.runtime.on('session-removed', (id) => broadcast({ type: 'session-removed', id }));
-svc.runtime.on('event', (e) => broadcast({ type: 'event', event: e }, e.session_id));
-svc.runtime.on('delta', (d) => broadcast({ type: 'delta', ...d }, d.session_id));
+// Streaming text arrives a few characters at a time. Sent as is, that is dozens of
+// frames a second per session, each one a re-render on the phone at the other end of a
+// slow link. Deltas are gathered for a moment and sent as one; anything else about the
+// session first flushes what is gathered, so the order the client sees is unchanged.
+const DELTA_MS = 60;
+/** @type {Map<string, {text:string, thinking:boolean, timer:ReturnType<typeof setTimeout>}>} */
+const deltas = new Map();
+/** @param {string} sessionId */
+function flushDelta(sessionId) {
+  const d = deltas.get(sessionId);
+  if (!d) return;
+  deltas.delete(sessionId);
+  clearTimeout(d.timer);
+  broadcast({ type: 'delta', session_id: sessionId, text: d.text, ...(d.thinking ? { thinking: true } : {}) }, sessionId);
+}
+/** @param {{session_id:string, text:string, thinking?:boolean}} d */
+function queueDelta(d) {
+  const thinking = !!d.thinking;
+  const cur = deltas.get(d.session_id);
+  if (cur && cur.thinking !== thinking) flushDelta(d.session_id);
+  const next = deltas.get(d.session_id);
+  if (next) next.text += d.text;
+  else deltas.set(d.session_id, { text: d.text, thinking, timer: setTimeout(() => flushDelta(d.session_id), DELTA_MS) });
+}
+
+svc.runtime.on('session', (s) => {
+  flushDelta(s.id);
+  broadcast({ type: 'session', session: s });
+});
+svc.runtime.on('session-removed', (id) => {
+  flushDelta(id);
+  broadcast({ type: 'session-removed', id });
+});
+svc.runtime.on('event', (e) => {
+  flushDelta(e.session_id);
+  broadcast({ type: 'event', event: e }, e.session_id);
+});
+svc.runtime.on('delta', queueDelta);
 svc.runtime.on('approval', (a) => {
   broadcast({ type: 'approval', approval: a });
   const s = svc.store.getSession(a.session_id);
@@ -178,8 +219,8 @@ function json(res, body, status = 200) {
   res.end(JSON.stringify(body ?? null));
 }
 
-// Room for 40 MB of attachments, base64-encoded.
-const MAX_BODY = 60 * 1024 * 1024;
+// Room for 60 MB of attachments, base64-encoded (a third bigger), and the message.
+const MAX_BODY = 85 * 1024 * 1024;
 
 /** @param {http.IncomingMessage} req @returns {Promise<any>} */
 function readBody(req) {
@@ -366,7 +407,7 @@ route('GET', '/api/sessions/:id', ({ params }) => ({
   commands: svc.runtime.commands(params[0]),
 }));
 route('GET', '/api/sessions/:id/events', ({ params, u }) => svc.events(params[0], { before: Number(u.searchParams.get('before')) || undefined, limit: Number(u.searchParams.get('limit')) || undefined }));
-route('POST', '/api/sessions/:id/messages', ({ params, body }) => svc.send(params[0], body.text, { images: body.images, files: body.files }));
+route('POST', '/api/sessions/:id/messages', ({ params, body }) => svc.send(params[0], body.text, { images: body.images, files: body.files, uploads: body.uploads }));
 route('POST', '/api/sessions/:id/interrupt', async ({ params }) => ({ ok: await svc.interrupt(params[0]) }));
 route('PATCH', '/api/sessions/:id', ({ params, body }) => svc.updateSession(params[0], body));
 route('POST', '/api/sessions/:id/archive', ({ params, body }) => svc.archiveSession(params[0], body.archived !== false));
@@ -433,6 +474,25 @@ async function pair(req, res, u) {
   json(res, { device });
 }
 
+/** @param {http.IncomingMessage} req @param {http.ServerResponse} res @param {URL} u @param {string} sessionId */
+async function receiveUpload(req, res, u, sessionId) {
+  if (!/^application\/octet-stream/.test(req.headers['content-type'] || '')) return json(res, { error: 'Send the file as application/octet-stream' }, 415);
+  const declared = Number(req.headers['content-length']);
+  if (declared > MAX_UPLOAD) {
+    json(res, { error: `Files over ${MAX_UPLOAD / 1024 / 1024} MB cannot be attached` }, 413);
+    return req.destroy();
+  }
+  try {
+    svc.session(sessionId);
+    const out = await svc.runtime.receiveFile(sessionId, u.searchParams.get('name') || 'file', u.searchParams.get('type') || '', req);
+    json(res, out);
+  } catch (e) {
+    const err = /** @type {any} */ (e);
+    if (!res.headersSent) json(res, { error: err.message }, err.status || 400);
+    req.destroy();
+  }
+}
+
 /** @param {http.IncomingMessage} req @param {http.ServerResponse} res */
 async function handle(req, res) {
   const u = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -441,6 +501,10 @@ async function handle(req, res) {
   if (u.pathname === '/api/ping') return json(res, { ok: true, paired: !!who(req) });
   const auth = who(req);
   if (!auth) return json(res, { error: 'unauthorized' }, 401);
+  // A file upload is the raw bytes. application/octet-stream, like JSON, cannot be sent
+  // cross-site without a preflight, which this server never answers.
+  const upload = req.method === 'POST' && /^\/api\/sessions\/([^/]+)\/uploads$/.exec(u.pathname);
+  if (upload) return receiveUpload(req, res, u, decodeURIComponent(upload[1]));
   // A write must be JSON, which a cross-site form cannot send without a preflight.
   if (req.method !== 'GET' && req.method !== 'DELETE' && !/^application\/json/.test(req.headers['content-type'] || '')) return json(res, { error: 'Send JSON' }, 415);
   for (const [method, re, fn] of routes) {
@@ -470,6 +534,26 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
+// A connection that died without a close (a phone that lost signal, a NAT that forgot
+// it) still looks open here. Each is pinged; one that has not answered by the next
+// round is closed, so it stops collecting messages and the client knows to reconnect.
+const heartbeat = setInterval(() => {
+  for (const ws of clients) {
+    if (!ws.alive) {
+      ws.terminate();
+      clients.delete(ws);
+      continue;
+    }
+    ws.alive = false;
+    try {
+      ws.ping();
+    } catch {
+      /* closed meanwhile */
+    }
+  }
+}, 30000);
+heartbeat.unref();
+
 /** @param {import('node:stream').Duplex} socket @param {string} status */
 const refuse = (socket, status) => {
   socket.write(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);
@@ -488,16 +572,21 @@ server.on('upgrade', (req, socket, head) => {
 
   if (u.pathname === '/api/ws') {
     return wss.handleUpgrade(req, socket, head, (ws) => {
-      const client = /** @type {import('ws').WebSocket & {watch?: Set<string>}} */ (ws);
+      const client = /** @type {import('ws').WebSocket & {watch?: Set<string>, alive?: boolean}} */ (ws);
       client.watch = new Set();
+      client.alive = true;
       clients.add(client);
+      client.on('pong', () => (client.alive = true));
       client.on('close', () => clients.delete(client));
       client.on('error', () => {});
       client.on('message', (raw) => {
         try {
           const msg = JSON.parse(String(raw));
           if (msg.type === 'watch' && Array.isArray(msg.ids)) client.watch = new Set(msg.ids.slice(0, 50).map(String));
-          else if (msg.type === 'ping') client.send(JSON.stringify({ type: 'pong' }));
+          else if (msg.type === 'ping') {
+            client.alive = true;
+            client.send(JSON.stringify({ type: 'pong' }));
+          }
         } catch {
           /* ignored */
         }

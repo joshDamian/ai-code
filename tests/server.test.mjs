@@ -96,6 +96,17 @@ test('writes must be JSON', async () => {
   assert.equal(r.status, 415);
 });
 
+test('a file upload must be raw bytes, and comes from a paired device', async () => {
+  const json = await req('POST', '/api/sessions/nope/uploads?name=a.apk', { host: REMOTE, cookie, body: '{}' });
+  assert.equal(json.status, 415);
+  const form = await req('POST', '/api/sessions/nope/uploads?name=a.apk', { host: REMOTE, cookie, body: 'x', type: 'text/plain' });
+  assert.equal(form.status, 415);
+  const stranger = await req('POST', '/api/sessions/nope/uploads?name=a.apk', { host: REMOTE, body: 'x', type: 'application/octet-stream' });
+  assert.equal(stranger.status, 401);
+  const missing = await req('POST', '/api/sessions/nope/uploads?name=a.apk', { host: REMOTE, cookie, body: 'x', type: 'application/octet-stream' });
+  assert.equal(missing.status, 404);
+});
+
 test('the event socket checks origin and auth, then says hello', async () => {
   const open = (headers) =>
     new Promise((resolve) => {

@@ -78,7 +78,8 @@ export const api = {
   createSession: (/** @type {any} */ b) => post('/api/sessions', b),
   session: (/** @type {string} */ id) => get(`/api/sessions/${id}`),
   events: (/** @type {string} */ id, /** @type {number} */ before) => get(`/api/sessions/${id}/events?before=${before}`),
-  send: (/** @type {string} */ id, /** @type {string} */ text, /** @type {{media_type:string, data:string}[]} */ images = [], /** @type {{name:string, media_type:string, data:string}[]} */ files = []) => post(`/api/sessions/${id}/messages`, { text, images, files }),
+  send: (/** @type {string} */ id, /** @type {string} */ text, /** @type {{media_type:string, data:string}[]} */ images = [], /** @type {{file:string, type?:string}[]} */ uploads = []) => post(`/api/sessions/${id}/messages`, { text, images, uploads }),
+  upload,
   interrupt: (/** @type {string} */ id) => post(`/api/sessions/${id}/interrupt`),
   updateSession: (/** @type {string} */ id, /** @type {any} */ b) => patch(`/api/sessions/${id}`, b),
   archiveSession: (/** @type {string} */ id, archived = true) => post(`/api/sessions/${id}/archive`, { archived }),
@@ -102,6 +103,39 @@ export const api = {
   status: () => get('/api/server/status'),
   restart: () => post('/api/server/restart'),
 };
+
+/**
+ * Sends one file to a session's attachments as its raw bytes, so a large file (an APK, an
+ * archive) is never held in memory as base64. Resolves to what send() names it by.
+ * @param {string} sessionId @param {File} file
+ * @param {{onProgress?: (fraction: number) => void, signal?: AbortSignal}} [o]
+ * @returns {Promise<{file:string, name:string, size:number, type:string}>}
+ */
+function upload(sessionId, file, o = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const q = new URLSearchParams({ name: file.name || 'file', type: file.type || '' });
+    xhr.open('POST', `/api/sessions/${enc(sessionId)}/uploads?${q}`);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('content-type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => e.lengthComputable && o.onProgress?.(e.loaded / e.total);
+    xhr.onload = () => {
+      let data = null;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        /* not JSON */
+      }
+      if (xhr.status === 401) set({ unauthorized: true });
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new Error((data && data.error) || `Upload failed (${xhr.status})`));
+    };
+    xhr.onerror = () => reject(new Error(`Network error uploading ${file.name}`));
+    xhr.onabort = () => reject(Object.assign(new Error('Upload cancelled'), { aborted: true }));
+    o.signal?.addEventListener('abort', () => xhr.abort());
+    xhr.send(file);
+  });
+}
 
 /** @param {URLSearchParams | Record<string,string>} q */
 export function terminalUrl(q) {
@@ -236,11 +270,15 @@ function onMessage(m) {
 let retry = 0;
 /** @type {ReturnType<typeof setTimeout>|undefined} */
 let timer;
+/** @type {ReturnType<typeof setTimeout>|undefined} */
+let probe;
+
 export function connect() {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${scheme}//${location.host}/api/ws`);
   socket = ws;
   ws.onopen = () => {
+    if (socket !== ws) return;
     retry = 0;
     set({ connected: true });
     sendWatch();
@@ -249,6 +287,10 @@ export function connect() {
     window.dispatchEvent(new Event('bench:reconnected'));
   };
   ws.onmessage = (e) => {
+    if (socket !== ws) return;
+    // Anything heard means the line is alive.
+    clearTimeout(probe);
+    probe = undefined;
     try {
       onMessage(JSON.parse(e.data));
     } catch {
@@ -257,11 +299,36 @@ export function connect() {
   };
   ws.onclose = () => {
     if (socket !== ws) return;
+    clearTimeout(probe);
+    probe = undefined;
     set({ connected: false });
     if (state.unauthorized) return;
     retry = Math.min(retry + 1, 4);
     timer = setTimeout(connect, 500 * 2 ** retry);
   };
+}
+
+/**
+ * Drops the current socket and opens a new one now. A socket on a dead line can sit in
+ * "closing" for a minute before the browser gives up on it, so it is not waited for.
+ */
+function replace() {
+  const old = socket;
+  socket = null;
+  clearTimeout(timer);
+  clearTimeout(probe);
+  probe = undefined;
+  if (old) {
+    old.onopen = old.onmessage = old.onclose = null;
+    try {
+      old.close();
+    } catch {
+      /* already gone */
+    }
+  }
+  set({ connected: false });
+  retry = 0;
+  connect();
 }
 
 /** Reconnects now rather than at the next backoff, when the server is known to be back. */
@@ -272,10 +339,33 @@ export function reconnectNow() {
   connect();
 }
 
-// A phone that wakes from sleep has a socket that died silently; a ping finds out.
-setInterval(() => {
-  if (socket?.readyState === 1) socket.send(JSON.stringify({ type: 'ping' }));
-}, 25000);
+/**
+ * Asks the server for a pong. A socket that looks open but has died silently (a phone
+ * that slept, a network that changed, a proxy that dropped it) never answers, and is
+ * replaced, rather than leaving the page showing a state that has stopped updating.
+ * @param {number} wait ms to wait for any reply
+ */
+function checkAlive(wait) {
+  if (!socket || socket.readyState === 3) return reconnectNow();
+  if (socket.readyState !== 1) return; // still connecting
+  if (probe) return;
+  try {
+    socket.send(JSON.stringify({ type: 'ping' }));
+  } catch {
+    return replace();
+  }
+  probe = setTimeout(() => {
+    probe = undefined;
+    replace();
+  }, wait);
+}
+
+setInterval(() => checkAlive(10000), 20000);
+// On coming back to the page, find out at once rather than at the next round.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') reconnectNow();
+  if (document.visibilityState === 'visible') checkAlive(4000);
+});
+window.addEventListener('online', () => checkAlive(4000));
+window.addEventListener('pageshow', (e) => {
+  if (/** @type {PageTransitionEvent} */ (e).persisted) replace();
 });

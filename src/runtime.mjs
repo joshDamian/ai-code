@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { cleanEnv, providerEnv, invocationId, priceUsage } from './providers.mjs';
 
@@ -31,8 +33,14 @@ const IDLE_MS = 30 * 60 * 1000;
 // huge one is cut to what a person would read.
 const RESULT_CHARS = 20000;
 // Attached files: per file, and per message.
-const MAX_FILE = 20 * 1024 * 1024;
-const MAX_FILES = 40 * 1024 * 1024;
+const MAX_FILE = 60 * 1024 * 1024;
+const MAX_FILES = 60 * 1024 * 1024;
+// A file uploaded on its own, streamed to disk rather than sent inside a JSON message:
+// an APK, an archive, a build. Big enough for those, small enough to keep a disk sane.
+export const MAX_UPLOAD = 300 * 1024 * 1024;
+
+/** A file name that is safe on disk: no path, no odd characters. @param {unknown} name */
+const safeName = (name) => path.basename(String(name || 'file')).replace(/[^\w.\- ]+/g, '_').slice(-120) || 'file';
 
 export const MODES = /** @type {const} */ (['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']);
 
@@ -183,7 +191,7 @@ export class Runtime extends EventEmitter {
       if (bytes.length > MAX_FILE) throw Object.assign(new Error(`${f.name} is over ${MAX_FILE / 1024 / 1024} MB`), { status: 413 });
       total += bytes.length;
       if (total > MAX_FILES) throw Object.assign(new Error(`Attachments over ${MAX_FILES / 1024 / 1024} MB in one message`), { status: 413 });
-      const safe = path.basename(String(f.name || 'file')).replace(/[^\w.\- ]+/g, '_').slice(-120) || 'file';
+      const safe = safeName(f.name);
       const file = path.join(dir, `${Date.now().toString(36)}-${safe}`);
       fs.writeFileSync(file, bytes);
       return { name: safe, path: file, size: bytes.length, type: f.media_type || '' };
@@ -191,19 +199,71 @@ export class Runtime extends EventEmitter {
   }
 
   /**
+   * Streams one uploaded file into the session's attachments folder. The message that
+   * names it comes later, in send()'s `uploads`, by the `file` returned here.
+   * @param {string} id @param {string} name @param {string} type @param {NodeJS.ReadableStream} body
+   * @returns {Promise<{file:string, name:string, size:number, type:string}>}
+   */
+  async receiveFile(id, name, type, body) {
+    const s = this.#session(id);
+    if (s.archived_at) throw Object.assign(new Error('This session is archived'), { status: 409 });
+    const dir = this.attachmentsDir(id);
+    fs.mkdirSync(dir, { recursive: true });
+    const safe = safeName(name);
+    const file = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}-${safe}`;
+    const full = path.join(dir, file);
+    let size = 0;
+    const limit = new Transform({
+      transform(chunk, _enc, done) {
+        size += chunk.length;
+        if (size > MAX_UPLOAD) done(Object.assign(new Error(`${safe} is over ${MAX_UPLOAD / 1024 / 1024} MB`), { status: 413 }));
+        else done(null, chunk);
+      },
+    });
+    try {
+      await pipeline(body, limit, fs.createWriteStream(full));
+    } catch (e) {
+      fs.rmSync(full, { force: true });
+      throw e;
+    }
+    if (!size) {
+      fs.rmSync(full, { force: true });
+      throw Object.assign(new Error(`${safe} is empty`), { status: 400 });
+    }
+    return { file, name: safe, size, type: String(type || '').slice(0, 120) };
+  }
+
+  /**
+   * Files received by receiveFile(), named by the `file` it returned. Only names in the
+   * session's own attachments folder are accepted.
+   * @param {string} id @param {{file:string, type?:string}[]} uploads
+   */
+  #uploaded(id, uploads) {
+    const dir = this.attachmentsDir(id);
+    return uploads.map((u) => {
+      const file = String(u?.file || '');
+      const full = path.join(dir, file);
+      if (!file || path.basename(file) !== file || !fs.existsSync(full)) throw Object.assign(new Error('An attached file is missing; attach it again'), { status: 400 });
+      return { name: file.replace(/^[a-z0-9]+-[a-z0-9]{1,4}-/, ''), path: full, size: fs.statSync(full).size, type: String(u.type || '') };
+    });
+  }
+
+  /**
    * One message from the person. Starts or resumes the session's query when none is open.
    * Images go inline; any other file is saved and named in the message.
    * @param {string} id @param {string} text
-   * @param {{images?: {media_type:string, data:string}[], files?: {name:string, media_type?:string, data:string}[]}} [o]
+   * @param {{images?: {media_type:string, data:string}[], files?: {name:string, media_type?:string, data:string}[], uploads?: {file:string, type?:string}[]}} [o]
    */
   send(id, text, o = {}) {
     const s = this.#session(id);
     if (s.archived_at) throw new Error('This session is archived');
     const images = o.images || [];
-    const saved = o.files?.length ? this.#saveFiles(id, o.files) : [];
+    const saved = [...(o.uploads?.length ? this.#uploaded(id, o.uploads) : []), ...(o.files?.length ? this.#saveFiles(id, o.files) : [])];
     if (!text.trim() && !images.length && !saved.length) throw new Error('Nothing to send');
     const note = saved.length ? `\n\nAttached file${saved.length === 1 ? '' : 's'} (read ${saved.length === 1 ? 'it' : 'them'} as needed):\n${saved.map((f) => `- ${f.path}`).join('\n')}` : '';
-    const body = `${text}${note}`.trim();
+    const archive = saved.some((f) => /\.(apk|aab|apks|xapk|ipa|jar|aar|zip)$/i.test(f.name));
+    const hint = archive ? '\n(An .apk, .aab, .ipa, .jar or .zip is a zip archive: inspect it with Bash - unzip -l, unzip -p, aapt or apkanalyzer where installed - rather than Read.)' : '';
+    const body = `${text}${note}${hint}`.trim();
     const live = this.live.get(id) || this.#start(s);
     /** @type {any[]} */
     const content = [...images.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } })), ...(body ? [{ type: 'text', text: body }] : [])];
