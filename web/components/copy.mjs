@@ -11,9 +11,29 @@ export async function copyText(text) {
     await navigator.clipboard.writeText(text);
     return true;
   } catch {
+    // The clipboard API exists only on HTTPS and localhost. A page reached over plain
+    // HTTP still has the older selection-based copy.
+    if (legacyCopy(text)) return true;
     showToast('This browser did not allow copying to the clipboard.', 'error');
     return false;
   }
+}
+
+function legacyCopy(text) {
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  area.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+  document.body.appendChild(area);
+  area.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch {
+    ok = false;
+  }
+  area.remove();
+  return ok;
 }
 
 // How long a button reads "Copied" before it goes back to "Copy".

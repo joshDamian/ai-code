@@ -3,6 +3,7 @@ import { html, useEffect, useMemo, useRef, useState, recall, remember, isTouch, 
 import { api, useStore, watchSession } from '../api.mjs';
 import { Markdown } from '../components/markdown.mjs';
 import { MoreMenu } from '../components/menu.mjs';
+import { CopyButton } from '../components/copy.mjs';
 import { showToast } from '../components/toast.mjs';
 import { confirmAction } from '../components/confirm.mjs';
 import { TerminalPane } from '../components/terminal.mjs';
@@ -159,10 +160,30 @@ function Transcript({ events }) {
     for (const e of events) if (e.kind === 'tool_result') for (const r of e.data.results) m.set(r.tool_use_id, r);
     return m;
   }, [events]);
-  return events.map((e) => html`<${Entry} key=${e.id} event=${e} results=${results} />`);
+  // What each turn said, keyed by its result event: the top-level assistant text since
+  // the person's last message, which is what a Copy button at the turn's end copies.
+  // Tool calls and subagents' text are left out; the reply is what Claude told you.
+  const replies = useMemo(() => {
+    const m = new Map();
+    let parts = [];
+    for (const e of events) {
+      if (e.kind === 'user') {
+        parts = [];
+      } else if (e.kind === 'assistant' && !e.data.parent) {
+        for (const b of e.data.content || []) {
+          if (b.type === 'text' && b.text.trim()) parts.push(b.text.trim());
+        }
+      } else if (e.kind === 'result') {
+        m.set(e.id, parts.join('\n\n'));
+        parts = [];
+      }
+    }
+    return m;
+  }, [events]);
+  return events.map((e) => html`<${Entry} key=${e.id} event=${e} results=${results} reply=${replies.get(e.id)} />`);
 }
 
-function Entry({ event: e, results }) {
+function Entry({ event: e, results, reply }) {
   const d = e.data;
   if (e.kind === 'user') {
     return html`<div class="msg user"><div class="bubble">
@@ -190,7 +211,10 @@ function Entry({ event: e, results }) {
     `;
   }
   if (e.kind === 'result') {
-    return html`<div class="turn-end ${d.is_error ? 'bad' : ''}">${d.is_error ? (d.subtype === 'error_during_execution' ? 'Stopped' : `Failed${d.text ? `: ${d.text}` : ''}`) : 'Done'}${d.duration_ms ? ` · ${formatDuration(d.duration_ms)}` : ''}</div>`;
+    return html`<div class="turn-end ${d.is_error ? 'bad' : ''}">
+      ${reply ? html`<${CopyButton} text=${reply} label="Copy" className="turn-copy" />` : null}
+      <span>${d.is_error ? (d.subtype === 'error_during_execution' ? 'Stopped' : `Failed${d.text ? `: ${d.text}` : ''}`) : 'Done'}${d.duration_ms ? ` · ${formatDuration(d.duration_ms)}` : ''}</span>
+    </div>`;
   }
   if (e.kind === 'init') return html`<div class="sys-line">Claude Code ${d.version || ''} · ${d.model} · ${MODES.find((m) => m.value === d.permissionMode)?.label || d.permissionMode}</div>`;
   if (e.kind === 'notice') return html`<div class="sys-line">${d.text}</div>`;
