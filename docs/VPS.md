@@ -39,11 +39,16 @@ npm install -g @anthropic-ai/claude-code
 claude          # then /login, follow the link, then /exit
 ```
 
-Bench's sessions use this login. If you use DeepSeek, OpenRouter or Fireworks instead or as well, export their keys in `~/.bashrc` **before** step 4, so the service picks them up:
+Bench's sessions use this login. If you use DeepSeek, OpenRouter or Fireworks instead or as well, put their keys in `~/.bench/env`, one `KEY=value` per line. The server reads that file itself when it starts, however it was started:
 
 ```bash
-echo 'export DEEPSEEK_API_KEY=sk-...' >> ~/.bashrc && source ~/.bashrc
+mkdir -p ~/.bench && touch ~/.bench/env && chmod 600 ~/.bench/env
+echo 'DEEPSEEK_API_KEY=sk-...' >> ~/.bench/env
+echo 'OPENROUTER_API_KEY=sk-or-...' >> ~/.bench/env
+echo 'FIREWORKS_API_KEY=fw_...' >> ~/.bench/env
 ```
+
+Don't rely on `~/.bashrc` for them. Ubuntu's `~/.bashrc` stops at the top for any non-interactive shell, and systemd reads no shell profile at all, so the service never sees keys exported there. After changing the file, restart the server: `systemctl --user restart bench`, or **Settings → Server → Restart server**.
 
 Set up git and GitHub so tasks can commit, push and open pull requests:
 
@@ -153,6 +158,6 @@ bin/install --service
 | The pairing link has no address | Run `bench share`, and check MagicDNS and HTTPS are on in the Tailscale console |
 | The phone can't reach the link | Is Tailscale connected on the phone? Does `tailscale serve status` show port 443? |
 | Terminals don't open | `bench doctor` reports the terminal. Install `build-essential python3`, then re-run `bin/install --service` |
-| A hosted provider says its key is missing | Export the key in `~/.bashrc`, then re-run `bin/install --service`, which copies it into the service |
+| A hosted provider says its key is missing | Add the key to `~/.bench/env` (`DEEPSEEK_API_KEY=...`), then `systemctl --user restart bench` |
 | The service stops when you log out | `sudo loginctl enable-linger $USER` |
 | `bin/install --service` fails with `Failed to connect to user scope bus` | The user manager isn't running. `sudo loginctl enable-linger $USER`, `export XDG_RUNTIME_DIR="/run/user/$(id -u)"`, then re-run |

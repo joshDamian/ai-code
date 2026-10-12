@@ -1,4 +1,5 @@
 // @ts-check
+import { env, envFile } from './env.mjs';
 // Providers: where a Claude session's API calls go, and what each one is billed at.
 //
 // A provider is an environment profile for the Claude Code binary the Agent SDK runs.
@@ -43,6 +44,9 @@ export function cleanEnv(base = process.env) {
   return env;
 }
 
+/** Where a missing key should go: the env file in the data folder. @param {string} keyEnv */
+const whereKeysGo = (keyEnv) => `Add ${keyEnv}=... to ${envFile(env('ROOT') || process.cwd())}, then restart the server.`;
+
 /**
  * The variables that send a session to its provider, on top of cleanEnv().
  * @param {import('./contract.mjs').Provider} provider
@@ -53,7 +57,7 @@ export function providerEnv(provider, model) {
   if (!hosted) return { BENCH_PROVIDER: provider.id };
   const keyEnv = provider.config.apiKeyEnv || hosted.keyEnv;
   const key = process.env[keyEnv];
-  if (!key) throw Object.assign(new Error(`Missing ${keyEnv} for the ${hosted.label} provider`), { code: 'AUTH_FAILURE' });
+  if (!key) throw Object.assign(new Error(`Missing ${keyEnv} for the ${hosted.label} provider. ${whereKeysGo(keyEnv)}`), { code: 'AUTH_FAILURE' });
   const mid = model ? invocationId(model) : undefined;
   return {
     BENCH_PROVIDER: provider.id,
@@ -86,7 +90,7 @@ export function providerReady(p) {
   const hosted = HOSTED[/** @type {keyof typeof HOSTED} */ (p.kind)];
   if (!hosted) return p.kind === 'claude-code' ? { ready: true, reason: null } : { ready: false, reason: `Unknown kind ${p.kind}` };
   const keyEnv = p.config.apiKeyEnv || hosted.keyEnv;
-  return process.env[keyEnv] ? { ready: true, reason: null } : { ready: false, reason: `Set ${keyEnv} in the server's environment` };
+  return process.env[keyEnv] ? { ready: true, reason: null } : { ready: false, reason: whereKeysGo(keyEnv) };
 }
 
 // The model catalogs. `quality`, `speed` and `capabilities` are left from the routing

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { env } from './env.mjs';
+import { env, envFile, loadEnvFile, addToEnvFile, PROVIDER_KEYS } from './env.mjs';
 
 // The command line. Most of the tool lives in the browser; this starts the server,
 // registers projects, pairs devices and installs the service.
@@ -14,6 +14,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(here, '..');
 const port = Number(process.env.PORT || 4317);
 const dataRoot = env('ROOT') || process.cwd();
+loadEnvFile(dataRoot);
 
 const HELP = `bench - a workbench for Claude sessions
 
@@ -72,6 +73,51 @@ const unit = path.join(os.homedir(), '.config', 'systemd', 'user', 'bench.servic
 /** @param {string} s */
 const xml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
+/**
+ * Provider keys live in the data folder's env file, which the server reads itself, not
+ * in the service definition: that was written from whatever shell ran the install, and
+ * a reinstall from a shell without them (a script, cron, systemd-run, a bash that
+ * returned early from ~/.bashrc) silently dropped them. Keys found in this shell or in
+ * the service being replaced are moved into the file, so none is lost.
+ */
+function keepProviderKeys() {
+  /** @type {Record<string, string>} */
+  const found = {};
+  const old = serviceDefinitionVars();
+  for (const k of PROVIDER_KEYS) {
+    const v = process.env[k] || old[k];
+    if (v) found[k] = String(v);
+  }
+  const added = addToEnvFile(dataRoot, found);
+  if (added.length) console.log(`Saved ${added.join(', ')} to ${envFile(dataRoot)}`);
+  const have = PROVIDER_KEYS.filter((k) => process.env[k] || found[k]);
+  console.log(have.length ? `Provider keys: ${have.join(', ')} (from ${envFile(dataRoot)})` : `No provider API keys found. To use DeepSeek, OpenRouter or Fireworks, add e.g. DEEPSEEK_API_KEY=... to ${envFile(dataRoot)} and restart the server.`);
+}
+
+/** The variables in the service definition already installed, if any. @returns {Record<string, string>} */
+function serviceDefinitionVars() {
+  /** @type {Record<string, string>} */
+  const out = {};
+  try {
+    if (process.platform === 'darwin') {
+      const text = fs.readFileSync(plist, 'utf8');
+      const dict = /<key>EnvironmentVariables<\/key><dict>(.*?)<\/dict>/s.exec(text)?.[1] || '';
+      for (const m of dict.matchAll(/<key>([^<]+)<\/key><string>([^<]*)<\/string>/g)) out[m[1]] = m[2].replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+    } else {
+      for (const line of fs.readFileSync(unit, 'utf8').split('\n')) {
+        const m = /^Environment=(".*")$/.exec(line);
+        if (!m) continue;
+        const kv = JSON.parse(m[1]);
+        const i = kv.indexOf('=');
+        if (i > 0) out[kv.slice(0, i)] = kv.slice(i + 1);
+      }
+    }
+  } catch {
+    /* none installed */
+  }
+  return out;
+}
+
 function serviceInstall() {
   const node = process.execPath;
   const server = path.join(appRoot, 'src', 'server.mjs');
@@ -81,7 +127,7 @@ function serviceInstall() {
   // BENCH_SERVICE tells the server a service manager will restart it, which is what
   // makes the Restart button in Settings safe to offer.
   const vars = { BENCH_ROOT: dataRoot, PORT: String(port), PATH: process.env.PATH || '/usr/bin:/bin', BENCH_SERVICE: process.platform === 'darwin' ? 'launchd' : 'systemd' };
-  for (const k of ['DEEPSEEK_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY']) if (process.env[k]) vars[k] = String(process.env[k]);
+  keepProviderKeys();
   const publicUrl = env('PUBLIC_URL');
   if (publicUrl) vars.BENCH_PUBLIC_URL = publicUrl;
   if (process.platform === 'darwin') {

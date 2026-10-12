@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Service } from '../src/service.mjs';
 import { Store } from '../src/store.mjs';
 import { titleFrom } from '../src/runtime.mjs';
+import { parseEnv, loadEnvFile, addToEnvFile, readEnvFile, envFile } from '../src/env.mjs';
 import { fakeQuery, calls } from './fake-sdk.mjs';
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -396,4 +397,26 @@ test('a project can be cloned or created into the projects folder, or anywhere c
   assert.equal(odd.path, fs.realpathSync(path.join(home, 'bench-projects', 'escape')));
   assert.ok(!fs.existsSync(path.join(home, 'escape')));
   svc.shutdown();
+});
+
+test('provider keys are kept in the data folder env file, which the shell environment outranks', () => {
+  assert.deepEqual(parseEnv(`# keys\nexport A='x y'\nB="q\\"z"\nC=plain # note\n\nnot a line\n`), { A: 'x y', B: 'q"z', C: 'plain' });
+
+  const root = tmp('envroot');
+  assert.deepEqual(readEnvFile(root), {}, 'no file is no keys');
+  assert.deepEqual(addToEnvFile(root, { BENCH_T_ONE: 'sk-1', BENCH_T_TWO: 'has "quotes" $x', BENCH_T_EMPTY: '' }), ['BENCH_T_ONE', 'BENCH_T_TWO']);
+  assert.deepEqual(addToEnvFile(root, { BENCH_T_ONE: 'changed' }), [], 'a key already in the file is left alone');
+  assert.equal(fs.statSync(envFile(root)).mode & 0o777, 0o600);
+  assert.deepEqual(readEnvFile(root), { BENCH_T_ONE: 'sk-1', BENCH_T_TWO: 'has "quotes" $x' });
+
+  process.env.BENCH_T_ONE = 'from-shell';
+  delete process.env.BENCH_T_TWO;
+  try {
+    assert.deepEqual(loadEnvFile(root), ['BENCH_T_TWO']);
+    assert.equal(process.env.BENCH_T_ONE, 'from-shell');
+    assert.equal(process.env.BENCH_T_TWO, 'has "quotes" $x');
+  } finally {
+    delete process.env.BENCH_T_ONE;
+    delete process.env.BENCH_T_TWO;
+  }
 });

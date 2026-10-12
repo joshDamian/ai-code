@@ -51,7 +51,7 @@ Or choose **Settings → Pair a device**. A paired device gets its own cookie. Y
 
 Under the service, **Settings → Server → Restart server** restarts it from any paired device: the server exits and the service manager starts a fresh one. Without the service the button is not offered, because nothing would start the server again.
 
-Hosted-provider keys (`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `FIREWORKS_API_KEY`) are read from the server's environment. `bench service install` copies them, with your PATH, into the service definition.
+Hosted-provider keys (`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `FIREWORKS_API_KEY`) go in `~/.bench/env`, one `KEY=value` per line, which the server reads at startup however it was started. A key already in the server's environment (exported in `~/.zshenv`, say) takes precedence. `bench service install` moves any keys it finds in your shell, or in the service it replaces, into that file, and copies your PATH into the service definition.
 
 ## Commands
 

@@ -68,7 +68,7 @@ function Providers() {
   return html`
     <section class="section card">
       <h2>Providers</h2>
-      <p class="muted">Where a session's API calls go. A hosted provider reads its key from the server's environment.</p>
+      <p class="muted">Where a session's API calls go. A hosted provider reads its key from the <code>env</code> file in Bench's data folder (<code>~/.bench/env</code> by default), or the server's environment.</p>
       <div class="list">
         ${providers.map(
           (p) => html`

@@ -10,7 +10,7 @@ import QRCode from 'qrcode';
 import { Service } from './service.mjs';
 import { TerminalSessions } from './terminal.mjs';
 import { providerEnv } from './providers.mjs';
-import { env } from './env.mjs';
+import { env, loadEnvFile } from './env.mjs';
 import { MODES, MAX_UPLOAD } from './runtime.mjs';
 
 /** @typedef {import('./contract.mjs').ServerMessage} ServerMessage */
@@ -24,6 +24,8 @@ import { MODES, MAX_UPLOAD } from './runtime.mjs';
 // loopback but keeps the tailnet hostname in Host, so a phone always presents a token.
 
 const root = env('ROOT') || process.cwd();
+// Provider keys kept in the data folder's env file: read before anything looks for them.
+loadEnvFile(root);
 const port = Number(process.env.PORT ?? 4317);
 const host = env('HOST') || '127.0.0.1';
 const loopbackBind = /^(localhost|127\.\d+\.\d+\.\d+|::1)$/.test(host);
