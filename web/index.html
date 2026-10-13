@@ -29,6 +29,15 @@
 </script>
 <link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
 <link rel="stylesheet" href="/app.css" />
+<link rel="stylesheet" href="/themes.css" />
+<!-- The theme is applied here, before the first paint, so a reload never flashes the
+     Classic look first. theme.mjs is what changes it; this only reads the choice. -->
+<script>
+  try {
+    var theme = JSON.parse(localStorage.getItem('bench:theme') || 'null');
+    if (theme && theme !== 'classic') document.documentElement.dataset.theme = theme;
+  } catch (e) {}
+</script>
 </head>
 <body>
 <div id="app"></div>

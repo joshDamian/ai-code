@@ -7,13 +7,14 @@ import { Toggle } from '../components/form.mjs';
 import { Time } from '../components/time.mjs';
 import { ModelPicker, ModePicker, EffortPicker } from '../components/ui.mjs';
 import { useInstall } from '../install.mjs';
+import { ThemeTrigger } from '../components/theme-picker.mjs';
 
 const toast = (e) => showToast(e.message || String(e), 'error');
 
 export function Settings() {
   return html`
     <div class="page settings">
-      <header class="page-header"><h1>Settings</h1></header>
+      <header class="page-header"><h1>Settings</h1><${ThemeTrigger} align="end" /></header>
       <${InstallApp} />
       <${Defaults} />
       <${Providers} />

@@ -1,0 +1,113 @@
+/* ---- themes ----
+   Ten looks, each adapted from a palette in the "Atmosphere" picker at
+   blog.timi.click and chosen from the picker in the sidebar. A theme is a block of
+   tokens on :root[data-theme]; with no attribute the app is the Classic look that
+   app.css declares, so these only ever override.
+
+   What is kept from each original: its page, card, ink, accent and code colours, its
+   corner radius and its title treatment. What is not: its display fonts, which
+   would have to be bundled and would fight a dense tool UI - titles use a stack of
+   faces devices already have instead.
+
+   Every text and status colour here was checked against every surface it can sit on
+   (page, rail, and the four surface steps): ink at 7:1 or better, and secondary ink,
+   accent and the four tones at 4.5:1 or better. Where an original fell short it was
+   moved towards black (light themes) or white (dark themes) only as far as passing
+   needed. tests/themes.test.mjs holds every theme to that, so a new one cannot ship
+   unreadable.
+
+   Code, diffs' syntax and the terminal draw on --well-bg: dark in every theme, as on
+   the original pages, because tool output should read as tool output. */
+
+/* Cool off-white and slate. The quietest of the light themes. */
+:root[data-theme="quiet-temple"]{
+  color-scheme:light;--bg:#f7f8fb;--text:#1f2228;--muted:#696e7d;--accent:#5a6882;--accent-dim:#a4acba;--on-accent:#ffffff;
+  --surface-sunken:#eff1f4;--surface-0:#fbfcfd;--surface-1:#ffffff;--surface-2:#f5f5f5;--surface-3:#ffffff;--surface-rail:#f2f3f6;--line:#e1e3e8;--line-strong:#cdd0d9;
+  --wash:rgba(31,34,40,0.035);--scrim:rgba(31,34,40,0.3);--shadow-1:0 1px 2px rgba(31,34,40,0.05);--shadow-2:0 8px 24px rgba(31,34,40,0.12);--shadow-3:0 24px 64px rgba(31,34,40,0.18);
+  --good:#1d7a4a;--good-bg:rgba(29,122,74,0.09);--good-line:#a9ccba;--warn:#8a5d00;--warn-bg:rgba(138,93,0,0.09);--warn-line:#d3c19e;--bad:#b3362c;--bad-bg:rgba(179,54,44,0.09);--bad-line:#e2b3af;--info:#5a6882;--info-bg:rgba(90,104,130,0.09);--info-line:#c0c6d0;
+  --radius:10px;--radius-sm:6px;--font-title:"Iowan Old Style","Charter","Source Serif 4","Noto Serif",Georgia,serif;--title-transform:none;--title-spacing:-.005em;--well-bg:#1e2130;--well-text:#e9e9ea;--dot-idle:#adafb8;--theme-color:#f2f3f6;
+}
+/* Pale sea-blue and teal, generous corners. */
+:root[data-theme="coastal"]{
+  color-scheme:light;--bg:#e9f6fb;--text:#103042;--muted:#4f6f7b;--accent:#0e7398;--accent-dim:#78b1c6;--on-accent:#ffffff;
+  --surface-sunken:#e1eff5;--surface-0:#f1fafd;--surface-1:#f9fdff;--surface-2:#eff4f6;--surface-3:#fdfeff;--surface-rail:#e4f1f6;--line:#d3e7f1;--line-strong:#b9d9e8;
+  --wash:rgba(16,48,66,0.035);--scrim:rgba(16,48,66,0.3);--shadow-1:0 1px 2px rgba(16,48,66,0.05);--shadow-2:0 8px 24px rgba(16,48,66,0.12);--shadow-3:0 24px 64px rgba(16,48,66,0.18);
+  --good:#1d7a4a;--good-bg:rgba(29,122,74,0.09);--good-line:#a5cbba;--warn:#8a5d00;--warn-bg:rgba(138,93,0,0.09);--warn-line:#cfc09e;--bad:#b3362c;--bad-bg:rgba(179,54,44,0.09);--bad-line:#deb1af;--info:#0e7398;--info-bg:rgba(14,115,152,0.09);--info-line:#a0c9d8;
+  --radius:14px;--radius-sm:8px;--font-title:"Iowan Old Style","Charter","Source Serif 4","Noto Serif",Georgia,serif;--title-transform:none;--title-spacing:-.005em;--well-bg:#13354a;--well-text:#e7ebed;--dot-idle:#9cafb6;--theme-color:#e4f1f6;
+}
+/* Warm paper and blue ink. */
+:root[data-theme="notebook"]{
+  color-scheme:light;--bg:#fbf6ea;--text:#2a2a2a;--muted:#645f52;--accent:#2f6bb2;--accent-dim:#8dadd1;--on-accent:#ffffff;
+  --surface-sunken:#f4efe3;--surface-0:#fdfaf1;--surface-1:#fffdf7;--surface-2:#f5f4ee;--surface-3:#fffefc;--surface-rail:#f6f1e5;--line:#e8e2d4;--line-strong:#d8d0bd;
+  --wash:rgba(42,42,42,0.035);--scrim:rgba(42,42,42,0.3);--shadow-1:0 1px 2px rgba(42,42,42,0.05);--shadow-2:0 8px 24px rgba(42,42,42,0.12);--shadow-3:0 24px 64px rgba(42,42,42,0.18);
+  --good:#1d7a4a;--good-bg:rgba(29,122,74,0.09);--good-line:#a9cbb5;--warn:#8a5d00;--warn-bg:rgba(138,93,0,0.09);--warn-line:#d3c099;--bad:#b3362c;--bad-bg:rgba(179,54,44,0.09);--bad-line:#e2b1aa;--info:#2f6bb2;--info-bg:rgba(47,107,178,0.09);--info-line:#b0c6dd;
+  --radius:8px;--radius-sm:5px;--font-title:"Iowan Old Style","Charter","Source Serif 4","Noto Serif",Georgia,serif;--title-transform:none;--title-spacing:-.005em;--well-bg:#1f2530;--well-text:#e9e9ea;--dot-idle:#aaa69c;--theme-color:#f6f1e5;
+}
+/* Cream and forest green. */
+:root[data-theme="garden"]{
+  color-scheme:light;--bg:#f1efe4;--text:#1e2c22;--muted:#4a5e50;--accent:#2f5a42;--accent-dim:#8ca291;--on-accent:#ffffff;
+  --surface-sunken:#eae8dd;--surface-0:#f7f5eb;--surface-1:#fdfbf2;--surface-2:#f3f2e9;--surface-3:#fefdfa;--surface-rail:#eceadf;--line:#d2cdbb;--line-strong:#b5af96;
+  --wash:rgba(30,44,34,0.035);--scrim:rgba(30,44,34,0.3);--shadow-1:0 1px 2px rgba(30,44,34,0.05);--shadow-2:0 8px 24px rgba(30,44,34,0.12);--shadow-3:0 24px 64px rgba(30,44,34,0.18);
+  --good:#1c7849;--good-bg:rgba(28,120,73,0.09);--good-line:#a8c9b2;--warn:#8a5d00;--warn-bg:rgba(138,93,0,0.09);--warn-line:#d1bf96;--bad:#b3362c;--bad-bg:rgba(179,54,44,0.09);--bad-line:#e1b0a7;--info:#2f5a42;--info-bg:rgba(47,90,66,0.09);--info-line:#afbeaf;
+  --radius:14px;--radius-sm:8px;--font-title:"Iowan Old Style","Charter","Source Serif 4","Noto Serif",Georgia,serif;--title-transform:none;--title-spacing:-.005em;--well-bg:#1b2a20;--well-text:#e8eae9;--dot-idle:#9ba599;--theme-color:#eceadf;
+}
+/* Mint and leaf green. Its green is deepened from the original to read as text. */
+:root[data-theme="solarpunk"]{
+  color-scheme:light;--bg:#edf7e8;--text:#223321;--muted:#547152;--accent:#257a4a;--accent-dim:#84b697;--on-accent:#ffffff;
+  --surface-sunken:#e6f0e1;--surface-0:#f3fbef;--surface-1:#f8fff5;--surface-2:#eef6eb;--surface-3:#fcfffb;--surface-rail:#e8f2e3;--line:#d4e6cf;--line-strong:#bcd6b5;
+  --wash:rgba(34,51,33,0.035);--scrim:rgba(34,51,33,0.3);--shadow-1:0 1px 2px rgba(34,51,33,0.05);--shadow-2:0 8px 24px rgba(34,51,33,0.12);--shadow-3:0 24px 64px rgba(34,51,33,0.18);
+  --good:#1d7a4a;--good-bg:rgba(29,122,74,0.09);--good-line:#a5ccb4;--warn:#8a5d00;--warn-bg:rgba(138,93,0,0.09);--warn-line:#cec198;--bad:#b3362c;--bad-bg:rgba(179,54,44,0.09);--bad-line:#deb3a9;--info:#257a4a;--info-bg:rgba(37,122,74,0.09);--info-line:#a8ccb4;
+  --radius:13px;--radius-sm:8px;--font-title:var(--font-ui);--title-transform:none;--title-spacing:-.005em;--well-bg:#1a2a1b;--well-text:#e8eae8;--dot-idle:#9eb19b;--theme-color:#e8f2e3;
+}
+/* Near-black page, slate glass cards, bright cyan. */
+:root[data-theme="chrome"]{
+  color-scheme:dark;--bg:#07090f;--text:#e9efff;--muted:#acb4cd;--accent:#6ee7ff;--accent-dim:#5195a7;--on-accent:#05060b;
+  --surface-sunken:#05070b;--surface-0:#1a1d26;--surface-1:#2d313c;--surface-2:#383c48;--surface-3:#424651;--surface-rail:#12151d;--line:#444853;--line-strong:#373c4b;
+  --wash:rgba(255,255,255,.03);--scrim:rgba(0,0,0,.55);--shadow-1:0 1px 2px rgba(0,0,0,.3);--shadow-2:0 8px 24px rgba(0,0,0,.4);--shadow-3:0 24px 64px rgba(0,0,0,.5);
+  --good:#74d69c;--good-bg:rgba(116,214,156,0.11);--good-line:#497362;--warn:#f0c470;--warn-bg:rgba(240,196,112,0.11);--warn-line:#7b6c51;--bad:#f49e96;--bad-bg:rgba(244,158,150,0.11);--bad-line:#7d5d60;--info:#6ee7ff;--info-bg:rgba(110,231,255,0.11);--info-line:#477a8a;
+  --radius:14px;--radius-sm:8px;--font-title:var(--font-ui);--title-transform:none;--title-spacing:-.005em;--well-bg:#0c111d;--well-text:#e7e7e8;--dot-idle:#373c4b;--theme-color:#12151d;
+}
+/* Deep navy, aqua lines, mono titles in capitals. */
+:root[data-theme="neon-grid"]{
+  color-scheme:dark;--bg:#050812;--text:#d9f7ff;--muted:#8eb9c6;--accent:#2afadf;--accent-dim:#1d928c;--on-accent:#04060d;
+  --surface-sunken:#04060e;--surface-0:#090e1c;--surface-1:#0c1326;--surface-2:#182133;--surface-3:#232c3e;--surface-rail:#070b18;--line:#13464f;--line-strong:#197474;
+  --wash:rgba(255,255,255,.03);--scrim:rgba(0,0,0,.55);--shadow-1:0 1px 2px rgba(0,0,0,.3);--shadow-2:0 8px 24px rgba(0,0,0,.4);--shadow-3:0 24px 64px rgba(0,0,0,.5);
+  --good:#74d69c;--good-bg:rgba(116,214,156,0.11);--good-line:#366155;--warn:#f0c470;--warn-bg:rgba(240,196,112,0.11);--warn-line:#675a44;--bad:#f28b82;--bad-bg:rgba(242,139,130,0.11);--bad-line:#68434b;--info:#2afadf;--info-bg:rgba(42,250,223,0.11);--info-line:#186f70;
+  --radius:10px;--radius-sm:6px;--font-title:var(--font-mono);--title-transform:uppercase;--title-spacing:.05em;--well-bg:#070c19;--well-text:#e6e7e8;--dot-idle:#197474;--theme-color:#070b18;
+}
+/* Black and gold, spaced serif capitals. */
+:root[data-theme="deco-noir"]{
+  color-scheme:dark;--bg:#0e0e11;--text:#f1e7cc;--muted:#b5a681;--accent:#dfc07a;--accent-dim:#85744e;--on-accent:#0a0a0c;
+  --surface-sunken:#0b0b0d;--surface-0:#121215;--surface-1:#161619;--surface-2:#232324;--surface-3:#2e2d2d;--surface-rail:#101013;--line:#302f2e;--line-strong:#6d5a36;
+  --wash:rgba(255,255,255,.03);--scrim:rgba(0,0,0,.55);--shadow-1:0 1px 2px rgba(0,0,0,.3);--shadow-2:0 8px 24px rgba(0,0,0,.4);--shadow-3:0 24px 64px rgba(0,0,0,.5);
+  --good:#74d69c;--good-bg:rgba(116,214,156,0.11);--good-line:#3c634d;--warn:#f0c470;--warn-bg:rgba(240,196,112,0.11);--warn-line:#6d5c3c;--bad:#f28b82;--bad-bg:rgba(242,139,130,0.11);--bad-line:#6e4543;--info:#dfc07a;--info-bg:rgba(223,192,122,0.11);--info-line:#665a40;
+  --radius:11px;--radius-sm:7px;--font-title:"Iowan Old Style","Charter","Source Serif 4","Noto Serif",Georgia,serif;--title-transform:uppercase;--title-spacing:.06em;--well-bg:#0c0c0f;--well-text:#e7e7e7;--dot-idle:#6d5a36;--theme-color:#101013;
+}
+/* Lavender and violet, the roundest corners. */
+:root[data-theme="soft-clay"]{
+  color-scheme:light;--bg:#ede9ff;--text:#2a2141;--muted:#6b6186;--accent:#694fdb;--accent-dim:#a99aeb;--on-accent:#ffffff;
+  --surface-sunken:#e6e2f8;--surface-0:#f3f0ff;--surface-1:#f8f6ff;--surface-2:#efecf6;--surface-3:#fcfbff;--surface-rail:#e8e4fa;--line:#e2ddf7;--line-strong:#d3ccf2;
+  --wash:rgba(42,33,65,0.035);--scrim:rgba(42,33,65,0.3);--shadow-1:0 1px 2px rgba(42,33,65,0.05);--shadow-2:0 8px 24px rgba(42,33,65,0.12);--shadow-3:0 24px 64px rgba(42,33,65,0.18);
+  --good:#1c7547;--good-bg:rgba(28,117,71,0.09);--good-line:#a4c5b9;--warn:#8a5d00;--warn-bg:rgba(138,93,0,0.09);--warn-line:#cebc9e;--bad:#b3362c;--bad-bg:rgba(179,54,44,0.09);--bad-line:#deadaf;--info:#694fdb;--info-bg:rgba(105,79,219,0.09);--info-line:#c2b7f1;
+  --radius:18px;--radius-sm:11px;--font-title:var(--font-ui);--title-transform:none;--title-spacing:-.005em;--well-bg:#251d3d;--well-text:#e9e8ec;--dot-idle:#aaa4bc;--theme-color:#e8e4fa;
+}
+/* Parchment and crimson. */
+:root[data-theme="chronicle"]{
+  color-scheme:light;--bg:#efe3c3;--text:#2f2016;--muted:#6a5329;--accent:#9f1d20;--accent-dim:#c67b70;--on-accent:#ffffff;
+  --surface-sunken:#e8dcbd;--surface-0:#f3e8cb;--surface-1:#f6edd2;--surface-2:#ede4ca;--surface-3:#fbf8ed;--surface-rail:#eadebf;--line:#d1bd90;--line-strong:#b89d64;
+  --wash:rgba(47,32,22,0.035);--scrim:rgba(47,32,22,0.3);--shadow-1:0 1px 2px rgba(47,32,22,0.05);--shadow-2:0 8px 24px rgba(47,32,22,0.12);--shadow-3:0 24px 64px rgba(47,32,22,0.18);
+  --good:#1b7044;--good-bg:rgba(27,112,68,0.09);--good-line:#a3be9c;--warn:#845900;--warn-bg:rgba(132,89,0,0.09);--warn-line:#cbb582;--bad:#b3362c;--bad-bg:rgba(179,54,44,0.09);--bad-line:#dda793;--info:#9f1d20;--info-bg:rgba(159,29,32,0.09);--info-line:#d59e8e;
+  --radius:8px;--radius-sm:5px;--font-title:"Iowan Old Style","Charter","Source Serif 4","Noto Serif",Georgia,serif;--title-transform:none;--title-spacing:-.005em;--well-bg:#2a1f17;--well-text:#eae9e8;--dot-idle:#a99875;--theme-color:#eadebf;
+}
+
+/* What a theme changes beyond its colours. */
+:root[data-theme] .page-header h1,:root[data-theme] .task-title-row h1{font-family:var(--font-title);text-transform:var(--title-transform);letter-spacing:var(--title-spacing)}
+:root[data-theme] .md pre{background:var(--well-bg);border-color:var(--well-bg);color:var(--well-text)}
+:root[data-theme] .md pre code{color:inherit}
+:root[data-theme] .terminal-box{background:var(--well-bg);border-color:var(--well-bg)}
+:root[data-theme] .dot{background:var(--dot-idle)}
+:root[data-theme] .dot-running{background:var(--info)}
+:root[data-theme] .dot-waiting{background:var(--warn)}
+:root[data-theme] .dot-error{background:var(--bad)}
+:root[data-theme] .dv-code.hl .dv-row.ctx .dv-txt{color:var(--text)}
+:root[data-theme] ::selection{background:color-mix(in srgb,var(--accent) 22%,transparent)}

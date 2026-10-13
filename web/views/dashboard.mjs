@@ -92,7 +92,7 @@ function Body({ m, sessions }) {
         <div>
           <div class="proc-name">${p.label}</div>
           <div class="proc-meta">
-            <span class="kind">${p.kind === 'other' ? `${p.count} processes` : p.kind}</span>
+            <span class="kind">${p.kind === 'other' ? `${p.count} process${p.count === 1 ? '' : 'es'}` : p.kind}</span>
             ${p.sub ? html`<span>${p.sub}</span>` : null}
             ${p.count > 1 && p.kind !== 'other' ? html`<span>${p.count} processes</span>` : null}
           </div>
@@ -119,7 +119,7 @@ function Body({ m, sessions }) {
 
     <section class="section">
       <div class="section-head">
-        <h2>Memory &amp; CPU by process</h2>
+        <h2>Memory & CPU by process</h2>
         <span class="badge badge-neutral">${m.procs.length} row${m.procs.length === 1 ? '' : 's'}</span>
       </div>
       <div class="list">${m.procs.map(row)}</div>

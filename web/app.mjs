@@ -5,6 +5,7 @@ import { useStore, refresh, connect } from './api.mjs';
 import './install.mjs';
 import { ToastContainer } from './components/toast.mjs';
 import { ConfirmHost } from './components/confirm.mjs';
+import { ThemeTrigger, ThemePickerHost } from './components/theme-picker.mjs';
 import { Dot, sessionsStatus, Icon } from './components/ui.mjs';
 import { TabBar } from './components/tabbar.mjs';
 import { Home, AddProject } from './views/home.mjs';
@@ -82,6 +83,7 @@ function Sidebar({ route, onNavigate, onAdd }) {
       <div class="side-top">
         <a class="logo" href="#/" onClick=${onNavigate}><img class="logo-mark" src="/icons/favicon.svg" width="26" height="26" alt="" /> Bench</a>
         ${!connected ? html`<span class="badge badge-warn" title="Reconnecting to the server">offline</span>` : null}
+        <${ThemeTrigger} align="end" />
       </div>
       ${approvals.length ? html`<a class="side-waiting" href="#/inbox" onClick=${onNavigate}><${Dot} status="waiting" /> ${approvals.length} waiting on you</a>` : null}
       <div class="side-projects">
@@ -193,6 +195,7 @@ function App() {
       ${adding ? html`<${AddProject} onClose=${() => setAdding(false)} />` : null}
       <${ToastContainer} />
       <${ConfirmHost} />
+      <${ThemePickerHost} />
     </div>
   `;
 }

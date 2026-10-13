@@ -10,6 +10,7 @@ import { html, useEffect, useRef, useState } from '../lib.mjs';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { terminalUrl } from '../api.mjs';
+import { THEME_EVENT } from '../theme.mjs';
 
 // How long to wait before reattaching after an abnormal close - a bounced server, a
 // dropped network. A deliberate close is not retried at all: 1000 means the shell
@@ -20,11 +21,17 @@ const RETRY_MS = 2000;
 const MONO = 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
 
 // The emulator needs colours as values, not as the custom properties the rest of the
-// stylesheet uses, so they are read off the document rather than repeated here:
-// index.html stays the one place the palette is written down. Ansi black-through-white
-// are left at xterm's defaults, which are tuned for a dark background already.
+// stylesheet uses, so they are read off the document rather than repeated here. Ansi
+// black-through-white are left at xterm's defaults, which are tuned for a dark
+// background - which is why a theme's terminal is its code well (--well-bg), dark in
+// every theme, and only Classic, which has no well, draws on the page's own colours.
 function palette() {
   const read = (name, fallback) => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  const well = read('--well-bg', '');
+  if (well) {
+    const ink = read('--well-text', '#e9e9ea');
+    return { background: well, foreground: ink, cursor: ink, cursorAccent: well, selectionBackground: 'rgba(255,255,255,.22)' };
+  }
   return {
     background: read('--bg', '#0a0c10'),
     foreground: read('--text', '#edf2f7'),
@@ -129,6 +136,9 @@ export function TerminalPane({ query }) {
     if (ro) ro.observe(host);
     const onWindowResize = () => refit();
     window.addEventListener('resize', onWindowResize);
+    // The canvas does not follow the stylesheet, so a theme change is passed on.
+    const onTheme = () => (term.options.theme = palette());
+    window.addEventListener(THEME_EVENT, onTheme);
 
     return () => {
       // Set before the close below, so the handler that runs for it knows this was
@@ -138,6 +148,7 @@ export function TerminalPane({ query }) {
       if (retry) clearTimeout(retry);
       if (ro) ro.disconnect();
       window.removeEventListener('resize', onWindowResize);
+      window.removeEventListener(THEME_EVENT, onTheme);
       typed.dispose();
       if (ws) ws.close();
       term.dispose();
