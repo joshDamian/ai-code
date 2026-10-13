@@ -233,10 +233,12 @@ function Notifications() {
           ? html`
               <div class="checks">
                 ${CHOICE_FIELDS.map(
-                  (f) => html`<div class="check-row" key=${f.key}>
+                  (f) => html`<div class="setting-row" key=${f.key}>
                     <${Toggle} hideLabel label=${f.label} checked=${choices[f.key] !== false} onChange=${(on) => setChoice(f.key, on)} />
-                    <span>${f.label}</span>
-                    ${f.hint ? html`<span class="muted">${f.hint}</span>` : null}
+                    <div class="setting-text">
+                      <span>${f.label}</span>
+                      ${f.hint ? html`<span class="muted">${f.hint}</span>` : null}
+                    </div>
                   </div>`
                 )}
               </div>

@@ -841,6 +841,12 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .pair-url{overflow-wrap:anywhere;user-select:all}
 .checks{display:grid;gap:var(--space-1)}
 .check-row{display:grid;grid-template-columns:20px 160px 1fr;gap:var(--space-2);font-size:var(--text-sm)}
+/* A switch and what it does, side by side. Not .check-row: that is the diagnostics table,
+   whose first column is a tick, and a 34px switch does not fit a tick's 20px. */
+.setting-row{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) 0}
+.setting-row+.setting-row{border-top:1px solid var(--line)}
+.setting-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.setting-text .muted{font-size:var(--text-xs)}
 .gate{min-height:100dvh;display:grid;place-items:center;padding:var(--space-4)}
 .gate-card{max-width:420px;display:grid;gap:var(--space-3)}
 
