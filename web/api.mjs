@@ -2,7 +2,8 @@
 // The client's view of the server: JSON calls, and one WebSocket that keeps a shared
 // store current. Views read the store with useStore() and call `api` to change things;
 // what changed comes back down the socket, so a write is never applied twice.
-import { useEffect, useState, useRef } from './lib.mjs';
+import { useEffect, useState, useRef, recall, remember } from './lib.mjs';
+import { showToast } from './components/toast.mjs';
 
 /** @typedef {import('../src/contract.d.mts').Project} Project */
 /** @typedef {import('../src/contract.d.mts').Task} Task */
@@ -43,6 +44,76 @@ const patch = (/** @type {string} */ p, /** @type {unknown} */ body) => request(
 const del = (/** @type {string} */ p) => request(p, { method: 'DELETE' });
 const enc = encodeURIComponent;
 
+// -- the outbox ----------------------------------------------------------------------------
+//
+// A message typed on a phone that has lost the line - a lift, a tunnel, a sleeping
+// laptop - is not worth an error. It is kept here, in this browser, and sent the moment
+// the socket comes back; the composer clears as though it had gone, because from the
+// person's side it has. Kept out of the message list itself: it is not the server's, and
+// nothing that did not reach the server should be shown as the session's history.
+
+const OUTBOX_KEY = 'bench:outbox';
+/** @type {{key:string, sessionId:string, text:string, images:any[], uploads:any[], at:number}[]} */
+let outbox = recall(OUTBOX_KEY, []);
+/** @param {string} [sessionId] how many are queued for one session, or all of them */
+export const outboxCount = (sessionId) => (sessionId ? outbox.filter((m) => m.sessionId === sessionId).length : outbox.length);
+
+/** @param {string} sessionId @param {string} text @param {any[]} images @param {any[]} uploads */
+function queue(sessionId, text, images, uploads) {
+  outbox = [...outbox, { key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, at: Date.now(), sessionId, text, images, uploads }];
+  remember(OUTBOX_KEY, outbox);
+  window.dispatchEvent(new Event('bench:outbox'));
+}
+
+/** True for the failure that means "no line", as opposed to the server's "no". @param {any} e */
+const offline = (e) => /^Network error/.test(/** @type {Error} */ (e)?.message || '');
+
+/**
+ * Sends a message, or keeps it if the line is down. Resolves to the server's answer, or
+ * to `{queued: true}` when it was kept, so a caller can say so without treating it as a
+ * failure. A refusal that is not the network (a session deleted on another device) is
+ * raised as usual: it will not succeed later either.
+ * @param {string} sessionId @param {string} text
+ * @param {{media_type:string, data:string}[]} [images] @param {{file:string, type?:string}[]} [uploads]
+ */
+async function sendMessage(sessionId, text, images = [], uploads = []) {
+  try {
+    return await post(`/api/sessions/${enc(sessionId)}/messages`, { text, images, uploads });
+  } catch (e) {
+    if (!offline(e)) throw e;
+    queue(sessionId, text, images, uploads);
+    return { queued: true };
+  }
+}
+
+let flushing = false;
+/** Sends everything queued, oldest first, and stops at the first sign the line is still down. */
+export async function flushOutbox() {
+  if (flushing || !outbox.length) return;
+  flushing = true;
+  let sent = 0;
+  try {
+    for (const m of [...outbox]) {
+      try {
+        await post(`/api/sessions/${enc(m.sessionId)}/messages`, { text: m.text, images: m.images, uploads: m.uploads });
+      } catch (e) {
+        if (offline(e)) return; // still no line: keep the rest for the next try
+        // The server refused it - the session is gone, most likely - and it will refuse
+        // it again, so it is dropped rather than retried at every reconnect.
+      }
+      outbox = outbox.filter((x) => x.key !== m.key);
+      remember(OUTBOX_KEY, outbox);
+      sent++;
+    }
+  } finally {
+    flushing = false;
+    if (sent) {
+      window.dispatchEvent(new Event('bench:outbox'));
+      showToast(`Sent ${sent} queued message${sent === 1 ? '' : 's'}`, 'success');
+    }
+  }
+}
+
 export const api = {
   state: () => get('/api/state'),
   addProject: (/** @type {{path:string, name?:string, init?:boolean}} */ b) => post('/api/projects', b),
@@ -78,7 +149,7 @@ export const api = {
   createSession: (/** @type {any} */ b) => post('/api/sessions', b),
   session: (/** @type {string} */ id) => get(`/api/sessions/${id}`),
   events: (/** @type {string} */ id, /** @type {number} */ before) => get(`/api/sessions/${id}/events?before=${before}`),
-  send: (/** @type {string} */ id, /** @type {string} */ text, /** @type {{media_type:string, data:string}[]} */ images = [], /** @type {{file:string, type?:string}[]} */ uploads = []) => post(`/api/sessions/${id}/messages`, { text, images, uploads }),
+  send: sendMessage,
   upload,
   fileStat: (/** @type {string} */ id, /** @type {string[]} */ paths) => post(`/api/sessions/${enc(id)}/files/stat`, { paths }),
   interrupt: (/** @type {string} */ id) => post(`/api/sessions/${id}/interrupt`),
@@ -101,6 +172,7 @@ export const api = {
   pushKey: () => get('/api/push/key'),
   pushSubscribe: (/** @type {any} */ sub) => post('/api/push/subscribe', sub),
   pushUnsubscribe: (/** @type {string} */ endpoint) => post('/api/push/unsubscribe', { endpoint }),
+  pushChoices: (/** @type {string} */ endpoint, /** @type {any} */ choices) => post('/api/push/choices', { endpoint, choices }),
   status: () => get('/api/server/status'),
   restart: () => post('/api/server/restart'),
 };
@@ -147,6 +219,10 @@ export function terminalUrl(q) {
 // -- the store ----------------------------------------------------------------------------
 
 /**
+ * The shell is drawn from this. On a cold open it is filled in from what was on screen
+ * last time (below), so a phone over a tailnet shows the projects and their sessions at
+ * once rather than the word "Connecting" for a second or two; refresh() replaces all of
+ * it with the server's own answer, so nothing stale survives the first round trip.
  * @typedef {{
  *   ready: boolean, unauthorized: boolean, connected: boolean, error: string|null,
  *   projects: Project[], tasks: Task[], sessions: Session[], approvals: Approval[],
@@ -156,19 +232,24 @@ export function terminalUrl(q) {
  * }} State
  */
 
+// What to draw before the server answers. Only the lists; the connection state, the push
+// key and the git ticks are facts about now, and are never taken from a stale snapshot.
+const CACHE_KEY = 'bench:cache';
+const cached = /** @type {Partial<State>|null} */ (recall(CACHE_KEY, null));
+
 /** @type {State} */
 let state = {
-  ready: false,
+  ready: !!cached,
   unauthorized: false,
   connected: false,
   error: null,
-  projects: [],
-  tasks: [],
-  sessions: [],
-  approvals: [],
-  providers: [],
-  defaults: { providerId: '', modelId: null, mode: 'default', effort: null, projectsDir: '' },
-  me: null,
+  projects: cached?.projects || [],
+  tasks: cached?.tasks || [],
+  sessions: cached?.sessions || [],
+  approvals: cached?.approvals || [],
+  providers: cached?.providers || [],
+  defaults: cached?.defaults || { providerId: '', modelId: null, mode: 'default', effort: null, projectsDir: '' },
+  me: cached?.me || null,
   push: null,
   gitTick: {},
 };
@@ -225,6 +306,9 @@ export async function refresh() {
   try {
     const s = await api.state();
     set({ ready: true, unauthorized: false, error: null, projects: s.projects, tasks: s.tasks, sessions: s.sessions, approvals: s.approvals, providers: s.providers, defaults: s.defaults, me: s.me, push: s.push });
+    // The snapshot the next cold open draws from. Written after every successful refresh,
+    // which is the one moment the client is known to be holding the server's own truth.
+    remember(CACHE_KEY, { projects: s.projects, tasks: s.tasks, sessions: s.sessions, approvals: s.approvals, providers: s.providers, defaults: s.defaults, me: s.me });
   } catch (e) {
     const err = /** @type {any} */ (e);
     set({ ready: true, error: err.status === 401 ? null : err.message, unauthorized: err.status === 401 });
@@ -255,6 +339,15 @@ export function watchSession(sessionId, fn) {
   };
 }
 
+/** Asks the service worker to take down a notification it is showing, by tag. @param {string} tag */
+export function closeNotification(tag) {
+  navigator.serviceWorker?.ready
+    .then((r) => r.active?.postMessage({ type: 'close-notification', tag }))
+    .catch(() => {
+      /* no worker, no notification */
+    });
+}
+
 /** @param {ServerMessage} m */
 function onMessage(m) {
   if (m.type === 'hello') set({ sessions: m.sessions, approvals: m.approvals });
@@ -262,7 +355,12 @@ function onMessage(m) {
   else if (m.type === 'session-removed') set({ sessions: state.sessions.filter((s) => s.id !== m.id) });
   else if (m.type === 'task') set({ tasks: upsert(state.tasks, m.task) });
   else if (m.type === 'approval') set({ approvals: [...state.approvals.filter((a) => a.id !== m.approval.id), m.approval] });
-  else if (m.type === 'approval-done') set({ approvals: state.approvals.filter((a) => a.id !== m.id) });
+  else if (m.type === 'approval-done') {
+    set({ approvals: state.approvals.filter((a) => a.id !== m.id) });
+    // Answered somewhere - here, another window, the shade - so a banner still sitting
+    // on the lock screen for it is stale and comes down.
+    closeNotification(`approval-${m.id}`);
+  }
   else if (m.type === 'git') bumpGit(m.project_id);
   else if (m.type === 'event') for (const fn of watchers.get(m.event.session_id) || []) fn(m);
   else if (m.type === 'delta') for (const fn of watchers.get(m.session_id) || []) fn(m);
@@ -285,6 +383,7 @@ export function connect() {
     sendWatch();
     // Whatever happened while disconnected is read fresh, and open panes reload.
     refresh();
+    flushOutbox();
     window.dispatchEvent(new Event('bench:reconnected'));
   };
   ws.onmessage = (e) => {
@@ -366,7 +465,12 @@ setInterval(() => checkAlive(10000), 20000);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') checkAlive(4000);
 });
-window.addEventListener('online', () => checkAlive(4000));
+// Coming back is the other moment worth a try: a socket that never dropped (a laptop that
+// slept) does not fire onopen again, and the queued message would otherwise wait for one.
+window.addEventListener('online', () => {
+  checkAlive(4000);
+  flushOutbox();
+});
 window.addEventListener('pageshow', (e) => {
   if (/** @type {PageTransitionEvent} */ (e).persisted) replace();
 });

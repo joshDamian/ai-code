@@ -70,6 +70,9 @@ export class Store {
     for (const col of ['provider_model_id', 'invocation_model_id', 'display_name']) {
       if (!this.db.prepare('PRAGMA table_info(models)').all().some((c) => c.name === col)) this.db.exec(`ALTER TABLE models ADD COLUMN ${col} TEXT`);
     }
+    // A push subscription that predates per-device choices: what this device wants to be
+    // woken for, as JSON. Null means everything, which is what every device got before.
+    if (!this.db.prepare('PRAGMA table_info(push_subscriptions)').all().some((c) => c.name === 'choices')) this.db.exec('ALTER TABLE push_subscriptions ADD COLUMN choices TEXT');
     this.#seedProviders();
   }
 
@@ -419,11 +422,16 @@ export class Store {
 
   // -- push -----------------------------------------------------------------
 
-  /** @param {{endpoint:string, keys:{p256dh:string, auth:string}}} sub */
+  /** @param {{endpoint:string, keys:{p256dh:string, auth:string}, choices?:unknown}} sub */
   addPushSubscription(sub) {
     this.db
-      .prepare('INSERT INTO push_subscriptions(endpoint,p256dh,auth,created_at) VALUES(?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh,auth=excluded.auth')
-      .run(sub.endpoint, sub.keys.p256dh, sub.keys.auth, now());
+      .prepare('INSERT INTO push_subscriptions(endpoint,p256dh,auth,created_at,choices) VALUES(?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh,auth=excluded.auth')
+      .run(sub.endpoint, sub.keys.p256dh, sub.keys.auth, now(), sub.choices == null ? null : JSON.stringify(sub.choices));
+  }
+
+  /** What one device asked to be woken for. @param {string} endpoint @param {unknown} choices */
+  setPushChoices(endpoint, choices) {
+    return this.db.prepare('UPDATE push_subscriptions SET choices=? WHERE endpoint=?').run(choices == null ? null : JSON.stringify(choices), endpoint).changes;
   }
 
   /** @param {string} endpoint */

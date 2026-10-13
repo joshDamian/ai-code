@@ -74,6 +74,35 @@ export function Dialog({ title, onClose, children, wide, actions }) {
   `;
 }
 
+/**
+ * A panel that rises from the bottom of the screen. On a phone a dialog in the middle
+ * is under the keyboard and a row of controls in the header is out of thumb reach; a
+ * sheet is where the settings for the thing you are looking at belong, and it closes
+ * on the scrim, on Escape, or by dragging the grip down.
+ */
+export function Sheet({ title, onClose, children }) {
+  useEffect(() => {
+    const on = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', on, true);
+    return () => document.removeEventListener('keydown', on, true);
+  }, []);
+  return html`
+    <div class="sheet-scrim" onClick=${(e) => e.target === e.currentTarget && onClose()}>
+      <div class="sheet" role="dialog" aria-modal="true" aria-label=${title}>
+        <button class="sheet-grip" type="button" aria-label="Close" onClick=${onClose}></button>
+        ${title ? html`<h2 class="sheet-title">${title}</h2>` : null}
+        <div class="sheet-body">${children}</div>
+      </div>
+    </div>
+  `;
+}
+
 /** Provider, then a model on it. `value` is {providerId, modelId}. */
 export function ModelPicker({ providers, value, onChange, compact }) {
   const usable = providers.filter((p) => p.ready || p.id === value.providerId);
@@ -138,6 +167,12 @@ export function Icon({ name, size = 16 }) {
     back: 'M10 3.5 5.5 8l4.5 4.5',
     refresh: 'M12.5 6A5 5 0 1 0 13 9M12.5 2.5V6H9',
     folder: 'M2 4.5h4l1.5 1.5H14v6.5H2z',
+    inbox: 'M2 9h3.2l1 1.8h3.6l1-1.8H14M2 9l1.7-5h8.6L14 9v4.5H2z',
+    list: 'M5.5 4h8M5.5 8h8M5.5 12h8M2.5 4h.01M2.5 8h.01M2.5 12h.01',
+    send2: 'M2 8h10M8 4l4 4-4 4',
+    down: 'M8 3v9M4.5 8.5 8 12l3.5-3.5',
+    chevron: 'm4.5 6.5 3.5 3.5 3.5-3.5',
+    mic: 'M8 2.5a2 2 0 0 0-2 2v3.5a2 2 0 1 0 4 0V4.5a2 2 0 0 0-2-2zM3.5 7.5v.5a4.5 4.5 0 0 0 9 0v-.5M8 12.5V14',
   };
   return html`<svg class="ic" width=${size} height=${size} viewBox="0 0 16 16" aria-hidden="true"><path d=${paths[name] || ''} /></svg>`;
 }

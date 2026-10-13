@@ -287,8 +287,23 @@ test('pairing codes work once and devices can be revoked', () => {
   assert.equal(store.deviceByToken('tok'), null);
 });
 
-test('attached files are saved where the session can read them, and named in the message', async () => {
-  const { svc, project } = setup();
+test('a push subscription remembers what each device asked to be woken for', () => {
+  const store = new Store(tmp('push'));
+  const keys = { p256dh: 'p', auth: 'a' };
+  store.addPushSubscription({ endpoint: 'https://push/1', keys });
+  assert.equal(store.listPushSubscriptions().length, 1);
+  assert.equal(store.listPushSubscriptions()[0].choices, null, 'no answer yet means every alert comes through');
+  assert.equal(store.setPushChoices('https://push/1', { approvals: true, finished: false, errors: true }), 1);
+  assert.equal(store.listPushSubscriptions()[0].choices, JSON.stringify({ approvals: true, finished: false, errors: true }));
+  // Re-subscribing - a rotated key, or the page asking again - keeps the choice it had.
+  store.addPushSubscription({ endpoint: 'https://push/1', keys: { p256dh: 'p2', auth: 'a2' } });
+  const [row] = store.listPushSubscriptions();
+  assert.equal(row.p256dh, 'p2');
+  assert.equal(row.choices, JSON.stringify({ approvals: true, finished: false, errors: true }), 'a re-subscribe does not wipe the choice');
+  assert.equal(store.setPushChoices('https://push/none', {}), 0, 'an endpoint that was never subscribed has nothing to update');
+});
+
+test('attached files are saved where the session can read them, and named in the message', async () => {  const { svc, project } = setup();
   const s = svc.createSession({ projectId: project.id });
   const pdf = Buffer.from('%PDF-1.4 fake').toString('base64');
   svc.send(s.id, 'summarise these', { files: [{ name: '../../notes.md', media_type: 'text/markdown', data: Buffer.from('# hi').toString('base64') }, { name: 'spec.pdf', media_type: 'application/pdf', data: pdf }] });

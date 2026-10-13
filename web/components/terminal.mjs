@@ -50,6 +50,9 @@ export function TerminalPane({ query }) {
   const key = new URLSearchParams(query).toString();
   const [nonce, setNonce] = useState(0);
   const hostRef = useRef(null);
+  // The input sender, handed out of the connection effect so the key row below - which
+  // is a sibling of the terminal, not part of it - can type into the same socket.
+  const sendRef = useRef(/** @type {((m: {type: string, data: string}) => void) | null} */ (null));
   const [state, setState] = useState('connecting');
 
   useEffect(() => {
@@ -77,6 +80,7 @@ export function TerminalPane({ query }) {
     const send = (msg) => {
       if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
     };
+    sendRef.current = send;
 
     // The round trip that makes a full-screen program work: the emulator decides how
     // many rows fit in the box it has, the kernel has to be told, and claude, less or
@@ -130,6 +134,7 @@ export function TerminalPane({ query }) {
       // Set before the close below, so the handler that runs for it knows this was
       // deliberate and does not schedule a retry against a component that is gone.
       closed = true;
+      sendRef.current = null;
       if (retry) clearTimeout(retry);
       if (ro) ro.disconnect();
       window.removeEventListener('resize', onWindowResize);
@@ -141,6 +146,20 @@ export function TerminalPane({ query }) {
 
   const [text, tone] = STATUS[state];
 
+  // Keys a soft keyboard does not have, and that a shell needs constantly. Sent on
+  // pointerdown with the default suppressed, so the terminal keeps focus and the tap
+  // types rather than moving the caret to the button. Shown only on a coarse pointer.
+  const press = (data) => sendRef.current?.({ type: 'input', data });
+  const paste = async (e) => {
+    e.preventDefault();
+    try {
+      const clip = await navigator.clipboard.readText();
+      if (clip) press(clip);
+    } catch {
+      /* the clipboard is not readable here; the keyboard's own paste still works */
+    }
+  };
+
   return html`
     <div class="terminal-frame">
       <div class="terminal-bar">
@@ -150,6 +169,30 @@ export function TerminalPane({ query }) {
       <div class="terminal-box">
         <div class="terminal-host" ref=${hostRef}></div>
       </div>
+      <div class="term-keys" role="toolbar" aria-label="Terminal keys">
+        ${TERM_KEYS.map(
+          (k) => html`<button class="term-key" type="button" key=${k.label} title=${k.title || k.label} onPointerDown=${(e) => { e.preventDefault(); press(k.data); }}>${k.label}</button>`
+        )}
+        <button class="term-key" type="button" onPointerDown=${paste}>Paste</button>
+      </div>
     </div>
   `;
 }
+
+// What a phone's keyboard cannot send, in the order a shell wants them. The arrows and
+// the control bytes are the point; |, / and ~ are the three characters a chording-free
+// keyboard buries.
+const TERM_KEYS = [
+  { label: 'Esc', data: '\x1b', title: 'Escape' },
+  { label: 'Tab', data: '\t' },
+  { label: '^C', data: '\x03', title: 'Ctrl-C' },
+  { label: '^D', data: '\x04', title: 'Ctrl-D' },
+  { label: '↑', data: '\x1b[A' },
+  { label: '↓', data: '\x1b[B' },
+  { label: '←', data: '\x1b[D' },
+  { label: '→', data: '\x1b[C' },
+  { label: '|', data: '|' },
+  { label: '/', data: '/' },
+  { label: '~', data: '~' },
+  { label: '-', data: '-' },
+];

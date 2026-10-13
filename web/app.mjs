@@ -6,7 +6,10 @@ import './install.mjs';
 import { ToastContainer } from './components/toast.mjs';
 import { ConfirmHost } from './components/confirm.mjs';
 import { Dot, sessionsStatus, Icon } from './components/ui.mjs';
+import { TabBar } from './components/tabbar.mjs';
 import { Home, AddProject } from './views/home.mjs';
+import { Inbox } from './views/inbox.mjs';
+import { SessionsList } from './views/sessions.mjs';
 import { ProjectView } from './views/project.mjs';
 import { TaskView } from './views/task.mjs';
 import { SessionPane } from './views/session.mjs';
@@ -14,6 +17,8 @@ import { Settings } from './views/settings.mjs';
 import { Pair, Unpaired } from './views/pair.mjs';
 
 // #/                              projects
+// #/inbox                         what is waiting on you
+// #/sessions                      every session, flat
 // #/p/:pid                        a project
 // #/p/:pid/s/:sid                 a session in the project's checkout
 // #/p/:pid/t/:tid[/s/:sid]        a task, on one of its sessions
@@ -23,6 +28,8 @@ import { Pair, Unpaired } from './views/pair.mjs';
 function parse() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
   if (parts[0] === 'pair') return { view: 'pair', code: parts[1] };
+  if (parts[0] === 'inbox') return { view: 'inbox' };
+  if (parts[0] === 'sessions') return { view: 'sessions' };
   if (parts[0] === 'settings') return { view: 'settings' };
   if (parts[0] === 'p' && parts[1]) {
     const r = { view: 'project', projectId: parts[1] };
@@ -73,7 +80,7 @@ function Sidebar({ route, onNavigate, onAdd }) {
         <a class="logo" href="#/" onClick=${onNavigate}><img class="logo-mark" src="/icons/favicon.svg" width="26" height="26" alt="" /> Bench</a>
         ${!connected ? html`<span class="badge badge-warn" title="Reconnecting to the server">offline</span>` : null}
       </div>
-      ${approvals.length ? html`<a class="side-waiting" href="#/" onClick=${onNavigate}><${Dot} status="waiting" /> ${approvals.length} waiting on you</a>` : null}
+      ${approvals.length ? html`<a class="side-waiting" href="#/inbox" onClick=${onNavigate}><${Dot} status="waiting" /> ${approvals.length} waiting on you</a>` : null}
       <div class="side-projects">
         ${projects.map((p) => {
           const pt = tasks.filter((t) => t.project_id === p.id && t.state === 'active');
@@ -112,6 +119,8 @@ function Sidebar({ route, onNavigate, onAdd }) {
 
 function Main({ route }) {
   if (route.view === 'settings') return html`<${Settings} />`;
+  if (route.view === 'inbox') return html`<${Inbox} />`;
+  if (route.view === 'sessions') return html`<${SessionsList} />`;
   if (route.view === 'project') return html`<${ProjectView} key=${route.projectId} projectId=${route.projectId} />`;
   if (route.view === 'task') return html`<${TaskView} key=${route.taskId} projectId=${route.projectId} taskId=${route.taskId} sessionId=${route.sessionId} tab=${route.tab} />`;
   if (route.view === 'session') return html`<div class="session-page"><${SessionPane} key=${route.sessionId} sessionId=${route.sessionId} onArchived=${() => (location.hash = `#/p/${route.projectId}`)} /></div>`;
@@ -120,6 +129,8 @@ function Main({ route }) {
 
 function title(route, s) {
   if (route.view === 'settings') return 'Settings';
+  if (route.view === 'inbox') return 'Inbox';
+  if (route.view === 'sessions') return 'Sessions';
   const p = s.projects.find((x) => x.id === route.projectId);
   if (route.view === 'task') return s.tasks.find((t) => t.id === route.taskId)?.title || 'Task';
   if (route.view === 'session') return s.sessions.find((x) => x.id === route.sessionId)?.title || 'Session';
@@ -132,6 +143,7 @@ function App() {
   const unauthorized = useStore((s) => s.unauthorized);
   const error = useStore((s) => s.error);
   const heading = useStore((s) => title(route, s));
+  const waiting = useStore((s) => s.approvals.length);
   const [drawer, setDrawer] = useState(false);
   const [adding, setAdding] = useState(false);
 
@@ -139,15 +151,27 @@ function App() {
     document.title = route.view === 'home' ? 'Bench' : `${heading} · Bench`;
   }, [heading, route.view]);
   useEffect(() => setDrawer(false), [location.hash]);
+  // The number of things waiting on a person, on the app icon itself: a glance at a
+  // lock screen says whether it is worth opening. Cleared by passing 0.
+  useEffect(() => {
+    try {
+      navigator.setAppBadge?.(waiting);
+    } catch {
+      /* not a capability here */
+    }
+  }, [waiting]);
 
   if (route.view === 'pair') return html`<${Pair} code=${route.code} />`;
   if (unauthorized) return html`<${Unpaired} />`;
   if (!ready) return html`<div class="gate muted">Connecting…</div>`;
 
   const back = route.view === 'task' || route.view === 'session' ? `#/p/${route.projectId}` : route.view === 'project' || route.view === 'settings' ? '#/' : null;
+  // The tab bar belongs to the four top-level screens only. A task or a conversation is
+  // a place you went into, and it keeps the height.
+  const top = ['home', 'inbox', 'sessions', 'settings'].includes(route.view);
 
   return html`
-    <div class="shell ${drawer ? 'drawer-open' : ''}">
+    <div class="shell ${drawer ? 'drawer-open' : ''} ${top ? 'has-tabbar' : ''}">
       <${Sidebar} route=${route} onNavigate=${() => setDrawer(false)} onAdd=${() => setAdding(true)} />
       ${drawer ? html`<div class="scrim" onClick=${() => setDrawer(false)}></div>` : null}
       <main class="main">
@@ -159,6 +183,7 @@ function App() {
         ${error ? html`<div class="notice notice-bad">${error}</div>` : null}
         <${Main} route=${route} />
       </main>
+      ${top ? html`<${TabBar} route=${route} />` : null}
       ${adding ? html`<${AddProject} onClose=${() => setAdding(false)} />` : null}
       <${ToastContainer} />
       <${ConfirmHost} />

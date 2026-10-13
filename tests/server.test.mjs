@@ -91,8 +91,16 @@ test('a pairing code becomes a device cookie, once', async () => {
   assert.equal(state.json.me.device.name, 'Phone');
 });
 
-test('writes must be JSON', async () => {
-  const r = await req('POST', '/api/projects', { host: REMOTE, cookie, body: 'path=/tmp', type: 'application/x-www-form-urlencoded' });
+test('a device can change what it is notified about, and only for an endpoint it registered', async () => {
+  const sub = { endpoint: 'https://push.example/one', keys: { p256dh: 'p', auth: 'a' }, choices: { approvals: true, finished: true, errors: true } };
+  assert.equal((await req('POST', '/api/push/subscribe', { host: REMOTE, cookie, body: sub })).json.ok, true);
+  const changed = await req('POST', '/api/push/choices', { host: REMOTE, cookie, body: { endpoint: sub.endpoint, choices: { approvals: true, finished: false, errors: true } } });
+  assert.equal(changed.json.ok, true);
+  // Nothing to update is not a success: the endpoint is unknown to this server.
+  assert.equal((await req('POST', '/api/push/choices', { host: REMOTE, cookie, body: { endpoint: 'https://push.example/none', choices: {} } })).json.ok, false);
+});
+
+test('writes must be JSON', async () => {  const r = await req('POST', '/api/projects', { host: REMOTE, cookie, body: 'path=/tmp', type: 'application/x-www-form-urlencoded' });
   assert.equal(r.status, 415);
 });
 

@@ -1,12 +1,12 @@
 // A task: its sessions, what it changed against its base, a shell in its worktree, and
 // the way back into the base branch.
-import { html, useEffect, useState } from '../lib.mjs';
+import { html, useEffect, useRef, useState } from '../lib.mjs';
 import { api, useStore } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { DiffViewer } from '../components/diff-viewer.mjs';
 import { MoreMenu } from '../components/menu.mjs';
 import { TerminalPane } from '../components/terminal.mjs';
-import { Dialog, Dot, TaskBadge, Icon } from '../components/ui.mjs';
+import { Dialog, Dot, TaskBadge, Sheet, Icon } from '../components/ui.mjs';
 import { SessionPane } from './session.mjs';
 import { CommitDialog, go } from './project.mjs';
 
@@ -29,6 +29,8 @@ export function TaskView({ projectId, taskId, sessionId, tab }) {
   const [archived, setArchived] = useState([]);
   const { git, reload } = useTaskGit(task);
   const [dialog, setDialog] = useState(null);
+  const [ship, setShip] = useState(false);
+  const swipe = useRef(null);
 
   // Archived sessions are not in the live list; a merged task's are all archived.
   useEffect(() => {
@@ -84,8 +86,11 @@ export function TaskView({ projectId, taskId, sessionId, tab }) {
         <div class="task-actions">
           ${active
             ? html`
-                ${git?.behind ? html`<button class="btn sm secondary" type="button" onClick=${() => act(() => api.updateTask(taskId), null).then((r) => r && (r.conflicts?.length ? (showToast('Conflicts to resolve: see Changes', 'error'), go(`${base}/changes`)) : showToast(`Merged ${task.base_branch} in`, 'success')))}>Update from ${task.base_branch}</button>` : null}
-                <button class="btn sm" type="button" disabled=${!git?.canMerge?.ok} title=${git?.canMerge?.reason || ''} onClick=${() => setDialog('merge')}>Merge into ${task.base_branch}</button>
+                <span class="hide-narrow task-actions-wide">
+                  ${git?.behind ? html`<button class="btn sm secondary" type="button" onClick=${() => act(() => api.updateTask(taskId), null).then((r) => r && (r.conflicts?.length ? (showToast('Conflicts to resolve: see Changes', 'error'), go(`${base}/changes`)) : showToast(`Merged ${task.base_branch} in`, 'success')))}>Update from ${task.base_branch}</button>` : null}
+                  <button class="btn sm" type="button" disabled=${!git?.canMerge?.ok} title=${git?.canMerge?.reason || ''} onClick=${() => setDialog('merge')}>Merge into ${task.base_branch}</button>
+                </span>
+                <button class="btn sm only-phone" type="button" onClick=${() => setShip(true)}>Ship…</button>
               `
             : task.state === 'closed'
               ? html`<button class="btn sm secondary" type="button" onClick=${() => act(() => api.reopenTask(taskId), 'Reopened')}>Reopen</button>`
@@ -113,7 +118,30 @@ export function TaskView({ projectId, taskId, sessionId, tab }) {
         ${active ? html`<a role="tab" class="task-tab ${tab === 'terminal' ? 'active' : ''}" href=${`${base}/terminal`}><${Icon} name="terminal" /> Terminal</a>` : null}
       </nav>
 
-      <div class="task-body">
+      <div
+        class="task-body"
+        onTouchStart=${(e) => {
+          const t = e.touches[0];
+          swipe.current = { x: t.clientX, y: t.clientY };
+        }}
+        onTouchEnd=${(e) => {
+          const from = swipe.current;
+          swipe.current = null;
+          // A swipe moves between a task's sessions, the way the tab strip does with a
+          // thumb. It must not fire on a vertical scroll, on a field being edited, or on
+          // the Changes or Terminal pane, which are not sessions.
+          if (!from || tab || !current) return;
+          const tag = e.target?.tagName;
+          if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+          const t = e.changedTouches[0];
+          const dx = t.clientX - from.x;
+          const dy = t.clientY - from.y;
+          if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+          const i = sessions.findIndex((s) => s.id === current.id);
+          const j = dx < 0 ? i + 1 : i - 1;
+          if (j >= 0 && j < sessions.length) go(`${base}/s/${sessions[j].id}`);
+        }}
+      >
         ${tab === 'changes'
           ? html`<${Changes} task=${task} git=${git} sessions=${sessions} reload=${reload} />`
           : tab === 'terminal'
@@ -123,11 +151,67 @@ export function TaskView({ projectId, taskId, sessionId, tab }) {
               : html`<div class="pane-empty"><p class="muted">No sessions in this task.</p>${active ? html`<button class="btn" type="button" onClick=${newSession}>Start a session</button>` : null}</div>`}
       </div>
 
+      ${ship
+        ? html`<${ShipSheet}
+            task=${task}
+            git=${git}
+            onClose=${() => setShip(false)}
+            onMerge=${() => {
+              setShip(false);
+              setDialog('merge');
+            }}
+            onPr=${() => {
+              setShip(false);
+              setDialog('pr');
+            }}
+            onCommit=${(m) => api.commitTask(taskId, m).then(reload)}
+          />`
+        : null}
       ${dialog === 'merge' ? html`<${MergeDialog} task=${task} git=${git} onClose=${() => setDialog(null)} />` : null}
       ${dialog === 'commit' ? html`<${CommitDialog} title="Commit in the task" initial=${task.title} files=${git?.dirty || []} onClose=${() => setDialog(null)} onCommit=${(m) => api.commitTask(taskId, m).then(reload)} />` : null}
       ${dialog === 'pr' ? html`<${PrDialog} task=${task} onClose=${() => setDialog(null)} />` : null}
       ${dialog === 'close' ? html`<${CloseDialog} task=${task} onClose=${() => setDialog(null)} />` : null}
     </div>
+  `;
+}
+
+/**
+ * Everything that lands a task, in one place a thumb can reach. On a phone the header
+ * cannot hold Commit, Push and Merge as three buttons; this is the one button, and the
+ * sheet it opens is the same actions with room for the commit message and the counts.
+ */
+function ShipSheet({ task, git, onClose, onMerge, onPr, onCommit }) {
+  const [message, setMessage] = useState(task.title);
+  const [busy, setBusy] = useState(false);
+  const dirty = git?.dirty || [];
+  const commit = async () => {
+    setBusy(true);
+    try {
+      await onCommit(message.trim() || task.title);
+      showToast('Committed', 'success');
+      onClose();
+    } catch (e) {
+      setBusy(false);
+      toast(e);
+    }
+  };
+  return html`
+    <${Sheet} title="Ship this task" onClose=${onClose}>
+      ${dirty.length
+        ? html`<div class="field">
+            <span class="field-label">Commit message · ${dirty.length} file${dirty.length === 1 ? '' : 's'}</span>
+            <textarea class="input" rows="2" placeholder="Commit message" value=${message} onInput=${(e) => setMessage(e.target.value)}></textarea>
+            <div class="file-list mono-sm">${dirty.slice(0, 8).map((f) => html`<div>${f}</div>`)}${dirty.length > 8 ? html`<div class="muted">and ${dirty.length - 8} more</div>` : null}</div>
+          </div>
+          <button class="btn" type="button" disabled=${busy || !message.trim()} onClick=${commit}>Commit</button>`
+        : html`<p class="muted">Nothing uncommitted. ${git?.ahead ? `${git.ahead} commit${git.ahead === 1 ? '' : 's'} ready to land.` : 'No commits ahead of ' + task.base_branch + ' yet.'}</p>`}
+      <div class="sheet-actions">
+        <button class="btn secondary" type="button" onClick=${async () => { onClose(); await api.pushTask(task.id).then(() => showToast('Pushed', 'success')).catch(toast); }}>Push branch</button>
+        <button class="btn secondary" type="button" disabled=${!git?.canMerge?.ok} title=${git?.canMerge?.reason || ''} onClick=${onMerge}>Merge into ${task.base_branch}</button>
+        <button class="btn secondary" type="button" onClick=${onPr}>Open a pull request…</button>
+        <button class="btn ghost" type="button" onClick=${() => { onClose(); go(`#/p/${task.project_id}/t/${task.id}/changes`); }}>View the changes</button>
+      </div>
+    <//>
   `;
 }
 

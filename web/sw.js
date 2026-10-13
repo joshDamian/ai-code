@@ -7,7 +7,7 @@
 // the web client is built not to do - and a subscribe POST answered from cache would
 // never reach the server at all.
 
-const CACHE = 'bench-shell-v3';
+const CACHE = 'bench-shell-v4';
 
 // The entry points only. The rest of the module graph is cached as it is fetched, which
 // keeps this list from having to name every view the app grows.
@@ -71,24 +71,53 @@ self.addEventListener('push', (e) => {
   }
   const title = data.title || 'Bench';
   e.waitUntil(
-    self.registration.showNotification(title, {
-      body: data.body || '',
-      icon: '/icons/icon-192.png',
-      // The status-bar badge on Android is drawn as a white-on-transparent mask.
-      badge: '/icons/badge-96.png',
-      // Collapses repeats for the same task rather than stacking a lock screen full of
-      // them, which is what a repair loop failing three times would otherwise do.
-      tag: data.tag || title,
-      // A payload may name its own screen (a permission prompt opens its
-      // conversation); otherwise the task, otherwise the dashboard.
-      data: { url: data.url || '/' },
-    })
+    (async () => {
+      // A window already on screen has the same news first, live over the socket: a
+      // banner on top of it is the app interrupting itself. The page's own badge and the
+      // approval bar carry it there, so nothing is missed by staying quiet.
+      const open = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      if (open.some((c) => c.visibilityState === 'visible')) return;
+      const options = {
+        body: data.body || '',
+        icon: '/icons/icon-192.png',
+        // The status-bar badge on Android is drawn as a white-on-transparent mask.
+        badge: '/icons/badge-96.png',
+        // Collapses repeats for the same task rather than stacking a lock screen full of
+        // them, which is what a repair loop failing three times would otherwise do.
+        tag: data.tag || title,
+        // A payload may name its own screen (a permission prompt opens its
+        // conversation); otherwise the task, otherwise the dashboard. The approval id,
+        // when there is one, is what the buttons below answer.
+        data: { url: data.url || '/', approvalId: data.approvalId || null },
+      };
+      // An approval can be settled from the shade, without opening the app. Only a
+      // permission prompt gets these; a plan or a question needs the card that shows it,
+      // so those arrive as a plain notification that opens the conversation.
+      if (data.approvalId) options.actions = [{ action: 'allow', title: 'Allow' }, { action: 'deny', title: 'Deny' }];
+      await self.registration.showNotification(title, options);
+    })()
   );
 });
 
 self.addEventListener('notificationclick', (e) => {
+  const d = e.notification.data || {};
+  const action = e.action;
   e.notification.close();
-  const url = e.notification.data?.url || '/';
+  // Answered here rather than by opening the app: the whole point of the button is that
+  // it works from a locked phone. The same endpoint the card posts to, with the session
+  // cookie the worker sends for this origin.
+  if (d.approvalId && (action === 'allow' || action === 'deny')) {
+    e.waitUntil(
+      fetch(`/api/approvals/${encodeURIComponent(d.approvalId)}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(action === 'allow' ? { allow: true } : { allow: false, message: '' }),
+      }).catch(() => {})
+    );
+    return;
+  }
+  const url = d.url || '/';
   e.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
       // An open window is reused rather than a second copy opened beside it. It is
@@ -103,4 +132,13 @@ self.addEventListener('notificationclick', (e) => {
       return self.clients.openWindow(url);
     })
   );
+});
+
+// The page telling the worker something it cannot see for itself: an approval was
+// answered here (by this window or another), so the banner for it is stale and goes.
+self.addEventListener('message', (e) => {
+  const m = e.data;
+  if (m?.type === 'close-notification' && m.tag) {
+    e.waitUntil(self.registration.getNotifications({ tag: m.tag }).then((list) => list.forEach((n) => n.close())));
+  }
 });

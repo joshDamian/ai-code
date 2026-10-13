@@ -1,5 +1,5 @@
 // Providers, defaults, devices, notifications and the server's health.
-import { html, useEffect, useState, formatCost, formatDuration } from '../lib.mjs';
+import { html, useEffect, useState, recall, remember, formatCost, formatDuration } from '../lib.mjs';
 import { api, useStore, refresh, reconnectNow } from '../api.mjs';
 import { showToast } from '../components/toast.mjs';
 import { confirmAction } from '../components/confirm.mjs';
@@ -182,9 +182,17 @@ function InstallApp() {
   `;
 }
 
+const CHOICES_KEY = 'bench:push:choices';
+const CHOICE_FIELDS = [
+  { key: 'approvals', label: 'When Claude needs an approval', hint: 'Allow or Deny from the notification itself' },
+  { key: 'finished', label: 'When a turn finishes' },
+  { key: 'errors', label: 'When a turn stops with an error' },
+];
+
 function Notifications() {
   const key = useStore((s) => s.push);
   const [sub, setSub] = useState(undefined);
+  const [choices, setChoices] = useState(() => recall(CHOICES_KEY, { approvals: true, finished: true, errors: true }));
   const supported = 'serviceWorker' in navigator && 'PushManager' in window;
   useEffect(() => {
     if (!supported) return;
@@ -195,7 +203,9 @@ function Notifications() {
       if ((await Notification.requestPermission()) !== 'granted') throw new Error('Notifications are blocked for this site');
       const reg = await navigator.serviceWorker.ready;
       const s = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key) });
-      await api.pushSubscribe(s.toJSON());
+      // What this device wants rides with the subscription, since the worker that
+      // receives the push has no localStorage of its own to read it from.
+      await api.pushSubscribe({ ...s.toJSON(), choices });
       setSub(s);
       showToast('Notifications on', 'success');
     } catch (e) {
@@ -207,14 +217,30 @@ function Notifications() {
     await sub.unsubscribe().catch(() => {});
     setSub(null);
   };
+  const setChoice = (k, v) => {
+    const next = { ...choices, [k]: v };
+    setChoices(next);
+    remember(CHOICES_KEY, next);
+    if (sub) api.pushChoices(sub.endpoint, next).catch(toast);
+  };
   return html`
     <section class="section card">
       <h2>Notifications</h2>
-      <p class="muted">A push to this device when Claude needs an approval or finishes a turn.</p>
+      <p class="muted">A push to this device when Claude needs an approval or finishes a turn. Each device chooses for itself.</p>
       ${!supported || !key
         ? html`<p class="muted">Not available here. Push needs HTTPS (the tailnet address) and, on iOS, the app added to the home screen.</p>`
         : sub
-          ? html`<button class="btn secondary" type="button" onClick=${disable}>Turn off on this device</button>`
+          ? html`
+              <div class="checks">
+                ${CHOICE_FIELDS.map(
+                  (f) => html`<div class="check-row" key=${f.key}>
+                    <${Toggle} hideLabel label=${f.label} checked=${choices[f.key] !== false} onChange=${(on) => setChoice(f.key, on)} />
+                    <span>${f.label}</span>
+                    ${f.hint ? html`<span class="muted">${f.hint}</span>` : null}
+                  </div>`
+                )}
+              </div>
+              <div class="row"><button class="btn secondary" type="button" onClick=${disable}>Turn off on this device</button></div>`
           : html`<button class="btn" type="button" disabled=${sub === undefined} onClick=${enable}>Turn on for this device</button>`}
     </section>
   `;

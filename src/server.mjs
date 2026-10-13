@@ -123,11 +123,26 @@ try {
   /* no push on this install */
 }
 
-/** @param {{title:string, body:string, url?:string, tag?:string}} payload */
-async function pushAll(payload) {
+// What each kind of alert is called in a device's stored choices. A device may ask not
+// to be woken for one of these; a device with nothing stored predates the setting and
+// wanted everything.
+const CHOICE_KEY = { approval: 'approvals', finished: 'finished', error: 'errors' };
+/** @param {string|null} choices @param {string} kind */
+function wantsPush(choices, kind) {
+  if (!choices) return true;
+  try {
+    return /** @type {Record<string, unknown>} */ (JSON.parse(choices))[CHOICE_KEY[/** @type {'approval'|'finished'|'error'} */ (kind)]] !== false;
+  } catch {
+    return true;
+  }
+}
+
+/** @param {{title:string, body:string, url?:string, tag?:string, approvalId?:string, sessionId?:string}} payload @param {'approval'|'finished'|'error'|'always'} [kind] */
+async function pushAll(payload, kind = 'always') {
   if (!vapid) return;
   await Promise.allSettled(
     svc.store.listPushSubscriptions().map(async (/** @type {any} */ s) => {
+      if (kind !== 'always' && !wantsPush(s.choices, kind)) return;
       try {
         await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, JSON.stringify(payload));
       } catch (e) {
@@ -204,11 +219,13 @@ svc.runtime.on('delta', queueDelta);
 svc.runtime.on('approval', (a) => {
   broadcast({ type: 'approval', approval: a });
   const s = svc.store.getSession(a.session_id);
-  if (s) pushAll({ title: `Approval needed: ${a.tool}`, body: `${s.title}${a.title ? ` — ${a.title}` : ''}`, url: sessionUrl(s), tag: `approval-${a.id}` }).catch(() => {});
+  // The approval id travels with the push so the notification's own Allow and Deny can
+  // answer it without the app being opened.
+  if (s) pushAll({ title: `Approval needed: ${a.tool}`, body: `${s.title}${a.title ? ` — ${a.title}` : ''}`, url: sessionUrl(s), tag: `approval-${a.id}`, approvalId: a.id, sessionId: s.id }, 'approval').catch(() => {});
 });
 svc.runtime.on('approval-done', (a) => broadcast({ type: 'approval-done', ...a }));
 svc.runtime.on('turn-done', ({ session, ok }) => {
-  if (session) pushAll({ title: ok ? 'Claude finished' : 'Claude stopped with an error', body: session.title, url: sessionUrl(session), tag: `turn-${session.id}` }).catch(() => {});
+  if (session) pushAll({ title: ok ? 'Claude finished' : 'Claude stopped with an error', body: session.title, url: sessionUrl(session), tag: `turn-${session.id}`, sessionId: session.id }, ok ? 'finished' : 'error').catch(() => {});
 });
 svc.on('task', (t) => broadcast({ type: 'task', task: t }));
 svc.on('git', (projectId) => broadcast({ type: 'git', project_id: projectId }));
@@ -630,6 +647,10 @@ route('POST', '/api/pairing', async () => {
 route('GET', '/api/push/key', () => (vapid ? { key: vapid.publicKey } : Promise.reject(Object.assign(new Error('Push is not available'), { status: 503 }))));
 route('POST', '/api/push/subscribe', ({ body }) => (svc.store.addPushSubscription(body), { ok: true }));
 route('POST', '/api/push/unsubscribe', ({ body }) => ({ ok: svc.store.deletePushSubscription(body.endpoint) > 0 }));
+// What this device wants to be woken for. Stored with the subscription, because the
+// service worker that receives the push is the thing that would have to read it and a
+// worker has no localStorage to read from.
+route('POST', '/api/push/choices', ({ body }) => ({ ok: svc.store.setPushChoices(body.endpoint, body.choices) > 0 }));
 
 // Whether something will start this process again after it exits: the service
 // definition `bench service install` writes says so.

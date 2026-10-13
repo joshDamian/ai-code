@@ -1,6 +1,6 @@
 // A Claude session: its transcript, what it is waiting on, and the box to talk to it.
 import { html, useEffect, useMemo, useRef, useState, recall, remember, isTouch, formatCost, formatDuration } from '../lib.mjs';
-import { api, useStore, watchSession } from '../api.mjs';
+import { api, useStore, watchSession, outboxCount } from '../api.mjs';
 import { Markdown } from '../components/markdown.mjs';
 import { MoreMenu } from '../components/menu.mjs';
 import { CopyButton } from '../components/copy.mjs';
@@ -8,9 +8,17 @@ import { showToast } from '../components/toast.mjs';
 import { confirmAction } from '../components/confirm.mjs';
 import { TerminalPane } from '../components/terminal.mjs';
 import { FilesContext, useSessionFiles, useViewer, FileViewer, FileButtons, FileThumb } from '../components/files.mjs';
-import { StatusBadge, ModelPicker, ModePicker, EffortPicker, MODES, Dialog, Icon } from '../components/ui.mjs';
+import { StatusBadge, ModelPicker, ModePicker, EffortPicker, MODES, Dialog, Sheet, Icon } from '../components/ui.mjs';
 
 const toast = (e) => showToast(e.message || String(e), 'error');
+
+// The transcript as it was when it was last read, kept per session so reopening one - the
+// common case on a phone, where a session is left and returned to all day - draws its
+// history at once instead of an empty pane and a spinner. Bounded to the tail: that is
+// what a person comes back to, and a whole conversation of tool output is more than the
+// small storage a browser grants will hold. The fetch replaces it either way.
+const eventsKey = (id) => `bench:events:${id}`;
+const EVENTS_CACHED = 150;
 
 export function SessionPane({ sessionId, onArchived }) {
   const live = useStore((s) => s.sessions.find((x) => x.id === sessionId));
@@ -24,8 +32,13 @@ export function SessionPane({ sessionId, onArchived }) {
   const [stream, setStream] = useState({ text: '', thinking: '' });
   const [more, setMore] = useState(false);
   const [terminal, setTerminal] = useState(false);
+  const [sheet, setSheet] = useState(false);
+  // The reader is at the bottom (following) or has scrolled up to read. `pinned` is what
+  // the auto-scroll follows; `showJump` is the tap-to-catch-up button, offered only when
+  // the reader is away from the bottom and something new has landed.
   const scroller = useRef(null);
   const pinned = useRef(true);
+  const [showJump, setShowJump] = useState(false);
   const files = useSessionFiles(sessionId, events);
   const [viewing, view, closeViewer] = useViewer();
   const filesCtx = useMemo(() => ({ sessionId, files, view }), [sessionId, files]);
@@ -38,12 +51,13 @@ export function SessionPane({ sessionId, onArchived }) {
         setEvents(r.events);
         setMore(r.events.length >= 400);
         setStream({ text: '', thinking: '' });
+        remember(eventsKey(sessionId), r.events.slice(-EVENTS_CACHED));
       })
       .catch(toast);
 
   useEffect(() => {
     setLoaded(null);
-    setEvents([]);
+    setEvents(recall(eventsKey(sessionId), []));
     pinned.current = true;
     load();
     // Streaming text is gathered and drawn at most once a frame: re-rendering the
@@ -90,8 +104,19 @@ export function SessionPane({ sessionId, onArchived }) {
   // Follows the bottom while the reader is there; leaves them alone when they scrolled up.
   useEffect(() => {
     const el = scroller.current;
-    if (el && pinned.current) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    if (pinned.current) el.scrollTop = el.scrollHeight;
+    // Something arrived while the reader was up in the history: offer a way back down
+    // rather than yanking the page out from under them.
+    else setShowJump(true);
   }, [events, stream, approvals.length]);
+
+  const toBottom = () => {
+    const el = scroller.current;
+    pinned.current = true;
+    setShowJump(false);
+    if (el) el.scrollTop = el.scrollHeight;
+  };
 
   const earlier = async () => {
     const before = events[0]?.id;
@@ -116,42 +141,67 @@ export function SessionPane({ sessionId, onArchived }) {
     if (title && title.trim() !== s.title) api.updateSession(s.id, { title }).catch(toast);
   };
 
+  // Model, effort, mode and the way out, as one chip on a phone: four controls in the
+  // header is a row of narrow selects a thumb cannot hit, and the conversation is what
+  // the screen is for. The chip names what the session runs as and opens a sheet.
+  const provider = providers.find((p) => p.id === s.provider_id);
+  const model = provider?.models?.find((m) => m.id === s.model_id);
+  const modelName = model ? model.display_name || model.name : provider?.name || 'Model';
+  const modeName = MODES.find((m) => m.value === s.permission_mode)?.label || s.permission_mode;
+  const setMode = (mode) => api.updateSession(s.id, { mode }).catch(toast);
+  const items = [
+    { label: 'Open in terminal (claude --resume)', disabled: !s.claude_session_id || running, onSelect: () => setTerminal(true) },
+    { label: 'Rename', onSelect: rename },
+    s.archived_at
+      ? { label: 'Unarchive', onSelect: () => api.archiveSession(s.id, false).catch(toast) }
+      : { label: 'Archive', onSelect: () => api.archiveSession(s.id).then(() => onArchived?.()).catch(toast) },
+    {
+      label: 'Delete',
+      danger: true,
+      onSelect: async () => {
+        if (await confirmAction({ title: 'Delete this session?', body: 'Its transcript here is removed. Files it changed stay as they are.', confirmLabel: 'Delete', tone: 'danger' })) api.deleteSession(s.id).then(() => onArchived?.()).catch(toast);
+      },
+    },
+  ];
+
+  // The first approval, and whether it is one a single tap can settle. A plan and a
+  // question need the card that shows them; a permission prompt does not.
+  const first = approvals[0];
+  const quickAnswer = first && first.tool !== 'ExitPlanMode' && first.tool !== 'AskUserQuestion';
+  const review = () => document.getElementById(`approval-${first.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // Quick replies, offered only when the turn has settled and nothing is being asked:
+  // the four things a person types most often after Claude stops.
+  const showQuick = !running && !approvals.length && events[events.length - 1]?.kind === 'result';
+  const QUICK = ['Continue', 'Run the tests', 'Commit it', 'Explain the change'];
+
   return html`
     <section class="session">
       <header class="session-head">
         <div class="session-title">
           <button class="title-btn" type="button" title="Rename" onClick=${rename}>${s.title}</button>
           <${StatusBadge} status=${s.status} />
-          ${s.cost ? html`<span class="muted mono-sm" title="Estimated spend">${formatCost(s.cost)}</span>` : null}
+          ${s.cost ? html`<span class="muted mono-sm hide-touch" title="Estimated spend">${formatCost(s.cost)}</span>` : null}
         </div>
         <div class="session-controls">
           <${ModelPicker} compact providers=${providers} value=${{ providerId: s.provider_id, modelId: s.model_id }} onChange=${(v) => api.updateSession(s.id, v).catch(toast)} />
           <${EffortPicker} compact value=${s.effort} onChange=${(effort) => api.updateSession(s.id, { effort }).catch(toast)} />
-          <${ModePicker} compact value=${s.permission_mode} onChange=${(mode) => api.updateSession(s.id, { mode }).catch(toast)} />
-          <${MoreMenu}
-            items=${[
-              { label: 'Open in terminal (claude --resume)', disabled: !s.claude_session_id || running, onSelect: () => setTerminal(true) },
-              { label: 'Rename', onSelect: rename },
-              s.archived_at
-                ? { label: 'Unarchive', onSelect: () => api.archiveSession(s.id, false).catch(toast) }
-                : { label: 'Archive', onSelect: () => api.archiveSession(s.id).then(() => onArchived?.()).catch(toast) },
-              {
-                label: 'Delete',
-                danger: true,
-                onSelect: async () => {
-                  if (await confirmAction({ title: 'Delete this session?', body: 'Its transcript here is removed. Files it changed stay as they are.', confirmLabel: 'Delete', tone: 'danger' })) api.deleteSession(s.id).then(() => onArchived?.()).catch(toast);
-                },
-              },
-            ]}
-          />
+          <${ModePicker} compact value=${s.permission_mode} onChange=${setMode} />
+          <${MoreMenu} items=${items} />
         </div>
+        <button class="session-chip" type="button" onClick=${() => setSheet(true)} aria-haspopup="dialog">
+          <span class="session-chip-model">${modelName}</span>
+          <span class="session-chip-mode">${modeName}</span>
+          <${Icon} name="chevron" size=${14} />
+        </button>
       </header>
       <div
         class="transcript"
         ref=${scroller}
         onScroll=${(e) => {
           const el = e.currentTarget;
-          pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          pinned.current = atBottom;
+          setShowJump((v) => (atBottom ? false : v));
         }}
       >
         ${more ? html`<button class="btn sm ghost earlier" type="button" onClick=${earlier}>Load earlier</button>` : null}
@@ -161,16 +211,41 @@ export function SessionPane({ sessionId, onArchived }) {
         ${stream.text ? html`<div class="msg assistant streaming"><${Markdown} text=${stream.text} /></div>` : null}
         ${s.status === 'running' && !stream.text ? html`<div class="working"><span class="dot dot-running"></span> Working…</div>` : null}
         ${s.status === 'error' && s.error ? html`<div class="notice notice-bad">${s.error}</div>` : null}
-        ${approvals.map((a) => html`<${ApprovalCard} key=${a.id} approval=${a} />`)}
+        ${approvals.map((a) => html`<div id=${`approval-${a.id}`} key=${a.id}><${ApprovalCard} approval=${a} /></div>`)}
+        ${showJump ? html`<button class="jump-btn" type="button" onClick=${toBottom}><${Icon} name="down" size=${14} /> New reply</button>` : null}
       </div>
+      ${approvals.length
+        ? html`<div class="pending-bar">
+            <button class="pending-main" type="button" onClick=${review}>
+              <span class="dot dot-waiting"></span>
+              <span class="pending-text">${approvals.length > 1 ? `${approvals.length} waiting on you` : first.title || `Claude needs you`}</span>
+            </button>
+            ${quickAnswer
+              ? html`<button class="btn sm" type="button" onClick=${() => api.answer(first.id, { allow: true }).catch(toast)}>Allow</button>
+                  <button class="btn sm secondary" type="button" onClick=${() => api.answer(first.id, { allow: false, message: '' }).catch(toast)}>Deny</button>`
+              : html`<button class="btn sm secondary" type="button" onClick=${review}>Review</button>`}
+          </div>`
+        : null}
       ${s.archived_at
         ? html`<div class="composer archived muted">
             ${taskState && taskState !== 'active'
               ? html`<span>This task is ${taskState}. Its sessions are kept as a record.</span>`
               : html`<span>Archived. <button class="link-btn" type="button" onClick=${() => api.archiveSession(s.id, false).catch(toast)}>Unarchive</button> to continue.</span>`}
           </div>`
-        : html`<${Composer} session=${s} commands=${loaded?.commands || []} />`}
+        : html`<${Composer} session=${s} commands=${loaded?.commands || []} quick=${showQuick ? QUICK : null} />`}
       ${viewing ? html`<${FileViewer} sessionId=${s.id} file=${viewing} onClose=${closeViewer} />` : null}
+      ${sheet
+        ? html`<${Sheet} title="Session settings" onClose=${() => setSheet(false)}>
+            <label class="field"><span class="field-label">Model</span><${ModelPicker} providers=${providers} value=${{ providerId: s.provider_id, modelId: s.model_id }} onChange=${(v) => api.updateSession(s.id, v).catch(toast)} /></label>
+            <label class="field"><span class="field-label">Effort</span><${EffortPicker} value=${s.effort} onChange=${(effort) => api.updateSession(s.id, { effort }).catch(toast)} /></label>
+            <label class="field"><span class="field-label">Permissions</span><${ModePicker} value=${s.permission_mode} onChange=${setMode} /></label>
+            <div class="sheet-actions">
+              ${items.map(
+                (it) => html`<button class="btn ${it.danger ? 'danger' : 'secondary'}" type="button" disabled=${it.disabled} key=${it.label} onClick=${() => { setSheet(false); it.onSelect(); }}>${it.label}</button>`
+              )}
+            </div>
+          <//>`
+        : null}
       ${terminal
         ? html`<${Dialog} wide title="claude --resume" onClose=${() => setTerminal(false)}>
             <p class="muted">The same conversation in Claude Code's own interface. Close this before sending from the composer again.</p>
@@ -231,12 +306,7 @@ function Entry({ event: e, results, reply }) {
     return html`
       <div class="msg assistant ${sub ? 'subagent' : ''}">
         ${d.error ? html`<div class="notice notice-bad">API error: ${d.error}</div>` : null}
-        ${(d.content || []).map((b, i) => {
-          if (b.type === 'text') return b.text.trim() ? html`<${Markdown} key=${i} text=${b.text} />` : null;
-          if (b.type === 'thinking') return html`<details key=${i} class="msg-thinking"><summary>Thinking</summary><${Markdown} text=${b.thinking} /></details>`;
-          if (b.type === 'tool_use') return html`<${ToolCall} key=${b.id} call=${b} result=${results.get(b.id)} />`;
-          return null;
-        })}
+        <${TurnContent} content=${d.content || []} results=${results} />
       </div>
     `;
   }
@@ -250,6 +320,60 @@ function Entry({ event: e, results, reply }) {
   if (e.kind === 'notice') return html`<div class="sys-line">${d.text}</div>`;
   if (e.kind === 'error') return html`<div class="notice notice-bad">${d.message}</div>`;
   return null;
+}
+
+/**
+ * One assistant message's blocks, with runs of tool calls gathered into a single
+ * collapsed step. A turn that runs six commands and edits three files is nine rows of
+ * chrome between two paragraphs of prose; the prose is what the person is reading, and
+ * the steps are what they open when they want them.
+ */
+function TurnContent({ content, results }) {
+  const out = [];
+  let run = [];
+  const flush = (key) => {
+    if (run.length) out.push(html`<${ToolRun} key=${`run-${key}`} calls=${run} results=${results} />`);
+    run = [];
+  };
+  content.forEach((b, i) => {
+    if (b.type === 'tool_use') {
+      run.push(b);
+      return;
+    }
+    flush(i);
+    if (b.type === 'text') {
+      if (b.text.trim()) out.push(html`<${Markdown} key=${i} text=${b.text} />`);
+    } else if (b.type === 'thinking') {
+      out.push(html`<details key=${i} class="msg-thinking"><summary>Thinking</summary><${Markdown} text=${b.thinking} /></details>`);
+    }
+  });
+  flush('end');
+  return out;
+}
+
+/** A run of tool calls as one line: what it did, how much of it, and whether it broke. */
+function ToolRun({ calls, results }) {
+  const [open, setOpen] = useState(calls.length === 1);
+  // One call is not a run; showing it collapsed would hide a lone command behind a
+  // summary that says less than the command does.
+  if (calls.length === 1) return html`<${ToolCall} call=${calls[0]} result=${results.get(calls[0].id)} />`;
+  const failed = calls.filter((c) => results.get(c.id)?.is_error).length;
+  const cmds = calls.filter((c) => c.name === 'Bash').length;
+  const edits = calls.filter((c) => ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'].includes(c.name)).length;
+  const parts = [`${calls.length} steps`];
+  if (cmds) parts.push(`${cmds} command${cmds === 1 ? '' : 's'}`);
+  if (edits) parts.push(`${edits} edit${edits === 1 ? '' : 's'}`);
+  if (failed) parts.push(`${failed} error${failed === 1 ? '' : 's'}`);
+  return html`
+    <div class="tool-group">
+      <button class="tool-group-head" type="button" onClick=${() => setOpen((v) => !v)} aria-expanded=${open}>
+        <span class="tool-chev">${open ? '▾' : '▸'}</span>
+        <span class="tool-group-label">${parts.join(' · ')}</span>
+        ${failed ? html`<span class="tool-flag">error</span>` : null}
+      </button>
+      ${open ? html`<div class="tool-group-body">${calls.map((c) => html`<${ToolCall} key=${c.id} call=${c} result=${results.get(c.id)} />`)}</div>` : null}
+    </div>
+  `;
 }
 
 /** The text of a tool result, whatever shape it came in. */
@@ -467,7 +591,7 @@ function readImage(file) {
 
 let attachSeq = 0;
 
-function Composer({ session: s, commands }) {
+function Composer({ session: s, commands, quick }) {
   const key = `bench:draft:${s.id}`;
   const [text, setText] = useState(() => recall(key, ''));
   // Each attachment: {key, name, size, inline, url?, media_type, data?} for an inline
@@ -475,9 +599,47 @@ function Composer({ session: s, commands }) {
   const [items, setItems] = useState([]);
   const [sending, setSending] = useState(false);
   const [dragging, setDragging] = useState(false);
+  // What is typed while the line is down is kept by the outbox rather than lost; the
+  // count is shown here so a message that did not go says so instead of looking sent.
+  const [queued, setQueued] = useState(() => outboxCount(s.id));
   const box = useRef(null);
   const file = useRef(null);
   const running = s.status === 'running' || s.status === 'waiting';
+  useEffect(() => {
+    const on = () => setQueued(outboxCount(s.id));
+    window.addEventListener('bench:outbox', on);
+    return () => window.removeEventListener('bench:outbox', on);
+  }, [s.id]);
+
+  // Dictation, where the browser has it. Typing a paragraph on a phone is the slowest
+  // thing in this app; speaking it is not. Progressive: the button is absent where the
+  // API is. What is heard is appended to whatever is already typed, so it composes with
+  // the box rather than replacing it.
+  const SR = typeof window !== 'undefined' ? window.SpeechRecognition || window.webkitSpeechRecognition : null;
+  const rec = useRef(null);
+  const [listening, setListening] = useState(false);
+  const dictate = () => {
+    if (listening) {
+      rec.current?.stop();
+      return;
+    }
+    const r = new SR();
+    const start = text;
+    r.lang = navigator.language || 'en-US';
+    r.interimResults = false;
+    r.continuous = false;
+    r.onresult = (e) => {
+      let said = '';
+      for (let i = 0; i < e.results.length; i++) said += e.results[i][0].transcript;
+      const sep = start && !/\s$/.test(start) ? ' ' : '';
+      setText(start + sep + said.trim());
+    };
+    r.onend = () => setListening(false);
+    r.onerror = () => setListening(false);
+    rec.current = r;
+    setListening(true);
+    r.start();
+  };
 
   useEffect(() => {
     setText(recall(key, ''));
@@ -502,7 +664,7 @@ function Composer({ session: s, commands }) {
     if (sending || uploading || empty) return;
     setSending(true);
     try {
-      await api.send(
+      const r = await api.send(
         s.id,
         text,
         items.filter((it) => it.inline).map(({ media_type, data }) => ({ media_type, data })),
@@ -510,6 +672,9 @@ function Composer({ session: s, commands }) {
       );
       setText('');
       setItems([]);
+      // Cleared as though sent, because it will be: the outbox holds it and the count
+      // above the box is what says it has not reached the server yet.
+      if (r?.queued) showToast('Queued — it sends when the connection is back', 'info');
     } catch (e) {
       toast(e);
     } finally {
@@ -577,6 +742,10 @@ function Composer({ session: s, commands }) {
       }}
     >
       ${slash.length ? html`<div class="slash">${slash.map((c) => html`<button type="button" onClick=${() => setText(`/${c} `)}>/${c}</button>`)}</div>` : null}
+      ${quick && !text.trim() && !items.length
+        ? html`<div class="quick-replies">${quick.map((q) => html`<button class="quick-chip" type="button" key=${q} onClick=${() => setText(q)}>${q}</button>`)}</div>`
+        : null}
+      ${queued ? html`<div class="queued-note"><span class="dot dot-waiting"></span>${queued} message${queued === 1 ? '' : 's'} waiting for the connection</div>` : null}
       <div class="composer-box">
         ${items.length
           ? html`<div class="thumbs">
@@ -629,6 +798,7 @@ function Composer({ session: s, commands }) {
           <button class="mode-chip" type="button" onClick=${cycleMode} title="Permission mode (Shift+Tab)">${MODES.find((m) => m.value === s.permission_mode)?.label}</button>
           <span class="composer-hint muted hide-touch">Enter to send · Shift+Enter new line${running ? ' · Esc to stop' : ''}</span>
           <span class="composer-gap"></span>
+          ${SR ? html`<button class="btn ghost icon-only ${listening ? 'listening' : ''}" type="button" aria-label=${listening ? 'Stop dictation' : 'Dictate'} title="Dictate" onClick=${dictate}><${Icon} name="mic" /></button>` : null}
           ${running ? html`<button class="btn danger icon-only" type="button" aria-label="Stop" title="Stop (Esc)" onClick=${() => api.interrupt(s.id).catch(toast)}><${Icon} name="stop" /></button>` : null}
           <button class="btn icon-only send-btn" type="button" aria-label="Send" title=${uploading ? 'Waiting for uploads to finish' : 'Send'} disabled=${sending || uploading || empty} onClick=${send}><${Icon} name="send" /></button>
         </div>

@@ -107,6 +107,21 @@ function formatBytes(n) {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+// A phone cannot show a file list beside a diff, and a 900-line column of rows is
+// scrolled through rather than read. Below 860px the viewer becomes one file at a time
+// with a horizontal strip of files, a count of where you are, and a swipe to move.
+function useNarrow() {
+  const [narrow, setNarrow] = useState(() => typeof matchMedia === 'function' && matchMedia('(max-width:860px)').matches);
+  useEffect(() => {
+    if (typeof matchMedia !== 'function') return undefined;
+    const mq = matchMedia('(max-width:860px)');
+    const on = () => setNarrow(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
+  return narrow;
+}
+
 export function DiffViewer({ diff, nav = false, storageKey = null, untracked = null }) {
   const [split, setSplit] = useState(false);
   // What the reader toggled, by path. Absent means the default: open, unless the file
@@ -122,6 +137,7 @@ export function DiffViewer({ diff, nav = false, storageKey = null, untracked = n
   });
   const [hljs, setHljs] = useState(null);
   const boxes = useRef({});
+  const narrow = useNarrow();
   const parsed = useMemo(() => diffFiles(diff), [diff]);
   useEffect(() => {
     let live = true;
@@ -179,7 +195,7 @@ export function DiffViewer({ diff, nav = false, storageKey = null, untracked = n
           ${seen ? html`<span class="muted">· ${seen} of ${files.length} viewed</span>` : null}
         </div>
         <div class="dv-ctrl">
-          ${hasNav
+          ${hasNav && !narrow
             ? html`<button class="btn secondary dv-wide" type="button" aria-pressed=${wide} title=${wide ? 'Show the file list' : 'Hide the file list and widen the diff'} onClick=${toggleWide}>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
                   <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" />
@@ -196,38 +212,125 @@ export function DiffViewer({ diff, nav = false, storageKey = null, untracked = n
         </div>
       </div>
       ${extra.length ? html`<pre class="dv-extra">${extra.join('\n')}</pre>` : null}
-      <div class="dv-body ${withNav ? 'with-nav' : ''}">
-        ${withNav
-          ? html`<nav class="dv-nav" aria-label="Changed files">
-              ${files.map((f) => {
-                const [dir, base] = splitPath(f.path);
-                return html`<button class="dv-nav-item ${isViewed(f) ? 'viewed' : ''}" type="button" key=${f.path} title=${f.path} onClick=${() => jump(f)}>
-                  <${Status} s=${f.status} />
-                  <span class="dv-nav-name"><span class="muted">${dir}</span>${base}</span>
-                  ${f.add + f.del ? html`<span class="dv-nav-count"><span class="dv-add">+${f.add}</span> <span class="dv-del">−${f.del}</span></span>` : html`<span></span>`}
-                </button>`;
-              })}
-            </nav>`
-          : null}
-        <div class="dv-files">
-          ${files.map(
-            (f) => html`<${FileBox}
+      ${narrow
+        ? html`<${PhoneDiff}
+            files=${files}
+            sizes=${sizes}
+            split=${split}
+            hljs=${hljs}
+            isViewed=${isViewed}
+            isLarge=${isLarge}
+            isFolded=${isFolded}
+            setFolded=${setFolded}
+            onViewed=${setMark}
+          />`
+        : html`<div class="dv-body ${withNav ? 'with-nav' : ''}">
+            ${withNav
+              ? html`<nav class="dv-nav" aria-label="Changed files">
+                  ${files.map((f) => {
+                    const [dir, base] = splitPath(f.path);
+                    return html`<button class="dv-nav-item ${isViewed(f) ? 'viewed' : ''}" type="button" key=${f.path} title=${f.path} onClick=${() => jump(f)}>
+                      <${Status} s=${f.status} />
+                      <span class="dv-nav-name"><span class="muted">${dir}</span>${base}</span>
+                      ${f.add + f.del ? html`<span class="dv-nav-count"><span class="dv-add">+${f.add}</span> <span class="dv-del">−${f.del}</span></span>` : html`<span></span>`}
+                    </button>`;
+                  })}
+                </nav>`
+              : null}
+            <div class="dv-files">
+              ${files.map(
+                (f) => html`<${FileBox}
+                  key=${f.path}
+                  f=${f}
+                  split=${split}
+                  folded=${isFolded(f)}
+                  large=${isLarge(f)}
+                  viewed=${isViewed(f)}
+                  markable=${!!storageKey}
+                  hljs=${hljs}
+                  size=${sizes[f.path]}
+                  boxRef=${(el) => (boxes.current[f.path] = el)}
+                  onFold=${() => setFolded((s) => ({ ...s, [f.path]: !isFolded(f) }))}
+                  onViewed=${(on) => setMark(f, on)}
+                />`
+              )}
+            </div>
+          </div>`}
+    </div>
+  `;
+}
+
+/**
+ * The phone's diff: one file, filling the width, with where you are and what it is above
+ * it, and the neighbours one swipe away. The strip of files is a tappable list of every
+ * changed file with its counts, so the thing that is hard on a phone - moving between
+ * files - is the thing the layout is built around.
+ */
+function PhoneDiff({ files, sizes, split, hljs, isViewed, isLarge, isFolded, setFolded, onViewed }) {
+  // Open on the first file not yet marked viewed, which is where a person reading
+  // through a change left off; index 0 of an empty list is fine because it is never used.
+  const [i, setI] = useState(() => Math.max(0, files.findIndex((f) => !isViewed(f))));
+  const touch = useRef(null);
+  const at = Math.max(0, Math.min(i, files.length - 1));
+  const f = files[at];
+  const goTo = (j) => {
+    const k = Math.max(0, Math.min(files.length - 1, j));
+    setI(k);
+    // A file move is a new column: back to its top, not the scroll offset of the last.
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+  return html`
+    <div
+      class="dv-phone"
+      onTouchStart=${(e) => {
+        const t = e.touches[0];
+        touch.current = { x: t.clientX, y: t.clientY };
+      }}
+      onTouchEnd=${(e) => {
+        const from = touch.current;
+        touch.current = null;
+        // A sideways swipe is a file move; a vertical one is the scroll it looks like.
+        if (!from) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - from.x;
+        const dy = t.clientY - from.y;
+        if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+        goTo(at + (dx < 0 ? 1 : -1));
+      }}
+    >
+      <div class="dv-pp">
+        <button class="btn sm secondary" type="button" disabled=${at === 0} aria-label="Previous file" onClick=${() => goTo(at - 1)}>‹</button>
+        <span class="dv-pp-count">${at + 1} / ${files.length}${f.add + f.del ? html` · <span class="dv-add">+${f.add}</span> <span class="dv-del">−${f.del}</span>` : null}</span>
+        <button class="btn sm secondary" type="button" disabled=${at === files.length - 1} aria-label="Next file" onClick=${() => goTo(at + 1)}>›</button>
+      </div>
+      <div class="dv-strip" role="tablist" aria-label="Changed files">
+        ${files.map((x, k) => {
+          const [dir, base] = splitPath(x.path);
+          return html`<button role="tab" aria-selected=${k === at} class="dv-strip-item ${k === at ? 'on' : ''} ${isViewed(x) ? 'viewed' : ''}" type="button" key=${x.path} title=${x.path} onClick=${() => goTo(k)}>
+            <${Status} s=${x.status} />
+            <span class="dv-strip-name"><span class="muted">${dir}</span>${base}</span>
+            ${x.add + x.del ? html`<span class="dv-nav-count"><span class="dv-add">+${x.add}</span> <span class="dv-del">−${x.del}</span></span>` : null}
+          </button>`;
+        })}
+      </div>
+      ${f
+        ? html`<div class="dv-files">
+            <${FileBox}
               key=${f.path}
               f=${f}
               split=${split}
               folded=${isFolded(f)}
               large=${isLarge(f)}
               viewed=${isViewed(f)}
-              markable=${!!storageKey}
+              markable
               hljs=${hljs}
               size=${sizes[f.path]}
-              boxRef=${(el) => (boxes.current[f.path] = el)}
+              boxRef=${() => {}}
               onFold=${() => setFolded((s) => ({ ...s, [f.path]: !isFolded(f) }))}
-              onViewed=${(on) => setMark(f, on)}
-            />`
-          )}
-        </div>
-      </div>
+              onViewed=${(on) => onViewed(f, on)}
+            />
+          </div>`
+        : null}
     </div>
   `;
 }
