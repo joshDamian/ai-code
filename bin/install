@@ -71,19 +71,38 @@ fi
 # few stay, to go back to by hand. A release a service definition names or a running
 # process uses is never removed, even an old one - an install whose service step failed
 # leaves the server on the release it was already running.
-KEEP="${BENCH_KEEP_RELEASES:-3}"
-IN_USE=" $(basename "$RELEASE") $(
-  for f in "$HOME/.config/systemd/user/bench.service" "$HOME/Library/LaunchAgents/com.bench.server.plist"; do
-    [ -f "$f" ] && grep -o "$RELEASE_ROOT/[0-9]*" "$f" || true
+prune_releases() {
+  KEEP="${BENCH_KEEP_RELEASES:-3}"
+  IN_USE=" $(basename "$RELEASE") $(
+    for f in "$HOME/.config/systemd/user/bench.service" "$HOME/Library/LaunchAgents/com.bench.server.plist"; do
+      [ -f "$f" ] && grep -o "$RELEASE_ROOT/[0-9]*" "$f" || true
+    done
+    # -ww matters: without it BSD and macOS ps clip a command to the terminal width,
+    # which drops the release path off the end of a long one and lets a release that is
+    # genuinely in use be deleted.
+    ps -eww -o args 2>/dev/null | grep -o "$RELEASE_ROOT/[0-9]*" || true
+  ) "
+  IN_USE="$(printf '%s' "$IN_USE" | sed "s|$RELEASE_ROOT/||g" | tr '\n' ' ')"
+  PRUNED=0
+  for old in $(ls -1 "$RELEASE_ROOT" | grep -E '^[0-9]{14}$' | sort -r | tail -n +"$((KEEP + 1))"); do
+    case "$IN_USE" in *" $old "*) continue ;; esac
+    rm -rf "$RELEASE_ROOT/$old"
+    PRUNED=$((PRUNED + 1))
   done
-  ps -eo args 2>/dev/null | grep -o "$RELEASE_ROOT/[0-9]*" || true
-) "
-IN_USE="$(printf '%s' "$IN_USE" | sed "s|$RELEASE_ROOT/||g" | tr '\n' ' ')"
-PRUNED=0
-for old in $(ls -1 "$RELEASE_ROOT" | grep -E '^[0-9]{14}$' | sort -r | tail -n +"$((KEEP + 1))"); do
-  case "$IN_USE" in *" $old "*) continue ;; esac
-  rm -rf "$RELEASE_ROOT/$old"
-  PRUNED=$((PRUNED + 1))
-done
-[ "$PRUNED" -eq 0 ] || printf '%s\n' "Removed $PRUNED old release(s); kept the newest $KEEP in $RELEASE_ROOT"
+  [ "$PRUNED" -eq 0 ] || printf '%s\n' "Removed $PRUNED old release(s); kept the newest $KEEP in $RELEASE_ROOT"
+}
+
+prune_releases
+
+# One prune is not enough on a machine that just restarted onto this release. `bench
+# service install` returns as soon as systemd reports the unit active, while the old
+# server and the sessions it spawned are still being torn down; for that window their
+# argv still names their own release, so the pass above keeps a generation it could have
+# let go. A second pass once the machine has settled is what collects them - without it
+# the count creeps up by one per install.
+if [ "$SERVICE" = 1 ]; then
+  # `trap '' HUP` so closing the terminal the install was run from does not take the
+  # second pass with it.
+  ( trap '' HUP; sleep "${BENCH_PRUNE_DELAY:-45}"; prune_releases ) >/dev/null 2>&1 &
+fi
 exit 0
