@@ -10,6 +10,7 @@ import { TabBar } from './components/tabbar.mjs';
 import { Home, AddProject } from './views/home.mjs';
 import { Inbox } from './views/inbox.mjs';
 import { SessionsList } from './views/sessions.mjs';
+import { Dashboard } from './views/dashboard.mjs';
 import { ProjectView } from './views/project.mjs';
 import { TaskView } from './views/task.mjs';
 import { SessionPane } from './views/session.mjs';
@@ -19,6 +20,7 @@ import { Pair, Unpaired } from './views/pair.mjs';
 // #/                              projects
 // #/inbox                         what is waiting on you
 // #/sessions                      every session, flat
+// #/dashboard                     what the machine is costing, and who is holding it
 // #/p/:pid                        a project
 // #/p/:pid/s/:sid                 a session in the project's checkout
 // #/p/:pid/t/:tid[/s/:sid]        a task, on one of its sessions
@@ -30,6 +32,7 @@ function parse() {
   if (parts[0] === 'pair') return { view: 'pair', code: parts[1] };
   if (parts[0] === 'inbox') return { view: 'inbox' };
   if (parts[0] === 'sessions') return { view: 'sessions' };
+  if (parts[0] === 'dashboard') return { view: 'dashboard' };
   if (parts[0] === 'settings') return { view: 'settings' };
   if (parts[0] === 'p' && parts[1]) {
     const r = { view: 'project', projectId: parts[1] };
@@ -111,6 +114,7 @@ function Sidebar({ route, onNavigate, onAdd }) {
           `;
         })}
       </div>
+      <a class="side-settings ${route.view === 'dashboard' ? 'active' : ''}" href="#/dashboard" onClick=${onNavigate}><${Icon} name="activity" /> Dashboard</a>
       <button class="side-settings" type="button" onClick=${() => { onNavigate(); onAdd(); }}><${Icon} name="plus" /> Add project</button>
       <a class="side-settings ${route.view === 'settings' ? 'active' : ''}" href="#/settings" onClick=${onNavigate}><${Icon} name="gear" /> Settings</a>
     </nav>
@@ -121,6 +125,7 @@ function Main({ route }) {
   if (route.view === 'settings') return html`<${Settings} />`;
   if (route.view === 'inbox') return html`<${Inbox} />`;
   if (route.view === 'sessions') return html`<${SessionsList} />`;
+  if (route.view === 'dashboard') return html`<${Dashboard} />`;
   if (route.view === 'project') return html`<${ProjectView} key=${route.projectId} projectId=${route.projectId} />`;
   if (route.view === 'task') return html`<${TaskView} key=${route.taskId} projectId=${route.projectId} taskId=${route.taskId} sessionId=${route.sessionId} tab=${route.tab} />`;
   if (route.view === 'session') return html`<div class="session-page"><${SessionPane} key=${route.sessionId} sessionId=${route.sessionId} onArchived=${() => (location.hash = `#/p/${route.projectId}`)} /></div>`;
@@ -131,6 +136,7 @@ function title(route, s) {
   if (route.view === 'settings') return 'Settings';
   if (route.view === 'inbox') return 'Inbox';
   if (route.view === 'sessions') return 'Sessions';
+  if (route.view === 'dashboard') return 'Dashboard';
   const p = s.projects.find((x) => x.id === route.projectId);
   if (route.view === 'task') return s.tasks.find((t) => t.id === route.taskId)?.title || 'Task';
   if (route.view === 'session') return s.sessions.find((x) => x.id === route.sessionId)?.title || 'Session';
@@ -166,9 +172,9 @@ function App() {
   if (!ready) return html`<div class="gate muted">Connecting…</div>`;
 
   const back = route.view === 'task' || route.view === 'session' ? `#/p/${route.projectId}` : route.view === 'project' || route.view === 'settings' ? '#/' : null;
-  // The tab bar belongs to the four top-level screens only. A task or a conversation is
-  // a place you went into, and it keeps the height.
-  const top = ['home', 'inbox', 'sessions', 'settings'].includes(route.view);
+  // The tab bar belongs to the top-level screens only. A task or a conversation is a
+  // place you went into, and it keeps the height.
+  const top = ['home', 'inbox', 'sessions', 'dashboard', 'settings'].includes(route.view);
 
   return html`
     <div class="shell ${drawer ? 'drawer-open' : ''} ${top ? 'has-tabbar' : ''}">

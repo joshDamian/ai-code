@@ -1082,3 +1082,48 @@ button.side-settings{width:100%;text-align:left}
 
 /* A message kept because the line was down. */
 .queued-note{display:flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm);color:var(--warn)}
+
+/* ---- dashboard -------------------------------------------------------------------------
+   What Bench is costing the machine. Four numbers across the top, then the processes
+   holding them. A tile is a label, a figure and the context it is read against - never a
+   figure on its own, because "2.1 GB" means nothing without "of 8.0 GB" beside it. */
+.metric{display:grid;gap:var(--space-1);align-content:start}
+.metric-label{font-size:var(--text-sm);font-weight:600;color:var(--muted)}
+.metric-value{font-size:var(--text-2xl);font-weight:650;line-height:1.1}
+.metric-sub,.metric-foot{font-size:var(--text-xs);color:var(--muted)}
+
+/* A meter is a ratio against a limit, so it is one hue with a severity, not a chart. The
+   track takes the tone's own wash, so the state reads across the whole bar rather than
+   only where it is filled; the number it belongs to is always beside it, so the colour is
+   never the only thing saying "nearly full". */
+.meter{height:8px;border-radius:999px;background:var(--surface-3);overflow:hidden}
+.meter.big{height:12px}
+.meter>span{display:block;height:100%;border-radius:inherit;background:var(--accent);transition:width .3s var(--ease)}
+.meter.good{background:var(--good-bg)}
+.meter.good>span{background:var(--good)}
+.meter.warn{background:var(--warn-bg)}
+.meter.warn>span{background:var(--warn)}
+.meter.bad{background:var(--bad-bg)}
+.meter.bad>span{background:var(--bad)}
+@media(prefers-reduced-motion:reduce){.meter>span{transition:none}}
+
+/* The storage block: a bare meter over its own caption, then one row per directory. */
+.metric-row{display:grid;gap:var(--space-2)}
+.dashboard .section>.metric-row{margin-top:var(--space-3)}
+
+/* A process row. The numbers are a column, so they are tabular and right-aligned; the
+   name is the only thing allowed to ellipsis. */
+.proc-name{font-weight:550;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proc-meta{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap;font-size:var(--text-xs);color:var(--muted)}
+.kind{background:var(--surface-2);border:1px solid var(--line);border-radius:4px;padding:1px var(--space-2);color:var(--muted);font-size:var(--text-xs)}
+.proc-nums{gap:var(--space-4)}
+.proc-num{font-family:var(--font-mono);font-size:var(--text-sm);font-variant-numeric:tabular-nums;text-align:right;min-width:52px}
+.storage-path{font-family:var(--font-mono);font-size:var(--text-xs);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dashboard .foot{margin-top:var(--space-3);font-size:var(--text-xs);color:var(--muted)}
+
+@media(max-width:860px){
+  /* The whole row is the link, so the word is redundant where space is tight. */
+  .proc-row .link{display:none}
+  .proc-nums{gap:var(--space-3)}
+  .proc-num{min-width:0;font-size:var(--text-xs)}
+}

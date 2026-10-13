@@ -1,5 +1,6 @@
 // @ts-check
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -134,6 +135,11 @@ export class Runtime extends EventEmitter {
     this.idleMs = o.idleMs ?? IDLE_MS;
     /** @type {Map<string, Live>} */
     this.live = new Map();
+    /** Claude Code's own process, by pid, for the session it is running. Filled by the
+     * spawn hook below and cleared when the process exits, so the Dashboard can say
+     * which conversation is holding a process rather than guessing from a command line.
+     * @type {Map<number, string>} */
+    this.claudePids = new Map();
     /** @type {Map<string, {approval: Approval, resolve: (r: PermissionResult) => void, suggestions: any[]}>} */
     this.approvals = new Map();
     store.resetLiveSessions();
@@ -164,6 +170,11 @@ export class Runtime extends EventEmitter {
 
   isLive(/** @type {string} */ id) {
     return this.live.has(id);
+  }
+
+  /** Every running Claude Code process, by pid, for the session it belongs to. @returns {Map<number, string>} */
+  pids() {
+    return this.claudePids;
   }
 
   /** The slash commands the session's Claude Code offers, once it has started. @param {string} id */
@@ -306,6 +317,27 @@ export class Runtime extends EventEmitter {
       ...(memory ? { settings: { autoMemoryDirectory: memory } } : {}),
       stderr: (/** @type {string} */ line) => {
         if (/error/i.test(line)) live.lastStderr = line.slice(0, 2000);
+      },
+      // Claude Code's process is spawned by the SDK, which by default does not say what
+      // it started. This is the hook that hands it back, and it is what lets the
+      // Dashboard name the conversation holding a process instead of reading argv. The
+      // child is spawned exactly as the SDK would have - same command, args, cwd, env
+      // and signal, with piped stdio - so nothing about the run changes but the record
+      // of the pid.
+      spawnClaudeCodeProcess: (/** @type {import('@anthropic-ai/claude-agent-sdk').SpawnOptions} */ spawnOptions) => {
+        const child = spawn(spawnOptions.command, spawnOptions.args, {
+          cwd: spawnOptions.cwd,
+          env: spawnOptions.env,
+          signal: spawnOptions.signal,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        if (child.pid) this.claudePids.set(child.pid, s.id);
+        const forget = () => {
+          if (child.pid) this.claudePids.delete(child.pid);
+        };
+        child.on('exit', forget);
+        child.on('error', forget);
+        return child;
       },
     };
     live.q = this.query({ prompt: live.input(), options });

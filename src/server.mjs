@@ -12,6 +12,8 @@ import { TerminalSessions } from './terminal.mjs';
 import { providerEnv } from './providers.mjs';
 import { env, loadEnvFile } from './env.mjs';
 import { MODES, MAX_UPLOAD } from './runtime.mjs';
+import { collect } from './metrics.mjs';
+import { worktreeRoot } from './git.mjs';
 
 /** @typedef {import('./contract.mjs').ServerMessage} ServerMessage */
 
@@ -657,6 +659,32 @@ route('POST', '/api/push/choices', ({ body }) => ({ ok: svc.store.setPushChoices
 const supervised = env('SERVICE') || null;
 
 route('GET', '/api/server/status', () => ({ pid: process.pid, startedAt, uptimeMs: Date.now() - startedAt, version: pkg.version, root, terminals: terminals.size, supervised }));
+
+// What Bench is costing the machine. Polled by the Dashboard while it is open rather
+// than pushed on a timer, so nothing shells out to `ps` or `du` for a page nobody is
+// looking at. The expensive part - the sizes - is cached inside metrics.mjs.
+const releasesDir = env('RELEASE_DIR') || path.join(os.homedir(), '.local', 'share', 'bench', 'releases');
+route('GET', '/api/metrics', () => {
+  const projects = svc.store.listProjects();
+  return collect({
+    root,
+    sessions: svc.sessions(),
+    projects,
+    tasks: svc.tasks(),
+    claudePids: svc.runtime.pids(),
+    terminals: terminals.list(),
+    // Bounded: a checkout is the biggest thing Bench creates, but a person with thirty
+    // projects does not need thirty `du` walks behind one page poll.
+    storageTargets: [
+      { name: 'Bench data', path: path.join(root, '.bench'), note: 'database, attachments' },
+      { name: 'Releases', path: releasesDir, note: 'installed versions' },
+      ...projects.slice(0, 8).flatMap((p) => [
+        { name: p.name, path: p.path, note: 'checkout' },
+        { name: `${p.name} worktrees`, path: worktreeRoot(p.path), note: 'task branches' },
+      ]),
+    ],
+  });
+});
 // Exits so the service manager starts a fresh process. Refused when nothing would, since
 // a restart that is really a stop leaves a phone with no way back.
 route('POST', '/api/server/restart', () => {

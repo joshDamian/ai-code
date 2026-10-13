@@ -12,6 +12,23 @@ export function formatDuration(ms) {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
+// A size in bytes, in the unit a person reads disk and memory in. Binary steps, because
+// this is what the machine actually holds; one decimal below a hundred, so "2.1 GB"
+// keeps a digit where "23.7 GB" needs one and "412 MB" does not.
+/** @param {number|null|undefined} bytes */
+export function formatBytes(bytes) {
+  if (bytes == null || !Number.isFinite(bytes)) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = Math.abs(bytes);
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  const n = i === 0 ? String(Math.round(v)) : v >= 100 ? v.toFixed(0) : v.toFixed(1);
+  return `${bytes < 0 ? '-' : ''}${n} ${units[i]}`;
+}
+
 export function formatTokens(n) {
   if (n == null || n === 0) return '0';
   if (n >= 1000000) return `${trimOne(n / 1000000)}M`;

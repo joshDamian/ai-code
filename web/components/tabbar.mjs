@@ -1,8 +1,8 @@
-// The phone's own navigation: four destinations, always at the bottom, where a thumb
+// The phone's own navigation: five destinations, always at the bottom, where a thumb
 // already is. The sidebar is still there in the drawer for the full project tree, but a
-// person moving between the inbox, the sessions, the projects and settings should never
-// have to open it. Shown only on top-level screens - a task or a conversation keeps the
-// whole height and gets back out with the bar's back button.
+// person moving between the inbox, the sessions, what the machine is doing, the projects
+// and settings should never have to open it. Shown only on top-level screens - a task or
+// a conversation keeps the whole height and gets back out with the bar's back button.
 import { html } from '../lib.mjs';
 import { useStore } from '../api.mjs';
 import { Icon } from './ui.mjs';
@@ -10,6 +10,7 @@ import { Icon } from './ui.mjs';
 const TABS = [
   { id: 'inbox', label: 'Inbox', href: '#/inbox', icon: 'inbox' },
   { id: 'sessions', label: 'Sessions', href: '#/sessions', icon: 'list' },
+  { id: 'dashboard', label: 'Dashboard', href: '#/dashboard', icon: 'activity' },
   { id: 'home', label: 'Projects', href: '#/', icon: 'folder' },
   { id: 'settings', label: 'Settings', href: '#/settings', icon: 'gear' },
 ];

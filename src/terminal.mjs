@@ -127,6 +127,14 @@ export class TerminalSessions {
     return this.sessions.size;
   }
 
+  /** The live shells, for a caller that wants to know what the machine is holding
+   * rather than to talk to one. @returns {{key:string, pid:number|null, cwd:string, cols:number, rows:number}[]} */
+  list() {
+    return [...this.sessions.values()]
+      .filter((s) => s.alive)
+      .map((s) => ({ key: s.key, pid: s.pid, cwd: s.cwd, cols: s.cols, rows: s.rows }));
+  }
+
   // The session for (task, target), started if there is not one already. A session
   // whose shell has exited is dropped first: reattaching to a dead pty would give the
   // client a terminal that accepts keystrokes and answers none of them.
@@ -150,6 +158,9 @@ export class TerminalSessions {
       key,
       cwd,
       pty: p,
+      // The shell's own pid, kept so a process holding memory can be traced back to the
+      // terminal it was started in. The pty has it either way; nothing read it before.
+      pid: p.pid,
       cols,
       rows,
       scrollback: new Scrollback(SCROLLBACK_CHARS),

@@ -146,6 +146,41 @@ export interface TaskGit {
   canMerge: { ok: boolean; reason: string | null; conflicts: string[] };
 }
 
+/** One thing Bench is holding on the machine, rolled up by what owns it. */
+export interface MetricProcess {
+  kind: 'claude' | 'terminal' | 'server' | 'other';
+  sessionId: string | null;
+  taskId: string | null;
+  projectId: string | null;
+  label: string;
+  /** The project or context the process belongs to, for the row's second line. */
+  sub: string;
+  /** How many processes this row covers - a session with children is more than one. */
+  count: number;
+  pid: number | null;
+  rssKb: number;
+  pcpu: number;
+  etimeMs: number | null;
+}
+
+export interface MetricStorage {
+  name: string;
+  path: string;
+  note: string;
+  /** Null while the size is still being measured off the request path. */
+  bytes: number | null;
+}
+
+/** What Bench is costing the machine, as one snapshot. */
+export interface Metrics {
+  at: number;
+  host: { hostname: string; platform: string; cpus: number; loadavg: number[]; uptimeMs: number; memTotal: number; memFree: number; diskPath: string; diskTotal: number | null; diskFree: number | null };
+  machine: { memTotal: number; memFree: number; diskTotal: number | null; diskFree: number | null; diskPath: string };
+  bench: { memCurrent: number; memPeak: number | null; memMax: number | null; pids: number | null; procs: number; source: 'cgroup' | 'rss' };
+  procs: MetricProcess[];
+  storage: { entries: MetricStorage[]; diskPath: string; diskTotal: number | null; diskFree: number | null };
+}
+
 /** Server to client, over /api/ws. */
 export type ServerMessage =
   | { type: 'hello'; sessions: Session[]; approvals: Approval[] }

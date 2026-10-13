@@ -5,7 +5,7 @@ import htm from 'htm';
 export const html = htm.bind(h);
 export { h, render, Fragment, createContext };
 export * from 'preact/hooks';
-export { formatDuration, formatTokens, formatCost, formatWhen, diffLines, diffSides, diffFiles, diffLanguage, splitHighlighted } from './format.mjs';
+export { formatDuration, formatTokens, formatCost, formatBytes, formatWhen, diffLines, diffSides, diffFiles, diffLanguage, splitHighlighted } from './format.mjs';
 
 // Per-browser conveniences: what was typed and not sent, which panel was open. Storage
 // can throw or come back empty at any time, so nothing here is load-bearing.
