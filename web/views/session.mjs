@@ -689,33 +689,78 @@ function Composer({ session: s, commands, quick }) {
     setItems((list) => list.filter((x) => x.key !== it.key));
   };
 
-  const attach = async (files) => {
-    for (const f of files) {
-      const k = ++attachSeq;
-      const name = f.name || 'pasted';
-      if (f.size > MAX_FILE) {
-        toast(new Error(`${name} is over ${MAX_FILE / 1024 / 1024} MB`));
-        continue;
-      }
-      if (INLINE_TYPES.test(f.type) && f.size <= INLINE_IMAGE) {
-        try {
-          const im = await readImage(f);
-          setItems((list) => [...list, { key: k, name, size: f.size, inline: true, ...im }]);
-        } catch (e) {
-          toast(e);
-        }
-        continue;
-      }
-      const ctrl = new AbortController();
-      setItems((list) => [...list, { key: k, name, size: f.size, inline: false, upload: null, progress: 0, ctrl }]);
-      api
-        .upload(s.id, f, { signal: ctrl.signal, onProgress: (p) => patchItem(k, { progress: p }) })
-        .then((up) => patchItem(k, { upload: { file: up.file, type: up.type }, progress: 1, ctrl: null }))
-        .catch((e) => {
-          setItems((list) => list.filter((x) => x.key !== k));
-          if (!e.aborted) toast(e);
-        });
+  // One file, from the moment it is handed over. The read is started here, synchronously,
+  // for every file before any of them is awaited: a File from the clipboard or a drag is
+  // a reference the browser may stop honouring once the event is over, so a read queued
+  // behind another file's `await` can be the one that fails. Resolves to null when the
+  // file is attached, else the error that stopped it.
+  const attachOne = (f) => {
+    const k = ++attachSeq;
+    const name = f.name || 'pasted';
+    if (f.size > MAX_FILE) return Promise.resolve(new Error(`${name} is over ${MAX_FILE / 1024 / 1024} MB`));
+    // Items are kept in the order the files arrived, whichever read finishes first.
+    const add = (item) => setItems((list) => [...list, item].sort((a, b) => a.key - b.key));
+    if (INLINE_TYPES.test(f.type) && f.size <= INLINE_IMAGE) {
+      return readImage(f).then(
+        (im) => {
+          add({ key: k, name, size: f.size, inline: true, ...im });
+          return null;
+        },
+        (e) => e
+      );
     }
+    const ctrl = new AbortController();
+    add({ key: k, name, size: f.size, inline: false, upload: null, progress: 0, ctrl });
+    api
+      .upload(s.id, f, { signal: ctrl.signal, onProgress: (p) => patchItem(k, { progress: p }) })
+      .then((up) => patchItem(k, { upload: { file: up.file, type: up.type }, progress: 1, ctrl: null }))
+      .catch((e) => {
+        setItems((list) => list.filter((x) => x.key !== k));
+        if (!e.aborted) toast(e);
+      });
+    return Promise.resolve(null);
+  };
+
+  // A paste or a drop from another app. What is on the clipboard is whatever that app
+  // chose to put there, and one copy can carry several entries for the same picture: a
+  // file reference into the app's own folder, which this browser may have no right to
+  // open, and the image itself. So an entry that cannot be read is not an error while
+  // another can; it is only said out loud when nothing could be attached, and then the
+  // Clipboard API, which hands over the image data rather than a file reference, gets
+  // one try before the person is told to attach it another way.
+  const attachExternal = async (files) => {
+    const results = await Promise.all(files.map(attachOne));
+    const failed = results.filter(Boolean);
+    if (failed.length < files.length) {
+      for (const e of failed) console.warn('bench: skipped an entry it could not read:', e);
+      return;
+    }
+    if (failed.every((e) => e.name === 'NotReadableError') && navigator.clipboard?.read) {
+      try {
+        const got = [];
+        for (const item of await navigator.clipboard.read()) {
+          const type = item.types.find((t) => INLINE_TYPES.test(t));
+          if (type) got.push(new File([await item.getType(type)], `pasted.${type.split('/')[1]}`, { type }));
+        }
+        if (got.length) {
+          await Promise.all(got.map(attachOne));
+          return;
+        }
+      } catch (e) {
+        console.warn('bench: the clipboard would not hand over the image either:', e);
+      }
+    }
+    toast(
+      failed.every((e) => e.name === 'NotReadableError')
+        ? new Error("That app didn't let the browser read what it copied. Save the image, then attach it with the paperclip, or share it to your browser.")
+        : failed[0]
+    );
+  };
+
+  // The file picker is the person choosing files this browser can already see, so a
+  // failure there is a real error and is reported as one, per file.
+  const attach = async (files) => {
+    for (const e of (await Promise.all(files.map(attachOne))).filter(Boolean)) toast(e);
   };
 
   const cycleMode = () => {
@@ -738,7 +783,7 @@ function Composer({ session: s, commands, quick }) {
         if (!e.dataTransfer?.files?.length) return;
         e.preventDefault();
         setDragging(false);
-        attach([...e.dataTransfer.files]);
+        attachExternal([...e.dataTransfer.files]);
       }}
     >
       ${slash.length ? html`<div class="slash">${slash.map((c) => html`<button type="button" onClick=${() => setText(`/${c} `)}>/${c}</button>`)}</div>` : null}
@@ -770,10 +815,16 @@ function Composer({ session: s, commands, quick }) {
           value=${text}
           onInput=${(e) => setText(e.target.value)}
           onPaste=${(e) => {
+            // `files` and `items` can disagree about what is on the clipboard, so both
+            // are read, and an entry present in each is attached once.
             const files = [...(e.clipboardData?.files || [])];
+            for (const it of e.clipboardData?.items || []) {
+              const f = it.kind === 'file' ? it.getAsFile() : null;
+              if (f && !files.some((x) => x.name === f.name && x.size === f.size && x.type === f.type)) files.push(f);
+            }
             if (files.length) {
               e.preventDefault();
-              attach(files);
+              attachExternal(files);
             }
           }}
           onKeyDown=${(e) => {
