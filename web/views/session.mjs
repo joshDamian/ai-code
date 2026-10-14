@@ -30,6 +30,7 @@ export function SessionPane({ sessionId, onArchived }) {
   const taskState = useStore((st) => (session?.task_id ? st.tasks.find((t) => t.id === session.task_id)?.state : null));
   const [events, setEvents] = useState([]);
   const [stream, setStream] = useState({ text: '', thinking: '' });
+  const [suggestion, setSuggestion] = useState('');
   const [more, setMore] = useState(false);
   const [terminal, setTerminal] = useState(false);
   const [sheet, setSheet] = useState(false);
@@ -58,6 +59,7 @@ export function SessionPane({ sessionId, onArchived }) {
   useEffect(() => {
     setLoaded(null);
     setEvents(recall(eventsKey(sessionId), []));
+    setSuggestion('');
     pinned.current = true;
     load();
     // Streaming text is gathered and drawn at most once a frame: re-rendering the
@@ -76,7 +78,10 @@ export function SessionPane({ sessionId, onArchived }) {
       pending = { text: '', thinking: '' };
     };
     const off = watchSession(sessionId, (m) => {
-      if (m.type === 'event') {
+      if (m.type === 'suggestion') setSuggestion(m.text);
+      else if (m.type === 'event') {
+        // A new turn makes the last prediction stale.
+        if (m.event.kind === 'user' || m.event.kind === 'assistant') setSuggestion('');
         setEvents((list) => (list.some((e) => e.id === m.event.id) ? list : [...list, m.event]));
         if (m.event.kind === 'assistant' || m.event.kind === 'result' || m.event.kind === 'error') {
           drop();
@@ -172,7 +177,8 @@ export function SessionPane({ sessionId, onArchived }) {
   // Quick replies, offered only when the turn has settled and nothing is being asked:
   // the four things a person types most often after Claude stops.
   const showQuick = !running && !approvals.length && events[events.length - 1]?.kind === 'result';
-  const QUICK = ['Continue', 'Run the tests', 'Commit it', 'Explain the change'];
+  // The model's own guess at the next prompt comes first, when it sent one.
+  const QUICK = [...new Set([suggestion, 'Continue', 'Run the tests', 'Commit it', 'Explain the change'].filter(Boolean))].slice(0, 5);
 
   return html`
     <section class="session">

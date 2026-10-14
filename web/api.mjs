@@ -365,7 +365,7 @@ function onMessage(m) {
   }
   else if (m.type === 'git') bumpGit(m.project_id);
   else if (m.type === 'event') for (const fn of watchers.get(m.event.session_id) || []) fn(m);
-  else if (m.type === 'delta') for (const fn of watchers.get(m.session_id) || []) fn(m);
+  else if (m.type === 'delta' || m.type === 'suggestion') for (const fn of watchers.get(m.session_id) || []) fn(m);
 }
 
 let retry = 0;

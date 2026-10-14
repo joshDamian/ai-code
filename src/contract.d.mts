@@ -191,6 +191,7 @@ export type ServerMessage =
   | { type: 'delta'; session_id: string; text: string; thinking?: boolean }
   | { type: 'approval'; approval: Approval }
   | { type: 'approval-done'; id: string; session_id: string }
+  | { type: 'suggestion'; session_id: string; text: string }
   | { type: 'git'; project_id: string }
   | { type: 'pong' };
 

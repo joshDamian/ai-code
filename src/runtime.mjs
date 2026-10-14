@@ -309,6 +309,9 @@ export class Runtime extends EventEmitter {
       permissionMode: /** @type {PermissionMode} */ (s.permission_mode),
       allowDangerouslySkipPermissions: true,
       includePartialMessages: true,
+      // After each turn the model predicts what a person would type next; the dashboard
+      // offers it as the first quick reply.
+      promptSuggestions: true,
       canUseTool: (tool, input, opts) => this.#ask(s.id, tool, input, opts),
       ...(model ? { model: invocationId(model) } : {}),
       ...(s.effort ? { effort: /** @type {any} */ (s.effort) } : {}),

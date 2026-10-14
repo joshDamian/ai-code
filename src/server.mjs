@@ -225,6 +225,7 @@ svc.runtime.on('approval', (a) => {
   // answer it without the app being opened.
   if (s) pushAll({ title: `Approval needed: ${a.tool}`, body: `${s.title}${a.title ? ` — ${a.title}` : ''}`, url: sessionUrl(s), tag: `approval-${a.id}`, approvalId: a.id, sessionId: s.id }, 'approval').catch(() => {});
 });
+svc.runtime.on('suggestion', ({ session_id, text }) => text && broadcast({ type: 'suggestion', session_id, text }, session_id));
 svc.runtime.on('approval-done', (a) => broadcast({ type: 'approval-done', ...a }));
 svc.runtime.on('turn-done', ({ session, ok }) => {
   if (session) pushAll({ title: ok ? 'Claude finished' : 'Claude stopped with an error', body: session.title, url: sessionUrl(session), tag: `turn-${session.id}`, sessionId: session.id }, ok ? 'finished' : 'error').catch(() => {});
