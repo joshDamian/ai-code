@@ -943,6 +943,8 @@ button.side-settings{width:100%;text-align:left}
 .viewer-image{max-width:100%;max-height:100%;object-fit:contain;border-radius:var(--radius-sm);box-shadow:var(--shadow-3);background:repeating-conic-gradient(#1a1f27 0 25%,#141920 0 50%) 0 0/16px 16px}
 .viewer-frame{width:min(100%,1000px);height:100%;border:0;border-radius:var(--radius-sm);background:#fff;box-shadow:var(--shadow-3)}
 .viewer-text{align-self:stretch;width:min(100%,1000px);margin:0 auto;padding:var(--space-3) var(--space-4,16px);border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-1);font:12.5px/1.55 var(--font-mono);white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto}
+.viewer-text.viewer-md{max-height:none;white-space:normal;font:inherit;font-size:14px;line-height:1.6}
+.viewer-md td:first-child,.viewer-md th:first-child{white-space:nowrap}
 .viewer-note{color:var(--muted)}
 @media (max-width:640px){.viewer-body{padding:0}.viewer-frame,.viewer-text,.viewer-image{border-radius:0;box-shadow:none}.viewer-text{border:0}}
 /* ---- a task on a phone ----

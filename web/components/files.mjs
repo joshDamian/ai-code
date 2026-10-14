@@ -9,6 +9,7 @@
 // it counts as an artifact all come from the server's stat, never from the name.
 import { html, createContext, useContext, useEffect, useRef, useState } from '../lib.mjs';
 import { api } from '../api.mjs';
+import { Markdown } from './markdown.mjs';
 
 /** @typedef {{path:string, name:string, mime:string, size:number, open:boolean, kind:string, artifact:boolean}} FileInfo */
 /** @typedef {{sessionId:string, files:Map<string, FileInfo>, view:(f: FileInfo) => void}} FilesValue */
@@ -303,6 +304,8 @@ export function FileViewer({ sessionId, file: f, onClose }) {
   const url = fileUrl(sessionId, f);
   const isHtml = /^text\/html/.test(f.mime);
   const asText = f.kind === 'text' && !isHtml;
+  const isMd = asText && /\.(md|markdown|mdx)$/i.test(f.name);
+  const [raw, setRaw] = useState(false);
   useEffect(() => {
     const onKey = (/** @type {KeyboardEvent} */ e) => e.key === 'Escape' && onClose();
     addEventListener('keydown', onKey);
@@ -340,7 +343,7 @@ export function FileViewer({ sessionId, file: f, onClose }) {
   // The page is already sandboxed by the server; the frame's own sandbox keeps it so.
   else if (isHtml) body = html`<iframe class="viewer-frame" sandbox="" src=${url} title=${f.name}></iframe>`;
   else if (f.size > TEXT_PREVIEW) body = html`<div class="viewer-note">Too large to preview here. <button type="button" class="link-btn" onClick=${() => download(sessionId, f)}>Download it</button>.</div>`;
-  else body = text === null ? html`<div class="viewer-note">Loading…</div>` : html`<pre class="viewer-text">${text}</pre>`;
+  else body = text === null ? html`<div class="viewer-note">Loading…</div>` : isMd && !raw ? html`<${Markdown} text=${text} className="md viewer-text viewer-md" />` : html`<pre class="viewer-text">${text}</pre>`;
 
   return html`
     <div class="viewer ${f.kind === 'image' ? 'viewer-dark' : ''}" role="dialog" aria-modal="true" aria-label=${f.name}>
@@ -351,6 +354,7 @@ export function FileViewer({ sessionId, file: f, onClose }) {
           <span class="file-card-meta">${fileMeta(f)}</span>
         </span>
         <span class="viewer-gap"></span>
+        ${isMd ? html`<button type="button" class="file-btn" title=${raw ? 'Show rendered' : 'Show source'} aria-pressed=${raw} onClick=${() => setRaw(!raw)}>${raw ? 'Rendered' : 'Source'}</button>` : null}
         <a class="file-btn" href=${url} target="_blank" rel="noopener noreferrer" title="Open in browser" aria-label="Open in browser"><${Svg} name="external" /></a>
         <button type="button" class="file-btn" title="Download" aria-label="Download" onClick=${() => download(sessionId, f)}><${Svg} name="download" /></button>
         <button type="button" class="file-btn" title="Close (Esc)" aria-label="Close" onClick=${onClose}><${Svg} name="close" /></button>
