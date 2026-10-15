@@ -37,6 +37,7 @@ export function SessionPane({ sessionId, onArchived }) {
   const [commands, setCommands] = useState([]);
   const [more, setMore] = useState(false);
   const [terminal, setTerminal] = useState(false);
+  const [shell, setShell] = useState(false);
   const [sheet, setSheet] = useState(false);
   // The reader is at the bottom (following) or has scrolled up to read. `pinned` is what
   // the auto-scroll follows; `showJump` is the tap-to-catch-up button, offered only when
@@ -163,6 +164,7 @@ export function SessionPane({ sessionId, onArchived }) {
   const modeName = MODES.find((m) => m.value === s.permission_mode)?.label || s.permission_mode;
   const setMode = (mode) => api.updateSession(s.id, { mode }).catch(toast);
   const items = [
+    { label: 'Terminal in this folder', onSelect: () => setShell(true) },
     { label: 'Open in terminal (claude --resume)', disabled: !s.claude_session_id || running, onSelect: () => setTerminal(true) },
     { label: 'Rename', onSelect: rename },
     s.archived_at
@@ -200,6 +202,7 @@ export function SessionPane({ sessionId, onArchived }) {
           <${ModelPicker} compact providers=${providers} value=${{ providerId: s.provider_id, modelId: s.model_id }} onChange=${(v) => api.updateSession(s.id, v).catch(toast)} />
           <${EffortPicker} compact value=${s.effort} onChange=${(effort) => api.updateSession(s.id, { effort }).catch(toast)} />
           <${ModePicker} compact value=${s.permission_mode} onChange=${setMode} />
+          <button class="btn sm ghost" type="button" title=${`Terminal in ${s.cwd}`} aria-label="Open terminal" onClick=${() => setShell(true)}><${Icon} name="terminal" size=${14} /> Terminal</button>
           <${MoreMenu} items=${items} />
         </div>
         <button class="session-chip" type="button" onClick=${() => setSheet(true)} aria-haspopup="dialog">
@@ -258,6 +261,11 @@ export function SessionPane({ sessionId, onArchived }) {
                 (it) => html`<button class="btn ${it.danger ? 'danger' : 'secondary'}" type="button" disabled=${it.disabled} key=${it.label} onClick=${() => { setSheet(false); it.onSelect(); }}>${it.label}</button>`
               )}
             </div>
+          <//>`
+        : null}
+      ${shell
+        ? html`<${Dialog} wide title=${`Terminal · ${s.cwd}`} onClose=${() => setShell(false)}>
+            <div class="terminal-dialog"><${TerminalPane} query=${{ session: s.id, shell: 1 }} /></div>
           <//>`
         : null}
       ${terminal

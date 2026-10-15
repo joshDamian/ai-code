@@ -877,6 +877,12 @@ server.on('upgrade', (req, socket, head) => {
 function terminalSpec(u) {
   const q = u.searchParams;
   try {
+    if (q.get('session') && q.get('shell')) {
+      // A plain shell where the session works, for running commands beside the chat.
+      const s = svc.session(/** @type {string} */ (q.get('session')));
+      if (!fs.existsSync(s.cwd)) return { error: '409 Conflict' };
+      return { key: `shell:${s.id}`, cwd: s.cwd };
+    }
     if (q.get('session')) {
       const s = svc.session(/** @type {string} */ (q.get('session')));
       // Both values go into a shell line, so both are checked to be what they claim.
