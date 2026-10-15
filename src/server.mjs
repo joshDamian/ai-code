@@ -14,6 +14,7 @@ import { env, loadEnvFile } from './env.mjs';
 import { MODES, MAX_UPLOAD } from './runtime.mjs';
 import { collect } from './metrics.mjs';
 import { worktreeRoot } from './git.mjs';
+import { releaseInfo, updateStatus, startUpdate } from './update.mjs';
 
 /** @typedef {import('./contract.mjs').ServerMessage} ServerMessage */
 
@@ -48,6 +49,9 @@ const startedAt = Date.now();
 const webDir = new URL('../web/', import.meta.url).pathname;
 const modulesDir = new URL('../node_modules/', import.meta.url).pathname;
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+// The folder this server runs from: an installed release, or the checkout itself.
+const appRoot = path.resolve(new URL('..', import.meta.url).pathname);
+const release = releaseInfo(appRoot);
 
 // -- auth -------------------------------------------------------------------------------
 
@@ -662,7 +666,13 @@ route('POST', '/api/push/choices', ({ body }) => ({ ok: svc.store.setPushChoices
 // definition `bench service install` writes says so.
 const supervised = env('SERVICE') || null;
 
-route('GET', '/api/server/status', () => ({ pid: process.pid, startedAt, uptimeMs: Date.now() - startedAt, version: pkg.version, root, terminals: terminals.size, supervised }));
+route('GET', '/api/server/status', () => ({ pid: process.pid, startedAt, uptimeMs: Date.now() - startedAt, version: pkg.version, commit: release?.commit || null, root, terminals: terminals.size, supervised }));
+
+// Settings → Update Bench: reinstall from the checkout this release came from. The
+// installer restarts the service itself; the page watches for the new commit to answer.
+const update = { appRoot, logFile: path.join(root, '.bench', 'update.log'), dataRoot: root, supervised };
+route('GET', '/api/server/update', () => updateStatus(update));
+route('POST', '/api/server/update', () => startUpdate(update));
 
 // What Bench is costing the machine. Polled by the Dashboard while it is open rather
 // than pushed on a timer, so nothing shells out to `ps` or `du` for a page nobody is

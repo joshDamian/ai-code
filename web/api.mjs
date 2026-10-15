@@ -179,6 +179,8 @@ export const api = {
   pushChoices: (/** @type {string} */ endpoint, /** @type {any} */ choices) => post('/api/push/choices', { endpoint, choices }),
   status: () => get('/api/server/status'),
   restart: () => post('/api/server/restart'),
+  updateStatus: () => get('/api/server/update'),
+  startUpdate: () => post('/api/server/update'),
   /** @returns {Promise<import('../src/contract.d.mts').Metrics>} */
   metrics: () => get('/api/metrics'),
 };

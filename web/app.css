@@ -1183,3 +1183,5 @@ button.side-settings{width:100%;text-align:left}
 .check-run .check-output{border-radius:0;border-top:1px solid var(--line)}
 .new-task-opts .field-wide{grid-column:1/-1}
 @media(max-width:860px){.task-bar{padding:0 var(--space-3) var(--space-2)}.task-bar-cmd{display:none}}
+.update{margin-top:var(--space-4);padding-top:var(--space-3);border-top:1px solid var(--line)}
+.update h3{margin:0;font-size:var(--text-md)}

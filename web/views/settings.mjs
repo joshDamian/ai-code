@@ -297,6 +297,93 @@ async function backUp(oldPid, ms = 60000) {
   return false;
 }
 
+/**
+ * Waits for a server running `commit` to answer, or for the update log to say the install
+ * failed - in which case the old server is still up and the log says why.
+ * @returns {Promise<'updated'|'failed'|'timeout'>}
+ */
+async function updatedTo(commit, oldPid, ms = 5 * 60000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      const s = await api.status();
+      if (s.pid !== oldPid && (!commit || s.commit === commit)) return 'updated';
+      if (s.pid === oldPid) {
+        const u = await api.updateStatus();
+        if (u.last && !u.last.running && u.last.exit !== 0) return 'failed';
+      }
+    } catch {
+      /* restarting */
+    }
+  }
+  return 'timeout';
+}
+
+const short = (c) => (c ? c.slice(0, 7) : 'unknown');
+
+/** Settings → Server → Update: reinstall Bench from the checkout it was installed from. */
+function Update({ server, busy }) {
+  const [st, setSt] = useState(null);
+  const [phase, setPhase] = useState(null);
+  const load = () => api.updateStatus().then(setSt).catch(() => {});
+  useEffect(() => {
+    load();
+  }, []);
+  if (!st) return null;
+
+  const run = async () => {
+    const what = st.newer ? `${st.newer} newer commit${st.newer === 1 ? '' : 's'}` : 'the checkout as it is';
+    const ok = await confirmAction({
+      title: 'Update Bench?',
+      body:
+        `Installs ${what} from ${st.source} (${short(st.sourceCommit)}) and restarts the server. ` +
+        (st.sourceDirty ? 'The checkout has uncommitted changes, and they are installed too. ' : '') +
+        (busy ? `${busy} session${busy === 1 ? ' is' : 's are'} mid-turn and will be stopped; they resume on the next message.` : 'Open sessions resume on their next message.'),
+      confirmLabel: 'Update',
+      tone: busy || st.sourceDirty ? 'danger' : 'default',
+    });
+    if (!ok) return;
+    setPhase('updating');
+    try {
+      await api.startUpdate();
+    } catch (e) {
+      setPhase(null);
+      return toast(e);
+    }
+    const r = await updatedTo(st.sourceCommit, server.pid);
+    if (r === 'updated') {
+      showToast(`Updated to ${short(st.sourceCommit)}. Reloading…`, 'success');
+      // The page itself is part of the update: its files come from the new release.
+      setTimeout(() => location.reload(), 800);
+      return;
+    }
+    setPhase(null);
+    load();
+    showToast(r === 'failed' ? 'The update failed; the log is below.' : 'The server has not come back on the new version. Check the log below and the service logs.', 'error');
+  };
+
+  const failed = st.last && !st.last.running && st.last.exit !== 0;
+  return html`
+    <div class="update stack">
+      <h3>Update</h3>
+      ${st.installed
+        ? html`<p class="muted">Installed <code>${short(st.installed.commit)}</code>${st.installed.dirty ? ' with uncommitted changes' : ''}, <${Time} at=${st.installed.installedAt} />. Checkout <code>${st.source}</code> is at <code>${short(st.sourceCommit)}</code>${st.newer === 0 ? ', the same commit' : st.newer ? html`, <strong>${st.newer} newer commit${st.newer === 1 ? '' : 's'}</strong>` : ''}.</p>`
+        : null}
+      ${st.sourceDirty ? html`<div class="notice notice-warn">The checkout has uncommitted changes. An update installs the files as they are, changes included.</div>` : null}
+      ${st.reason && !st.last?.running ? html`<p class="muted">${st.reason}</p>` : null}
+      <div class="row">
+        <button class="btn ${st.newer ? '' : 'secondary'}" type="button" disabled=${!st.canUpdate || !!phase} onClick=${run}>
+          ${phase ? 'Updating… the server will restart' : st.newer === 0 && !st.sourceDirty ? 'Reinstall Bench' : 'Update Bench'}
+        </button>
+      </div>
+      ${failed && !phase
+        ? html`<details class="notice notice-bad"><summary>The last update failed (exit ${st.last.exit}), <${Time} at=${st.last.at} /></summary><pre class="check-output">${st.last.tail}</pre></details>`
+        : null}
+    </div>
+  `;
+}
+
 function Server() {
   const [server, setServer] = useState(null);
   const [restarting, setRestarting] = useState(false);
@@ -339,7 +426,8 @@ function Server() {
       <p class="muted mono-sm">bench ${server.version} · up ${formatDuration(server.uptimeMs)} · pid ${server.pid} · data in ${server.root}</p>
       ${server.supervised
         ? html`<p class="muted">Running as a ${server.supervised} service, which starts it again whenever it stops.</p>
-            <div class="row"><button class="btn secondary" type="button" disabled=${restarting} onClick=${restart}>${restarting ? 'Restarting…' : 'Restart server'}</button></div>`
+            <div class="row"><button class="btn secondary" type="button" disabled=${restarting} onClick=${restart}>${restarting ? 'Restarting…' : 'Restart server'}</button></div>
+            <${Update} server=${server} busy=${busy} />`
         : html`<div class="notice notice-warn">Not running as a service: if it stops, nothing starts it again, and it cannot be restarted from here. On the server, run <code>bench service install</code>.</div>`}
     </section>
   `;
