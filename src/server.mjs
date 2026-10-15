@@ -566,7 +566,7 @@ route('POST', '/api/fs/mkdir', ({ body }) => {
 route('GET', '/api/tasks', ({ u }) => svc.tasks(u.searchParams.get('projectId') || undefined));
 route('POST', '/api/tasks', ({ body }) => svc.createTask(body.projectId, body));
 route('GET', '/api/tasks/:id', ({ params }) => ({ task: svc.task(params[0]), git: svc.taskGit(params[0]), sessions: svc.sessions({ taskId: params[0], archived: true }) }));
-route('PATCH', '/api/tasks/:id', ({ params, body }) => svc.renameTask(params[0], body));
+route('PATCH', '/api/tasks/:id', ({ params, body }) => svc.editTask(params[0], body));
 route('GET', '/api/tasks/:id/git', ({ params }) => svc.taskGit(params[0]));
 route('GET', '/api/tasks/:id/diff', ({ params }) => svc.taskDiff(params[0]));
 route('POST', '/api/tasks/:id/commit', ({ params, body }) => svc.commitTask(params[0], body.message));
@@ -577,6 +577,7 @@ route('POST', '/api/tasks/:id/push', ({ params }) => svc.pushTask(params[0]));
 route('POST', '/api/tasks/:id/pr', ({ params, body }) => svc.pullRequest(params[0], body));
 route('POST', '/api/tasks/:id/close', ({ params, body }) => svc.closeTask(params[0], body));
 route('POST', '/api/tasks/:id/reopen', ({ params }) => svc.reopenTask(params[0]));
+route('POST', '/api/tasks/:id/check', ({ params }) => svc.checkTask(params[0]));
 
 route('GET', '/api/sessions', ({ u }) =>
   svc.sessions({ projectId: u.searchParams.get('projectId') || undefined, taskId: u.searchParams.get('taskId') || undefined, archived: u.searchParams.get('archived') === '1' })

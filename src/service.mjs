@@ -56,6 +56,7 @@ export class Service extends EventEmitter {
     this.store = new Store(root);
     this.runtime = new Runtime(this.store, o);
     this.runtime.on('turn-done', ({ session }) => session && this.emit('git', session.project_id));
+    this.runtime.on('task', (t) => this.emit('task', t));
     this.#importLegacy();
   }
 
@@ -221,7 +222,9 @@ export class Service extends EventEmitter {
    * The base defaults to whatever the checkout has out, and need not be checked out:
    * the worktree is cut from the ref, so the checkout is never switched.
    * @param {string} projectId
-   * @param {{title?:string, prompt?:string, baseBranch?:string, providerId?:string, modelId?:string|null, mode?:PermissionMode, effort?:string|null}} o
+   * `done` says in words what finished looks like; `check` is the command Bench runs to
+   * check it, and defaults to the project's. An empty `check` means none.
+   * @param {{title?:string, prompt?:string, baseBranch?:string, providerId?:string, modelId?:string|null, mode?:PermissionMode, effort?:string|null, done?:string|null, check?:string|null}} o
    */
   createTask(projectId, o) {
     const p = this.project(projectId);
@@ -244,7 +247,9 @@ export class Service extends EventEmitter {
     } catch (e) {
       throw fail(g.gitError(e));
     }
-    const task = this.store.addTask({ id, project_id: p.id, title, description: prompt || null, base_branch: base, base_commit: baseCommit, branch, worktree });
+    const done = (o.done || '').trim() || null;
+    const check = (o.check === undefined ? p.check_command : o.check)?.trim() || null;
+    const task = this.store.addTask({ id, project_id: p.id, title, description: prompt || null, base_branch: base, base_commit: baseCommit, branch, worktree, done, check_command: check });
     this.emit('task', task);
     this.emit('git', p.id);
     const session = this.createSession({ projectId: p.id, taskId: id, title, providerId: o.providerId, modelId: o.modelId, mode: o.mode, effort: o.effort });
@@ -360,6 +365,7 @@ export class Service extends EventEmitter {
     const repo = this.project(t.project_id).path;
     for (const s of this.store.listSessions({ taskId: t.id })) {
       this.runtime.close(s.id);
+      this.runtime.dropScratch(s.id);
       this.runtime.emit('session', this.store.updateSession(s.id, { archived_at: new Date().toISOString() }));
     }
     try {
@@ -418,12 +424,36 @@ export class Service extends EventEmitter {
     return { url };
   }
 
-  /** @param {string} id @param {{title?:string}} patch */
-  renameTask(id, patch) {
-    if (!patch.title?.trim()) throw fail('A title cannot be empty');
-    const t = this.store.updateTask(this.task(id).id, { title: patch.title.trim() });
+  /**
+   * A new title, or a new bar for done. Changing the bar clears the last check's result,
+   * which judged the old one, and closes the task's idle sessions so that each picks the
+   * new bar up when it resumes. @param {string} id @param {{title?:string, done?:string|null, check?:string|null}} patch
+   */
+  editTask(id, patch) {
+    const t0 = this.task(id);
+    /** @type {Partial<Task>} */
+    const change = {};
+    if (patch.title !== undefined) {
+      if (!patch.title?.trim()) throw fail('A title cannot be empty');
+      change.title = patch.title.trim();
+    }
+    const bar = patch.done !== undefined || patch.check !== undefined;
+    if (patch.done !== undefined) change.done = patch.done?.trim() || null;
+    if (patch.check !== undefined) change.check_command = patch.check?.trim() || null;
+    if (bar) Object.assign(change, { check_status: null, check_tree: null, check_output: null, check_at: null });
+    const t = this.store.updateTask(t0.id, change);
+    if (bar) for (const s of this.store.listSessions({ taskId: id })) if (!this.runtime.busy(s.id)) this.runtime.close(s.id);
     this.emit('task', t);
     return t;
+  }
+
+  /** Runs the task's check now, whether or not anything changed. @param {string} id */
+  async checkTask(id) {
+    const t = this.task(id);
+    if (!t.check_command) throw fail('This task has no check; add one first');
+    if (t.state !== 'active') throw fail(`The task is ${t.state}`, 409);
+    await this.runtime.check(id, { force: true });
+    return this.task(id);
   }
 
   // -- sessions ---------------------------------------------------------------------
@@ -537,8 +567,10 @@ export class Service extends EventEmitter {
   /** @param {string} id @param {boolean} archived */
   archiveSession(id, archived = true) {
     const s = this.session(id);
-    if (archived) this.runtime.close(id);
-    else if (s.task_id && this.task(s.task_id).state !== 'active') throw fail('Reopen the task first', 409);
+    if (archived) {
+      this.runtime.close(id);
+      this.runtime.dropScratch(id);
+    } else if (s.task_id && this.task(s.task_id).state !== 'active') throw fail('Reopen the task first', 409);
     const updated = this.store.updateSession(id, { archived_at: archived ? new Date().toISOString() : null });
     this.runtime.emit('session', updated);
     return updated;
@@ -549,6 +581,7 @@ export class Service extends EventEmitter {
     this.session(id);
     this.runtime.close(id);
     fs.rmSync(this.runtime.attachmentsDir(id), { recursive: true, force: true });
+    this.runtime.dropScratch(id);
     this.store.deleteSessionData(id);
     this.runtime.emit('session-removed', id);
     return { ok: true };

@@ -6,10 +6,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { cleanEnv, providerEnv, invocationId, priceUsage } from './providers.mjs';
+import { runCheck, CHECK_TIMEOUT_MS } from './check.mjs';
+import { workingTree } from './git.mjs';
 
 /** @typedef {import('./contract.mjs').Session} Session */
+/** @typedef {import('./contract.mjs').Task} Task */
+/** @typedef {import('./check.mjs').CheckResult & {fresh:boolean}} CheckRun */
 /** @typedef {import('./contract.mjs').Approval} Approval */
 /** @typedef {import('./contract.mjs').ApprovalAnswer} ApprovalAnswer */
 /** @typedef {import('./contract.mjs').PermissionMode} PermissionMode */
@@ -43,6 +48,15 @@ export const MAX_UPLOAD = 300 * 1024 * 1024;
 /** A file name that is safe on disk: no path, no odd characters. @param {unknown} name */
 const safeName = (name) => path.basename(String(name || 'file')).replace(/[^\w.\- ]+/g, '_').slice(-120) || 'file';
 
+// Bench's own plugin: skills and agents every session gets, whatever project it is in,
+// without writing anything into that project. It ships inside the release, beside src/,
+// so a Bench update upgrades it for every project at once.
+export const PACK = fileURLToPath(new URL('../pack', import.meta.url));
+
+// How many times one message from a person can be sent back to work by a failing check,
+// before the stop is let through and the failure is left for the person to read.
+export const CHECK_TRIES = 3;
+
 export const MODES = /** @type {const} */ (['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']);
 
 /**
@@ -68,6 +82,24 @@ function memoryDir(projectPath) {
   const home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   const dir = path.join(home, 'projects', projectPath.replace(/[^a-zA-Z0-9]/g, '-'), 'memory');
   return fs.existsSync(dir) ? dir : null;
+}
+
+/**
+ * TMPDIR covers every tool that asks the system for a temporary folder. This covers the
+ * rest: a path typed out as /tmp/... by the model itself.
+ * @param {string} dir
+ */
+function scratchNote(dir) {
+  return `# Scratch files\n\nThis session's scratch folder is ${dir}, and TMPDIR points at it. Put anything temporary there - logs, screenshots, downloads and throwaway scripts - rather than in /tmp or in the project. Bench deletes the folder when the session is archived, so nothing in it outlives the session; anything worth keeping belongs in the project.`;
+}
+
+/** The worktree's state, or null when git cannot say. @param {string} dir */
+function treeOf(dir) {
+  try {
+    return workingTree(dir);
+  } catch {
+    return null;
+  }
 }
 
 /** @param {unknown} content @returns {unknown} */
@@ -103,6 +135,8 @@ class Live {
     this.providerId = null;
     /** @type {string|undefined} */
     this.lastStderr = undefined;
+    /** Stops a failing check has refused since the person last wrote. */
+    this.checkTries = 0;
   }
 
   /** @param {SDKUserMessage} m */
@@ -142,7 +176,13 @@ export class Runtime extends EventEmitter {
     this.claudePids = new Map();
     /** @type {Map<string, {approval: Approval, resolve: (r: PermissionResult) => void, suggestions: any[]}>} */
     this.approvals = new Map();
+    /** A task's check in flight, shared by every session that stops while it runs.
+     * @type {Map<string, Promise<CheckRun|null>>} */
+    this.checks = new Map();
     store.resetLiveSessions();
+    // A check that was running when the server stopped never finished: it was not judged.
+    for (const t of store.listTasks()) if (t.check_status === 'running') store.updateTask(t.id, { check_status: null, check_tree: null });
+    this.sweepScratch();
     this.reaper = setInterval(() => this.#reap(), 60000);
     this.reaper.unref();
   }
@@ -185,6 +225,38 @@ export class Runtime extends EventEmitter {
   /** Where a session's attached files are kept. It is opened to the session, so reading them asks nothing. @param {string} id */
   attachmentsDir(id) {
     return path.join(this.store.dir, 'attachments', id);
+  }
+
+  /**
+   * A session's scratch folder: its TMPDIR, where logs, screenshots and throwaway scripts
+   * go instead of /tmp or the project. It lives with the data, not in /tmp, so a big one
+   * does not fill a memory-backed /tmp, and it is removed when the session is archived.
+   * @param {string} id
+   */
+  scratchDir(id) {
+    return path.join(this.store.dir, 'scratch', id);
+  }
+
+  /** Removes a session's scratch folder. @param {string} id */
+  dropScratch(id) {
+    fs.rmSync(this.scratchDir(id), { recursive: true, force: true });
+  }
+
+  /**
+   * Removes the scratch folders of sessions that are archived or gone. Archiving removes
+   * its own; this catches the rest - a crash between the two, or folders from before.
+   */
+  sweepScratch() {
+    let names = [];
+    try {
+      names = fs.readdirSync(path.join(this.store.dir, 'scratch'));
+    } catch {
+      return;
+    }
+    for (const id of names) {
+      const s = this.store.getSession(id);
+      if ((!s || s.archived_at) && !this.live.has(id)) this.dropScratch(id);
+    }
   }
 
   /**
@@ -276,6 +348,7 @@ export class Runtime extends EventEmitter {
     const hint = archive ? '\n(An .apk, .aab, .ipa, .jar or .zip is a zip archive: inspect it with Bash - unzip -l, unzip -p, aapt or apkanalyzer where installed - rather than Read.)' : '';
     const body = `${text}${note}${hint}`.trim();
     const live = this.live.get(id) || this.#start(s);
+    live.checkTries = 0;
     /** @type {any[]} */
     const content = [...images.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } })), ...(body ? [{ type: 'text', text: body }] : [])];
     live.push({ type: 'user', message: { role: 'user', content: images.length ? content : body }, parent_tool_use_id: null });
@@ -293,8 +366,10 @@ export class Runtime extends EventEmitter {
     if (!provider) throw new Error(`Provider ${s.provider_id} is gone; pick another`);
     const model = s.model_id ? this.store.getModel(s.model_id) || null : null;
     const project = this.store.getProject(s.project_id);
-    const env = { ...cleanEnv(), ...providerEnv(provider, model), CLAUDE_AGENT_SDK_CLIENT_APP: 'bench' };
-    const instructions = userInstructions();
+    const scratch = this.scratchDir(s.id);
+    fs.mkdirSync(scratch, { recursive: true });
+    const env = { ...cleanEnv(), ...providerEnv(provider, model), TMPDIR: scratch, TMP: scratch, TEMP: scratch, CLAUDE_AGENT_SDK_CLIENT_APP: 'bench' };
+    const instructions = [userInstructions(), scratchNote(scratch), this.#taskBrief(s)].filter(Boolean).join('\n\n') || null;
     const memory = project && path.resolve(project.path) !== path.resolve(s.cwd) ? memoryDir(project.path) : null;
     fs.mkdirSync(this.attachmentsDir(s.id), { recursive: true });
     const live = new Live(s.id);
@@ -303,9 +378,10 @@ export class Runtime extends EventEmitter {
     /** @type {import('@anthropic-ai/claude-agent-sdk').Options} */
     const options = {
       cwd: s.cwd,
-      additionalDirectories: [this.attachmentsDir(s.id)],
+      additionalDirectories: [this.attachmentsDir(s.id), scratch],
       env,
       settingSources: ['project', 'local'],
+      plugins: [{ type: 'local', path: PACK }],
       permissionMode: /** @type {PermissionMode} */ (s.permission_mode),
       allowDangerouslySkipPermissions: true,
       includePartialMessages: true,
@@ -313,6 +389,9 @@ export class Runtime extends EventEmitter {
       // offers it as the first quick reply.
       promptSuggestions: true,
       canUseTool: (tool, input, opts) => this.#ask(s.id, tool, input, opts),
+      // A task session may not stop on a failing check: Bench runs it, and a failure goes
+      // back to the model as the reason it has to keep going.
+      ...(s.task_id ? { hooks: { Stop: [{ hooks: [(input, _id, { signal }) => this.#onStop(s.id, /** @type {any} */ (input), signal)], timeout: CHECK_TIMEOUT_MS / 1000 + 60 }] } } : {}),
       ...(model ? { model: invocationId(model) } : {}),
       ...(s.effort ? { effort: /** @type {any} */ (s.effort) } : {}),
       ...(s.claude_session_id ? { resume: s.claude_session_id } : {}),
@@ -386,6 +465,8 @@ export class Runtime extends EventEmitter {
         const s = this.store.getSession(id);
         if (s && s.claude_session_id !== m.session_id) this.#update(id, { claude_session_id: m.session_id });
         this.#event(id, 'init', { model: m.model, permissionMode: m.permissionMode, cwd: m.cwd, version: m.claude_code_version });
+        // A plugin that fails to load is otherwise silent: its skills are just missing.
+        for (const e of m.plugin_errors || []) this.#event(id, 'notice', { text: `Plugin ${e.plugin} did not load fully: ${e.message}` });
       } else if (m.subtype === 'compact_boundary') this.#event(id, 'notice', { text: 'Context compacted' });
       else if (m.subtype === 'api_retry') this.#event(id, 'notice', { text: `API error, retrying (attempt ${m.attempt ?? '?'})` });
       return;
@@ -558,6 +639,105 @@ export class Runtime extends EventEmitter {
     return this.#update(id, { provider_id: providerId, model_id: modelId, ...(o.effort !== undefined ? { effort: o.effort } : {}) });
   }
 
+  // -- the task's check -------------------------------------------------------------
+
+  /**
+   * What a task's sessions are told about its bar for done, so they know it from the
+   * start rather than finding out when a stop is refused. @param {Session} s
+   */
+  #taskBrief(s) {
+    const t = s.task_id ? this.store.getTask(s.task_id) : null;
+    if (!t || (!t.done && !t.check_command)) return null;
+    return [
+      "# This task's bar for done",
+      t.done ? `Done means: ${t.done}` : null,
+      t.check_command ? `When you stop, Bench runs \`${t.check_command}\` in this worktree. If it fails you are handed its output and sent back to work, so run it yourself before you stop.` : null,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  /**
+   * The Stop hook. A check that ran fresh and failed refuses the stop, up to CHECK_TRIES
+   * times per message from the person. A result Bench already had - nothing changed since
+   * it ran - never refuses one: the model was not asked to change anything, or changed
+   * nothing, and sending it round again would be a loop.
+   * @param {string} id @param {{background_tasks?:unknown[]}} input @param {AbortSignal} signal
+   * @returns {Promise<import('@anthropic-ai/claude-agent-sdk').HookJSONOutput>}
+   */
+  async #onStop(id, input, signal) {
+    const s = this.store.getSession(id);
+    const live = this.live.get(id);
+    // Work still running in the background will wake the session again; check then.
+    if (!s?.task_id || !live || input.background_tasks?.length) return {};
+    const r = await this.check(s.task_id, { sessionId: id, signal });
+    if (!r || r.ok || !r.fresh) return {};
+    const t = /** @type {Task} */ (this.store.getTask(s.task_id));
+    live.checkTries++;
+    if (live.checkTries > CHECK_TRIES) {
+      this.#event(id, 'notice', { text: `The check still fails after ${CHECK_TRIES} tries. Stopping here so you can look.` });
+      return {};
+    }
+    const how = r.timedOut ? 'timed out' : `failed (exit ${r.code})`;
+    return {
+      decision: 'block',
+      reason:
+        `Bench ran this task's check, \`${t.check_command}\`, and it ${how}. The end of its output:\n\n${r.output || '(no output)'}\n\n` +
+        (t.done ? `Done means: ${t.done}\n\n` : '') +
+        `Fix what it shows, run the check yourself, and stop once it passes. If it cannot pass for a reason outside this task, say why and stop. (Try ${live.checkTries} of ${CHECK_TRIES}.)`,
+    };
+  }
+
+  /**
+   * Runs a task's check in its worktree and records the result on the task. Skipped when
+   * the working tree is the one the last run already judged, unless `force`. A run already
+   * going for the same task is shared rather than started twice.
+   * @param {string} taskId
+   * @param {{sessionId?:string, signal?:AbortSignal, force?:boolean}} [o]
+   * @returns {Promise<CheckRun|null>} null when there is nothing to run
+   */
+  async check(taskId, o = {}) {
+    const t = this.store.getTask(taskId);
+    if (!t || t.state !== 'active' || !t.check_command || !fs.existsSync(t.worktree)) return null;
+    const tree = treeOf(t.worktree);
+    if (!o.force && tree && tree === t.check_tree && (t.check_status === 'passed' || t.check_status === 'failed')) {
+      return { ok: t.check_status === 'passed', code: null, output: t.check_output || '', ms: 0, timedOut: false, fresh: false };
+    }
+    const going = this.checks.get(taskId);
+    if (going) return going;
+    const run = (async () => {
+      this.#taskUpdate(taskId, { check_status: 'running' });
+      const r = await runCheck(/** @type {string} */ (t.check_command), t.worktree, { env: cleanEnv(), signal: o.signal });
+      if (o.signal?.aborted) {
+        // Stopped by the person, not judged: the next stop runs it again.
+        this.#taskUpdate(taskId, { check_status: null, check_tree: null });
+        return null;
+      }
+      // The tree after the run, so files the check itself writes do not make the next
+      // stop look like a change.
+      this.#taskUpdate(taskId, { check_status: r.ok ? 'passed' : 'failed', check_tree: treeOf(t.worktree), check_output: r.output, check_at: new Date().toISOString() });
+      if (o.sessionId) this.#event(o.sessionId, 'check', { command: t.check_command, ok: r.ok, code: r.code, output: r.output, ms: r.ms, timedOut: r.timedOut });
+      return { ...r, fresh: true };
+    })();
+    this.checks.set(taskId, run);
+    try {
+      return await run;
+    } finally {
+      this.checks.delete(taskId);
+    }
+  }
+
+  /** @param {string} id @param {Partial<Task>} patch */
+  #taskUpdate(id, patch) {
+    this.emit('task', this.store.updateTask(id, patch));
+  }
+
+  /** A turn is in flight, or an approval is waiting on a person. @param {string} id */
+  busy(id) {
+    const live = this.live.get(id);
+    return !!live && (live.turns > 0 || !!this.#pendingFor(id));
+  }
+
   /** Closes a session's query. Its transcript stays, and the next message resumes it. @param {string} id */
   close(id) {
     const live = this.live.get(id);
@@ -577,6 +757,7 @@ export class Runtime extends EventEmitter {
   #reap() {
     const cutoff = Date.now() - this.idleMs;
     for (const [id, live] of this.live) if (live.turns === 0 && !this.#pendingFor(id) && live.lastUsed < cutoff) this.close(id);
+    this.sweepScratch();
   }
 
   shutdown() {

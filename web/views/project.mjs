@@ -69,6 +69,13 @@ export function ProjectView({ projectId }) {
               },
             },
             {
+              label: project.check_command ? 'Default check…' : 'Set a default check…',
+              onSelect: () => {
+                const check = prompt('The command that checks a task is done, run in its worktree when a session stops (e.g. npm test). New tasks start with it; leave empty for none.', project.check_command || '');
+                if (check !== null) api.setProjectCheck(projectId, check).then(() => import('../api.mjs').then((m) => m.refresh())).catch(toast);
+              },
+            },
+            {
               label: 'Remove project',
               danger: true,
               onSelect: async () => {
@@ -270,10 +277,14 @@ function CheckoutDiff({ projectId, onClose }) {
 
 function NewTask({ projectId, git }) {
   const providers = useStore((s) => s.providers);
+  const project = useStore((s) => s.projects.find((p) => p.id === projectId));
   const defaults = useStore((s) => s.defaults);
   const key = `bench:new-task:${projectId}`;
   const [prompt, setPrompt] = useState(() => recall(key, ''));
   const [title, setTitle] = useState('');
+  const [done, setDone] = useState('');
+  // Null until edited: the project's default check, which the server fills in.
+  const [check, setCheck] = useState(null);
   const [base, setBase] = useState(null);
   const [model, setModel] = useState(null);
   const [mode, setMode] = useState(null);
@@ -288,9 +299,11 @@ function NewTask({ projectId, git }) {
   const start = async () => {
     setBusy(true);
     try {
-      const r = await api.createTask({ projectId, prompt, title, baseBranch, providerId: chosen.providerId, modelId: chosen.modelId, mode: mode || defaults.mode, effort: effort === undefined ? defaults.effort : effort });
+      const r = await api.createTask({ projectId, prompt, title, done, ...(check === null ? {} : { check }), baseBranch, providerId: chosen.providerId, modelId: chosen.modelId, mode: mode || defaults.mode, effort: effort === undefined ? defaults.effort : effort });
       setPrompt('');
       setTitle('');
+      setDone('');
+      setCheck(null);
       go(`#/p/${projectId}/t/${r.task.id}/s/${r.session.id}`);
     } catch (e) {
       toast(e);
@@ -314,6 +327,8 @@ function NewTask({ projectId, git }) {
         ? html`
             <div class="new-task-opts">
               <label class="field"><span class="field-label">Title (optional)</span><input class="input" placeholder="From the first line" value=${title} onInput=${(e) => setTitle(e.target.value)} /></label>
+              <label class="field field-wide"><span class="field-label">Done means (optional)</span><input class="input" placeholder="e.g. the CSV export keeps every row of the 60k fixture" value=${done} onInput=${(e) => setDone(e.target.value)} /></label>
+              <label class="field field-wide"><span class="field-label">Check (optional)</span><input class="input mono-sm" placeholder="e.g. npm test. Runs when a session stops; a failure sends it back to work" value=${check ?? project?.check_command ?? ''} onInput=${(e) => setCheck(e.target.value)} /></label>
               ${git?.branches?.length ? html`<div class="field"><span class="field-label">Branch from</span><${BranchPicker} branches=${git.branches} value=${baseBranch} onChange=${setBase} /></div>` : null}
               <div class="field"><span class="field-label">Model</span><${ModelPicker} providers=${providers} value=${chosen} onChange=${setModel} /></div>
               <div class="field"><span class="field-label">Effort</span><${EffortPicker} value=${effort === undefined ? defaults.effort : effort} onChange=${setEffort} /></div>

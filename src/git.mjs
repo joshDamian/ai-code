@@ -312,6 +312,29 @@ function diffWorking(dir, ref, extra = []) {
 /** @param {string} dir @param {string} ref */
 export const workingDiff = (dir, ref) => diffWorking(dir, ref);
 
+/**
+ * The id of the tree the working directory would commit as, new files included and
+ * ignored ones left out. Two calls agree exactly when no tracked or new file changed,
+ * which is what tells "nothing changed since the last check" without running it.
+ * @param {string} dir
+ */
+export function workingTree(dir) {
+  const tmp = path.join(os.tmpdir(), `bench-index-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  const env = { ...process.env, GIT_INDEX_FILE: tmp };
+  try {
+    // A copy of the worktree's own index keeps its stat cache, so `add -A` hashes only the
+    // files that changed rather than every file in the tree. Staged or not, the result
+    // is the same: `add -A` makes the copy match the working directory.
+    const own = git(dir, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
+    if (fs.existsSync(own)) fs.copyFileSync(own, tmp);
+    else if (revParse(dir)) git(dir, ['read-tree', 'HEAD'], { env });
+    git(dir, ['add', '-A'], { env });
+    return git(dir, ['write-tree'], { env });
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
 /** Files, lines added and removed, against `ref`. @param {string} dir @param {string} ref */
 export function workingStat(dir, ref) {
   const out = { files: 0, added: 0, removed: 0 };

@@ -108,6 +108,8 @@ export function TaskView({ projectId, taskId, sessionId, tab }) {
         </div>
       </header>
 
+      ${active || task.check_command || task.done ? html`<${TaskBar} task=${task} active=${active} onEdit=${() => setDialog('bar')} onOutput=${() => setDialog('output')} />` : null}
+
       <nav class="task-tabs" role="tablist">
         ${sessions.map(
           (s) => html`<a role="tab" class="task-tab ${current?.id === s.id ? 'active' : ''} ${s.archived_at ? 'archived' : ''}" href=${`${base}/s/${s.id}`} key=${s.id}><${Dot} status=${s.status} /><span>${s.title}</span></a>`
@@ -171,6 +173,8 @@ export function TaskView({ projectId, taskId, sessionId, tab }) {
       ${dialog === 'commit' ? html`<${CommitDialog} title="Commit in the task" initial=${task.title} files=${git?.dirty || []} onClose=${() => setDialog(null)} onCommit=${(m) => api.commitTask(taskId, m).then(reload)} />` : null}
       ${dialog === 'pr' ? html`<${PrDialog} task=${task} onClose=${() => setDialog(null)} />` : null}
       ${dialog === 'close' ? html`<${CloseDialog} task=${task} onClose=${() => setDialog(null)} />` : null}
+      ${dialog === 'bar' ? html`<${BarDialog} task=${task} onClose=${() => setDialog(null)} />` : null}
+      ${dialog === 'output' ? html`<${Dialog} wide title=${`Last check: ${task.check_command}`} onClose=${() => setDialog(null)}><pre class="check-output">${task.check_output || '(no output)'}</pre><//>` : null}
     </div>
   `;
 }
@@ -337,3 +341,64 @@ function CloseDialog({ task, onClose }) {
   `;
 }
 
+const CHECK_STATE = { passed: ['Check passed', 'badge-good'], failed: ['Check failed', 'badge-bad'], running: ['Checking…', 'badge-info'] };
+
+/**
+ * The task's bar for done, under its title: what done means, the command that checks it,
+ * and how the last run went. A session that stops is checked against it by the server;
+ * Run check is for a person who wants to see it now.
+ */
+function TaskBar({ task, active, onEdit, onOutput }) {
+  const [busy, setBusy] = useState(false);
+  if (!task.check_command && !task.done) {
+    return html`<div class="task-bar"><button class="btn sm ghost" type="button" onClick=${onEdit}>Say what done means…</button></div>`;
+  }
+  const [label, cls] = CHECK_STATE[task.check_status] || ['Not run yet', 'badge-neutral'];
+  const run = async () => {
+    setBusy(true);
+    try {
+      const t = await api.checkTask(task.id);
+      showToast(t.check_status === 'passed' ? 'Check passed' : 'Check failed', t.check_status === 'passed' ? 'success' : 'error');
+    } catch (e) {
+      toast(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return html`
+    <div class="task-bar">
+      ${task.check_command
+        ? html`<button class="badge ${cls} badge-btn" type="button" disabled=${!task.check_output} onClick=${onOutput} title=${task.check_at ? `Ran ${new Date(task.check_at).toLocaleString()}; show the output` : ''}>${label}</button>
+            <code class="mono-sm task-bar-cmd" title=${task.check_command}>${task.check_command}</code>`
+        : null}
+      ${task.done ? html`<span class="task-bar-done" title=${task.done}><span class="muted">Done means:</span> ${task.done}</span>` : null}
+      <span class="tab-gap"></span>
+      ${active && task.check_command ? html`<button class="btn sm secondary" type="button" disabled=${busy || task.check_status === 'running'} onClick=${run}>${busy || task.check_status === 'running' ? 'Checking…' : 'Run check'}</button>` : null}
+      ${active ? html`<button class="btn sm ghost" type="button" onClick=${onEdit}>Edit</button>` : null}
+    </div>
+  `;
+}
+
+function BarDialog({ task, onClose }) {
+  const [done, setDone] = useState(task.done || '');
+  const [check, setCheck] = useState(task.check_command || '');
+  const save = async () => {
+    try {
+      await api.setTaskBar(task.id, { done, check });
+      onClose();
+    } catch (e) {
+      toast(e);
+    }
+  };
+  return html`
+    <${Dialog}
+      title="What done means"
+      onClose=${onClose}
+      actions=${html`<button class="btn ghost" type="button" onClick=${onClose}>Cancel</button><button class="btn primary" type="button" onClick=${save}>Save</button>`}
+    >
+      <label class="field"><span class="field-label">Done means</span><textarea class="input" rows="3" placeholder="e.g. the CSV export keeps every row of the 60k fixture" value=${done} onInput=${(e) => setDone(e.target.value)} /></label>
+      <label class="field"><span class="field-label">Check command</span><input class="input mono-sm" placeholder="e.g. npm test" value=${check} onInput=${(e) => setCheck(e.target.value)} /></label>
+      <p class="muted">Bench runs the check in the worktree whenever a session stops with changed files. A failure sends the session back to work, up to three times per message. Idle sessions pick up the change when they resume.</p>
+    <//>
+  `;
+}

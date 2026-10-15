@@ -11,6 +11,8 @@ export interface Project {
   name: string;
   path: string;
   created_at: string;
+  /** The check a new task in this project starts with. */
+  check_command: string | null;
 }
 
 export interface Provider {
@@ -52,9 +54,22 @@ export interface Task {
   state: TaskState;
   merge_commit: string | null;
   merged_at: string | null;
+  /** What done means for this task, in the person's words. */
+  done: string | null;
+  /** The shell command Bench runs in the worktree to check the work. */
+  check_command: string | null;
+  /** The last run's result: 'running', 'passed' or 'failed'. Null before the first. */
+  check_status: CheckStatus | null;
+  /** The working tree the last run checked, from git write-tree. */
+  check_tree: string | null;
+  /** The end of the last run's output. */
+  check_output: string | null;
+  check_at: string | null;
   created_at: string;
   updated_at: string;
 }
+
+export type CheckStatus = 'running' | 'passed' | 'failed';
 
 /** idle: waiting on the person. running: a turn is in flight. waiting: blocked on an approval. */
 export type SessionStatus = 'idle' | 'running' | 'waiting' | 'error';

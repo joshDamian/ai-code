@@ -324,6 +324,13 @@ function Entry({ event: e, results, reply }) {
   }
   if (e.kind === 'init') return html`<div class="sys-line">Claude Code ${d.version || ''} · ${d.model} · ${MODES.find((m) => m.value === d.permissionMode)?.label || d.permissionMode}</div>`;
   if (e.kind === 'notice') return html`<div class="sys-line">${d.text}</div>`;
+  if (e.kind === 'check') {
+    const head = d.ok ? 'Check passed' : d.timedOut ? 'Check timed out' : `Check failed (exit ${d.code ?? '?'})`;
+    return html`<details class="tool check-run ${d.ok ? '' : 'failed'}">
+      <summary class="tool-head"><span class="badge ${d.ok ? 'badge-good' : 'badge-bad'}">${head}</span><code class="tool-name" title=${d.command}>${d.command}</code><span class="muted">${Math.max(1, Math.round(d.ms / 1000))}s</span></summary>
+      <pre class="check-output">${d.output || '(no output)'}</pre>
+    </details>`;
+  }
   if (e.kind === 'error') return html`<div class="notice notice-bad">${d.message}</div>`;
   return null;
 }
@@ -662,7 +669,9 @@ function Composer({ session: s, commands, quick }) {
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
   }, [text]);
 
-  const slash = text.startsWith('/') && !text.includes(' ') ? commands.filter((c) => c.startsWith(text.slice(1))).slice(0, 8) : [];
+  // A plugin's commands are namespaced (`bench:make-verify`), so `/make` finds them by
+  // the part after the colon too.
+  const slash = text.startsWith('/') && !text.includes(' ') ? commands.filter((c) => c.startsWith(text.slice(1)) || c.slice(c.indexOf(':') + 1).startsWith(text.slice(1))).slice(0, 8) : [];
   const uploading = items.some((it) => !it.inline && !it.upload);
   const empty = !text.trim() && !items.length;
 

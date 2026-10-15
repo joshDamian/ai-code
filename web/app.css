@@ -1165,3 +1165,16 @@ button.side-settings{width:100%;text-align:left}
 @keyframes tp-card-in{from{opacity:0;transform:translateY(4px)}}
 @media(prefers-reduced-motion:reduce){.tp-panel,.tp-card{animation:none}}
 .side-top .tp-trigger{flex:0 1 auto}
+
+/* A task's bar for done, and a check run in the transcript. */
+.task-bar{display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap;padding:0 var(--space-5) var(--space-2);font-size:var(--text-sm)}
+.task-bar-cmd{max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-bar-done{min-width:0;flex:1 1 20ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge-btn{cursor:pointer;font:inherit;font-size:var(--text-xs)}
+.badge-btn:disabled{cursor:default}
+.check-run summary{cursor:pointer;list-style:none}
+.check-run summary::-webkit-details-marker{display:none}
+.check-output{max-height:50vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:var(--text-xs);background:var(--surface-sunken);padding:var(--space-2) var(--space-3);margin:0;border-radius:var(--radius-sm)}
+.check-run .check-output{border-radius:0;border-top:1px solid var(--line)}
+.new-task-opts .field-wide{grid-column:1/-1}
+@media(max-width:860px){.task-bar{padding:0 var(--space-3) var(--space-2)}.task-bar-cmd{display:none}}

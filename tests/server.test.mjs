@@ -1,22 +1,24 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import WebSocket from 'ws';
+import { tmp } from './tmp.mjs';
 
 // The server as a process: auth, pairing, the event socket and static files.
 
 let child;
 let port;
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aic-server-'));
+const root = tmp('server');
 
 before(async () => {
   child = spawn(process.execPath, ['src/server.mjs'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, PORT: '0', BENCH_ROOT: root, BENCH_PUBLIC_URL: 'https://box.example.ts.net' },
+    // BENCH_SERVICE is set when these tests run inside a Bench session; this server is
+    // the one without a service manager, so it must not inherit it.
+    env: { ...process.env, PORT: '0', BENCH_ROOT: root, BENCH_PUBLIC_URL: 'https://box.example.ts.net', BENCH_SERVICE: '', AI_CODE_SERVICE: '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   port = await new Promise((resolve, reject) => {
@@ -157,7 +159,7 @@ test('static files and vendored libraries are served, and nothing outside them',
 // A session's files: served from under its directory and nowhere else, opened only as a
 // type the browser can show safely, and then only in a sandbox.
 test('a session file opens inline in a sandbox, or downloads, and nothing outside its directory', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aic-files-'));
+  const dir = tmp('files');
   fs.writeFileSync(path.join(dir, 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]));
   fs.writeFileSync(path.join(dir, 'page.html'), '<script>alert(1)</script>');
   fs.writeFileSync(path.join(dir, 'kron.apk'), 'PK');
@@ -231,7 +233,7 @@ test('a restart is refused when no service manager would bring the server back',
 });
 
 test('under a service manager, a restart exits so the manager starts a fresh process', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aic-svc-'));
+  const dir = tmp('svc');
   const proc = spawn(process.execPath, ['src/server.mjs'], {
     cwd: new URL('..', import.meta.url).pathname,
     env: { ...process.env, PORT: '0', BENCH_ROOT: dir, BENCH_SERVICE: 'test' },

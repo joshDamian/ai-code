@@ -7,6 +7,8 @@
 //   "fail"                 ends the turn as an error
 //   anything else          replies "echo: <text>"
 //
+// Stop hooks in options.hooks run at the end of each turn; see below.
+//
 // Every call is recorded on `calls`, so a test can see the options a session started with.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -58,6 +60,22 @@ export function fakeQuery({ prompt, options }) {
         isError = true;
       } else if (text === 'fail') isError = true;
       emit({ type: 'assistant', parent_tool_use_id: null, message: { id: `${id}b`, content: [{ type: 'text', text: reply }] } });
+      // Stop hooks, as Claude Code runs them: a block sends the model back to work with
+      // the reason. This model answers each one by changing a file, which is what a real
+      // one fixing things does to the worktree, then tries to stop again.
+      for (let round = 0; !isError && options.hooks?.Stop && round < 10; round++) {
+        let blocked = null;
+        for (const matcher of options.hooks.Stop) {
+          for (const hook of matcher.hooks) {
+            const r = await hook({ hook_event_name: 'Stop', stop_hook_active: round > 0, background_tasks: [] }, undefined, { signal: new AbortController().signal });
+            if (r?.decision === 'block') blocked = r.reason;
+          }
+        }
+        if (!blocked) break;
+        record.blocked = [...(record.blocked || []), blocked];
+        fs.writeFileSync(path.join(options.cwd, `fix-${round}.txt`), blocked.slice(0, 40));
+        emit({ type: 'assistant', parent_tool_use_id: null, message: { id: `${id}r${round}`, content: [{ type: 'text', text: `fixing (round ${round})` }] } });
+      }
       total += 0.01;
       emit({
         type: 'result',

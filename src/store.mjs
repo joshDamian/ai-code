@@ -73,6 +73,11 @@ export class Store {
     // A push subscription that predates per-device choices: what this device wants to be
     // woken for, as JSON. Null means everything, which is what every device got before.
     if (!this.db.prepare('PRAGMA table_info(push_subscriptions)').all().some((c) => c.name === 'choices')) this.db.exec('ALTER TABLE push_subscriptions ADD COLUMN choices TEXT');
+    // A task's bar for done: what it means in words, the command that checks it, and the
+    // last time Bench ran that command - its result and the working tree it ran against.
+    for (const col of ['done', 'check_command', 'check_status', 'check_tree', 'check_output', 'check_at']) {
+      if (!this.db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
+    }
     this.#seedProviders();
   }
 
@@ -172,17 +177,17 @@ export class Store {
 
   /** @returns {Project[]} */
   listProjects() {
-    return this.#all('SELECT id,name,path,created_at FROM projects ORDER BY name COLLATE NOCASE');
+    return this.#all('SELECT id,name,path,created_at,json_extract(commands,\'$.check\') AS check_command FROM projects ORDER BY name COLLATE NOCASE');
   }
 
   /** @param {string} id @returns {Project|undefined} */
   getProject(id) {
-    return this.#one('SELECT id,name,path,created_at FROM projects WHERE id=?', id);
+    return this.#one('SELECT id,name,path,created_at,json_extract(commands,\'$.check\') AS check_command FROM projects WHERE id=?', id);
   }
 
   /** @param {string} p @returns {Project|undefined} */
   projectByPath(p) {
-    return this.#one('SELECT id,name,path,created_at FROM projects WHERE path=?', p);
+    return this.#one('SELECT id,name,path,created_at,json_extract(commands,\'$.check\') AS check_command FROM projects WHERE path=?', p);
   }
 
   /** @param {{name:string, path:string}} p @returns {Project} */
@@ -192,9 +197,17 @@ export class Store {
     return /** @type {Project} */ (this.getProject(id));
   }
 
-  /** @param {string} id @param {{name?:string}} patch */
+  /**
+   * `check_command` is the default check a new task in this project starts with; an empty
+   * one clears it. @param {string} id @param {{name?:string, check_command?:string|null}} patch
+   */
   updateProject(id, patch) {
     this.#patch('projects', id, patch.name ? { name: patch.name } : {});
+    if (patch.check_command !== undefined) {
+      const check = String(patch.check_command || '').trim();
+      if (check) this.db.prepare("UPDATE projects SET commands=json_set(commands,'$.check',?) WHERE id=?").run(check, id);
+      else this.db.prepare("UPDATE projects SET commands=json_remove(commands,'$.check') WHERE id=?").run(id);
+    }
     return this.getProject(id);
   }
 
@@ -276,12 +289,12 @@ export class Store {
 
   // -- tasks ------------------------------------------------------------------
 
-  /** @param {Omit<Task,'state'|'merge_commit'|'merged_at'|'created_at'|'updated_at'> & {created_at?:string}} t @returns {Task} */
+  /** @param {Omit<Task,'state'|'merge_commit'|'merged_at'|'created_at'|'updated_at'|'done'|'check_command'|'check_status'|'check_tree'|'check_output'|'check_at'> & {created_at?:string, done?:string|null, check_command?:string|null}} t @returns {Task} */
   addTask(t) {
     const at = t.created_at || now();
     this.db
-      .prepare('INSERT INTO tasks(id,project_id,title,description,base_branch,base_commit,branch,worktree,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-      .run(t.id, t.project_id, t.title, t.description ?? null, t.base_branch, t.base_commit, t.branch, t.worktree, 'active', at, now());
+      .prepare('INSERT INTO tasks(id,project_id,title,description,base_branch,base_commit,branch,worktree,state,done,check_command,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(t.id, t.project_id, t.title, t.description ?? null, t.base_branch, t.base_commit, t.branch, t.worktree, 'active', t.done ?? null, t.check_command ?? null, at, now());
     return /** @type {Task} */ (this.getTask(t.id));
   }
 

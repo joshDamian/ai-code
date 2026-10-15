@@ -1,21 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { Service } from '../src/service.mjs';
 import { Store } from '../src/store.mjs';
-import { titleFrom } from '../src/runtime.mjs';
+import { titleFrom, PACK } from '../src/runtime.mjs';
 import { parseEnv, loadEnvFile, addToEnvFile, readEnvFile, envFile } from '../src/env.mjs';
 import { fakeQuery, calls } from './fake-sdk.mjs';
+import { tmp } from './tmp.mjs';
+import { workingTree } from '../src/git.mjs';
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
-function tmp(name) {
-  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), `aic-${name}-`));
-}
 
 /** A repository with one commit on main and a second branch, `feature`, one commit ahead. */
 function repo() {
@@ -80,6 +78,7 @@ test('a session turn is stored, priced and titled from its first message', async
   assert.equal(after.output_tokens, 5);
   const opts = calls.at(-1).options;
   assert.deepEqual(opts.settingSources, ['project', 'local'], 'user settings are never loaded');
+  assert.deepEqual(opts.plugins, [{ type: 'local', path: PACK }], "every session gets Bench's own plugin");
   assert.equal(opts.env.ANTHROPIC_BASE_URL, undefined);
   svc.shutdown();
 });
@@ -314,7 +313,7 @@ test('attached files are saved where the session can read them, and named in the
   assert.ok(saved.every((f) => !f.includes('/')), 'a name cannot climb out of the folder');
   assert.ok(saved.some((f) => f.endsWith('-notes.md')));
   assert.equal(fs.readFileSync(path.join(dir, saved.find((f) => f.endsWith('.pdf')))).toString(), '%PDF-1.4 fake');
-  assert.deepEqual(calls.at(-1).options.additionalDirectories, [dir]);
+  assert.deepEqual(calls.at(-1).options.additionalDirectories, [dir, svc.runtime.scratchDir(s.id)]);
   const user = svc.events(s.id).find((e) => e.kind === 'user');
   assert.deepEqual(user.data.files.map((f) => f.name), ['notes.md', 'spec.pdf']);
   assert.equal(user.data.text, 'summarise these', 'the stored message is what the person typed');
@@ -434,4 +433,171 @@ test('provider keys are kept in the data folder env file, which the shell enviro
     delete process.env.BENCH_T_ONE;
     delete process.env.BENCH_T_TWO;
   }
+});
+
+test("Bench's plugin is one Claude Code can load: a named manifest, and skills named for their folders", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(PACK, '.claude-plugin', 'plugin.json'), 'utf8'));
+  assert.equal(manifest.name, 'bench');
+  const skills = fs.readdirSync(path.join(PACK, 'skills'));
+  assert.ok(skills.length, 'the pack has skills');
+  for (const dir of skills) {
+    const text = fs.readFileSync(path.join(PACK, 'skills', dir, 'SKILL.md'), 'utf8');
+    const front = /^---\n([\s\S]*?)\n---\n/.exec(text)?.[1];
+    assert.ok(front, `${dir}: SKILL.md starts with frontmatter`);
+    assert.match(front, new RegExp(`^name: ${dir}$`, 'm'), `${dir}: its name is its folder`);
+    assert.match(front, /^description: .+/m, `${dir}: it has a description`);
+  }
+});
+
+// -- a task's check ---------------------------------------------------------------------
+
+test('a failing check sends the session back to work, and a pass lets it stop', async () => {
+  const { svc, project, root } = setup();
+  // Fails the first time it runs and passes after, like a test the model then fixes.
+  const marker = path.join(root, 'ran-once');
+  const check = `test -f ${marker} || { touch ${marker}; echo "1 test failed"; exit 1; }`;
+  const { task, session } = svc.createTask(project.id, { title: 'Fix it', done: 'the export keeps every row', check });
+  const opts = calls.at(-1)?.options;
+  svc.send(session.id, 'go');
+  await until(() => svc.session(session.id).status === 'idle' && svc.events(session.id).some((e) => e.kind === 'result'));
+  const live = calls.at(-1);
+  assert.match(live.options.systemPrompt.append, /Done means: the export keeps every row/, 'the session is told the bar up front');
+  assert.match(live.options.systemPrompt.append, /Bench runs `test -f/);
+  assert.equal(live.blocked.length, 1, 'stopped once by the failure');
+  assert.match(live.blocked[0], /1 test failed/);
+  assert.match(live.blocked[0], /Done means: the export keeps every row/);
+  const checks = svc.events(session.id).filter((e) => e.kind === 'check').map((e) => e.data.ok);
+  assert.deepEqual(checks, [false, true]);
+  assert.equal(svc.task(task.id).check_status, 'passed');
+  void opts;
+  svc.shutdown();
+});
+
+test('a check that keeps failing is let go after three tries, and nothing changed means no rerun', async () => {
+  const { svc, project } = setup();
+  const { task, session } = svc.createTask(project.id, { title: 'Never passes', check: 'echo nope; exit 3' });
+  svc.send(session.id, 'go');
+  await until(() => svc.session(session.id).status === 'idle' && svc.events(session.id).some((e) => e.kind === 'result'), 10000);
+  assert.equal(calls.at(-1).blocked.length, 3);
+  assert.equal(svc.events(session.id).filter((e) => e.kind === 'check').length, 4);
+  assert.ok(svc.events(session.id).some((e) => e.kind === 'notice' && /still fails after 3 tries/.test(e.data.text)));
+  assert.equal(svc.task(task.id).check_status, 'failed');
+  assert.match(svc.task(task.id).check_output, /nope/);
+
+  // A question afterwards changes no file, so the check does not run again.
+  const before = svc.events(session.id).filter((e) => e.kind === 'check').length;
+  svc.send(session.id, 'what failed?');
+  await until(() => svc.events(session.id).filter((e) => e.kind === 'result').length === 2);
+  assert.equal(svc.events(session.id).filter((e) => e.kind === 'check').length, before);
+  svc.shutdown();
+});
+
+test("a task takes its project's check, and changing the bar forgets the old result", async () => {
+  const { svc, project } = setup();
+  svc.store.updateProject(project.id, { check_command: 'true' });
+  assert.equal(svc.project(project.id).check_command, 'true');
+  const { task } = svc.createTask(project.id, { title: 'Default check' });
+  assert.equal(task.check_command, 'true');
+  const none = svc.createTask(project.id, { title: 'No check', check: '' }).task;
+  assert.equal(none.check_command, null, 'an empty check means none');
+
+  const ran = await svc.checkTask(task.id);
+  assert.equal(ran.check_status, 'passed');
+  assert.ok(ran.check_tree);
+  const changed = svc.editTask(task.id, { check: 'false' });
+  assert.equal(changed.check_command, 'false');
+  assert.equal(changed.check_status, null);
+  assert.equal((await svc.checkTask(task.id)).check_status, 'failed');
+  assert.throws(() => svc.editTask(task.id, { title: ' ' }), /title cannot be empty/);
+  svc.store.updateProject(project.id, { check_command: '' });
+  assert.equal(svc.project(project.id).check_command, null);
+  svc.shutdown();
+});
+
+test('a session outside a task has no stop hook', async () => {
+  const { svc, project } = setup();
+  const s = svc.createSession({ projectId: project.id });
+  svc.send(s.id, 'hi');
+  await until(() => svc.events(s.id).some((e) => e.kind === 'result'));
+  assert.equal(calls.at(-1).options.hooks, undefined);
+  svc.shutdown();
+});
+
+// -- a session's scratch folder ----------------------------------------------------------
+
+test("a session's temporary files go in its own scratch folder, which archiving removes", async () => {
+  const { svc, project } = setup();
+  const s = svc.createSession({ projectId: project.id });
+  svc.send(s.id, 'hi');
+  await until(() => svc.events(s.id).some((e) => e.kind === 'result'));
+  const scratch = svc.runtime.scratchDir(s.id);
+  const { options } = calls.at(-1);
+  assert.equal(options.env.TMPDIR, scratch);
+  assert.equal(options.env.TMP, scratch);
+  assert.ok(fs.existsSync(scratch), 'made before the session starts');
+  assert.ok(options.additionalDirectories.includes(scratch), 'readable and writable without asking');
+  assert.match(options.systemPrompt.append, new RegExp(`scratch folder is ${scratch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  fs.writeFileSync(path.join(scratch, 'shot.png'), 'x');
+  svc.archiveSession(s.id);
+  assert.ok(!fs.existsSync(scratch), 'archiving removes it');
+  svc.shutdown();
+});
+
+test('closing a task or deleting a session removes the scratch folder too', async () => {
+  const { svc, project } = setup();
+  const { task, session } = svc.createTask(project.id, { title: 'Scratch', prompt: 'hi' });
+  await until(() => svc.events(session.id).some((e) => e.kind === 'result'));
+  assert.ok(fs.existsSync(svc.runtime.scratchDir(session.id)));
+  svc.closeTask(task.id);
+  assert.ok(!fs.existsSync(svc.runtime.scratchDir(session.id)), 'closing the task archived it');
+
+  const s = svc.createSession({ projectId: project.id });
+  svc.send(s.id, 'hi');
+  await until(() => svc.events(s.id).some((e) => e.kind === 'result'));
+  svc.deleteSession(s.id);
+  assert.ok(!fs.existsSync(svc.runtime.scratchDir(s.id)));
+  svc.shutdown();
+});
+
+test("the sweep removes scratch left by sessions that are gone, and keeps a live session's", async () => {
+  const { svc, project } = setup();
+  const s = svc.createSession({ projectId: project.id });
+  svc.send(s.id, 'hi');
+  await until(() => svc.events(s.id).some((e) => e.kind === 'result'));
+  const orphan = svc.runtime.scratchDir('no-such-session');
+  fs.mkdirSync(orphan, { recursive: true });
+  svc.runtime.sweepScratch();
+  assert.ok(!fs.existsSync(orphan));
+  assert.ok(fs.existsSync(svc.runtime.scratchDir(s.id)));
+  svc.shutdown();
+});
+
+test('a check left running by a stopped server is forgotten on start, not shown as running forever', () => {
+  const { svc, project, root } = setup();
+  const { task } = svc.createTask(project.id, { title: 'Interrupted', check: 'true' });
+  svc.store.updateTask(task.id, { check_status: 'running', check_tree: 'abc' });
+  svc.shutdown();
+  const again = new Service(root, { query: fakeQuery });
+  assert.equal(again.task(task.id).check_status, null);
+  assert.equal(again.task(task.id).check_tree, null);
+  again.shutdown();
+});
+
+test('the working tree id changes with any edit, new file or deletion, and with nothing else', () => {
+  const { dir } = setup();
+  const g = (cmd) => execFileSync('git', cmd, { cwd: dir });
+  const tree = () => workingTree(dir);
+  const t0 = tree();
+  assert.equal(tree(), t0, 'stable when nothing changed');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+  const t1 = tree();
+  assert.notEqual(t1, t0);
+  g(['add', 'a.txt']);
+  assert.equal(tree(), t1, 'staging does not change it');
+  fs.writeFileSync(path.join(dir, 'new.txt'), 'n');
+  const t2 = tree();
+  assert.notEqual(t2, t1);
+  fs.rmSync(path.join(dir, 'new.txt'));
+  assert.equal(tree(), t1, 'back to the same files, back to the same id');
+  assert.equal(git(dir, 'diff', '--cached', '--name-only'), 'a.txt', "the person's own staging is untouched");
 });
