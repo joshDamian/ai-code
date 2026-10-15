@@ -86,6 +86,14 @@ export class Store {
     for (const col of ['done', 'check_command', 'check_status', 'check_tree', 'check_output', 'check_at', 'created_by_session']) {
       if (!this.db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
     }
+    // started_by_session: the session that started this one with a bench tool, if one did;
+    // such a session may not start others. purpose: 'review' for a session request_review
+    // started, which reads and reports rather than works, so the task's check does not hold it.
+    for (const col of ['started_by_session', 'purpose']) {
+      if (!this.db.prepare('PRAGMA table_info(sessions)').all().some((c) => c.name === col)) this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col} TEXT`);
+    }
+    // A log entry is a decision with its evidence, or a review: who reviewed and what it found.
+    if (!this.db.prepare('PRAGMA table_info(task_log)').all().some((c) => c.name === 'kind')) this.db.exec("ALTER TABLE task_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'decision'");
     this.#seedProviders();
   }
 
@@ -322,11 +330,15 @@ export class Store {
     return /** @type {Task} */ (this.getTask(id));
   }
 
-  /** @param {{task_id:string, session_id:string|null, decision:string, evidence:string}} e @returns {TaskLogEntry} */
+  /**
+   * For a review, `decision` names the reviewer and `evidence` holds its findings.
+   * @param {{task_id:string, session_id:string|null, decision:string, evidence:string, kind?:'decision'|'review'}} e @returns {TaskLogEntry}
+   */
   addLog(e) {
     const at = now();
-    const r = this.db.prepare('INSERT INTO task_log(task_id,session_id,decision,evidence,created_at) VALUES(?,?,?,?,?)').run(e.task_id, e.session_id, e.decision, e.evidence, at);
-    return { id: Number(r.lastInsertRowid), ...e, created_at: at };
+    const kind = e.kind || 'decision';
+    const r = this.db.prepare('INSERT INTO task_log(task_id,session_id,decision,evidence,kind,created_at) VALUES(?,?,?,?,?,?)').run(e.task_id, e.session_id, e.decision, e.evidence, kind, at);
+    return { id: Number(r.lastInsertRowid), ...e, kind, created_at: at };
   }
 
   /** A task's log, newest first. @param {string} taskId @param {number} [limit] @returns {TaskLogEntry[]} */
@@ -336,13 +348,13 @@ export class Store {
 
   // -- sessions ---------------------------------------------------------------
 
-  /** @param {Pick<Session,'project_id'|'task_id'|'title'|'cwd'|'provider_id'|'model_id'|'permission_mode'> & {effort?:string|null, id?:string}} s @returns {Session} */
+  /** @param {Pick<Session,'project_id'|'task_id'|'title'|'cwd'|'provider_id'|'model_id'|'permission_mode'> & {effort?:string|null, id?:string, started_by_session?:string|null, purpose?:string|null}} s @returns {Session} */
   addSession(s) {
     const id = s.id || this.id();
     const at = now();
     this.db
-      .prepare('INSERT INTO sessions(id,project_id,task_id,title,cwd,provider_id,model_id,permission_mode,effort,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-      .run(id, s.project_id, s.task_id ?? null, s.title, s.cwd, s.provider_id, s.model_id ?? null, s.permission_mode, s.effort ?? null, at, at);
+      .prepare('INSERT INTO sessions(id,project_id,task_id,title,cwd,provider_id,model_id,permission_mode,effort,started_by_session,purpose,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, s.project_id, s.task_id ?? null, s.title, s.cwd, s.provider_id, s.model_id ?? null, s.permission_mode, s.effort ?? null, s.started_by_session ?? null, s.purpose ?? null, at, at);
     return /** @type {Session} */ (this.getSession(id));
   }
 

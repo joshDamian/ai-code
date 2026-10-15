@@ -76,6 +76,8 @@ export interface TaskLogEntry {
   id: number;
   task_id: string;
   session_id: string | null;
+  /** A decision with its evidence, or a review by another model: then `decision` names the reviewer and `evidence` holds its findings. */
+  kind: 'decision' | 'review';
   decision: string;
   /** What was measured or seen, not what was believed. */
   evidence: string;
@@ -107,6 +109,10 @@ export interface Session {
   model_id: string | null;
   permission_mode: PermissionMode;
   effort: string | null;
+  /** The session that started this one with a bench tool, if one did. Such a session cannot start others. */
+  started_by_session: string | null;
+  /** 'review' for a session request_review started: it reads and reports, and the task's check does not hold its stop. */
+  purpose: string | null;
   /** Claude Code's own session id, which `resume` takes. Null before the first turn. */
   claude_session_id: string | null;
   status: SessionStatus;

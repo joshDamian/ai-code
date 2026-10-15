@@ -23,6 +23,9 @@ export const AMBIENT_ROUTING_VARS = [
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'CLAUDE_CODE_SUBAGENT_MODEL',
   'CLAUDE_CODE_EFFORT_LEVEL',
+  // providerEnv sets this for hosted endpoints that do not serve Anthropic's betas; a
+  // Claude-login session must not inherit it from an ambient or nested Bench environment.
+  'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
 ];
 
 // The providers reached through someone else's Anthropic-compatible endpoint. Every

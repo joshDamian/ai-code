@@ -447,6 +447,7 @@ test("Bench's plugin is one Claude Code can load: a named manifest, and skills n
     assert.ok(front, `${dir}: SKILL.md starts with frontmatter`);
     assert.match(front, new RegExp(`^name: ${dir}$`, 'm'), `${dir}: its name is its folder`);
     assert.match(front, /^description: .+/m, `${dir}: it has a description`);
+    assert.match(front, /^disable-model-invocation: true$/m, `${dir}: it runs in the main session, not a subagent`);
   }
 });
 

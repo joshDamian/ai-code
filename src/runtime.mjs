@@ -489,12 +489,13 @@ export class Runtime extends EventEmitter {
       // offers it as the first quick reply.
       promptSuggestions: true,
       canUseTool: (tool, input, opts) => this.#ask(s.id, tool, input, opts),
-      // A task session may not stop on a failing check: Bench runs it, and a failure goes
-      // back to the model as the reason it has to keep going.
       // Bench's own tools, acting on this session's task and project. In-process: no
       // port, nothing to log in to, nothing exposed.
       ...(this.mcp ? { mcpServers: { bench: this.mcp(s.id) } } : {}),
-      ...(s.task_id ? { hooks: { Stop: [{ hooks: [(input, _id, { signal }) => this.#onStop(s.id, /** @type {any} */ (input), signal)], timeout: CHECK_TIMEOUT_MS / 1000 + 60 }] } } : {}),
+      // A task session may not stop on a failing check: Bench runs it, and a failure goes
+      // back to the model as the reason it has to keep going. A reviewer only reads and
+      // reports, so the check does not hold it.
+      ...(s.task_id && s.purpose !== 'review' ? { hooks: { Stop: [{ hooks: [(input, _id, { signal }) => this.#onStop(s.id, /** @type {any} */ (input), signal)], timeout: CHECK_TIMEOUT_MS / 1000 + 60 }] } } : {}),
       ...(model ? { model: invocationId(model) } : {}),
       ...(s.effort ? { effort: /** @type {any} */ (s.effort) } : {}),
       ...(s.claude_session_id ? { resume: s.claude_session_id } : {}),
@@ -756,7 +757,7 @@ export class Runtime extends EventEmitter {
    */
   #taskBrief(s) {
     const t = s.task_id ? this.store.getTask(s.task_id) : null;
-    if (!t || (!t.done && !t.check_command)) return null;
+    if (!t || (!t.done && !t.check_command) || s.purpose === 'review') return null;
     return [
       "# This task's bar for done",
       t.done ? `Done means: ${t.done}` : null,
