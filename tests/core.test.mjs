@@ -8,7 +8,8 @@ import { Service } from '../src/service.mjs';
 import { Store } from '../src/store.mjs';
 import { titleFrom, PACK } from '../src/runtime.mjs';
 import { parseEnv, loadEnvFile, addToEnvFile, readEnvFile, envFile } from '../src/env.mjs';
-import { fakeQuery, calls } from './fake-sdk.mjs';
+import { fakeQuery, calls, COMMANDS } from './fake-sdk.mjs';
+import { slashMatches } from '../web/format.mjs';
 import { tmp } from './tmp.mjs';
 import { workingTree } from '../src/git.mjs';
 
@@ -600,4 +601,56 @@ test('the working tree id changes with any edit, new file or deletion, and with 
   fs.rmSync(path.join(dir, 'new.txt'));
   assert.equal(tree(), t1, 'back to the same files, back to the same id');
   assert.equal(git(dir, 'diff', '--cached', '--name-only'), 'a.txt', "the person's own staging is untouched");
+});
+
+// -- slash commands -------------------------------------------------------------------------
+
+test('a session that has never run still gets its commands, described, without a message sent', async () => {
+  const { svc, project } = setup();
+  const s = svc.createSession({ projectId: project.id });
+  const before = calls.length;
+  const list = await svc.runtime.listCommands(s.id);
+  assert.deepEqual(list, COMMANDS);
+  const probe = calls.at(-1);
+  assert.equal(calls.length, before + 1, 'one probe');
+  assert.equal(probe.options.cwd, s.cwd);
+  assert.deepEqual(probe.options.plugins, [{ type: 'local', path: PACK }], "it sees Bench's plugin, as a session would");
+  assert.equal(probe.closed, true, 'the probe is closed once it has answered');
+  assert.equal(svc.events(s.id).length, 0, 'nothing was sent');
+  assert.equal(svc.session(s.id).status, 'idle');
+
+  // Asked again, and by a second session in the same folder, the folder's list is reused.
+  const other = svc.createSession({ projectId: project.id });
+  assert.deepEqual(await svc.runtime.listCommands(s.id), COMMANDS);
+  assert.deepEqual(await svc.runtime.listCommands(other.id), COMMANDS);
+  assert.deepEqual(svc.runtime.commands(other.id), COMMANDS, 'and known without asking');
+  assert.equal(calls.length, before + 1, 'no second probe');
+  svc.shutdown();
+});
+
+test("a running session's commands come from its own process, and a change is pushed", async () => {
+  const { svc, project } = setup();
+  const s = svc.createSession({ projectId: project.id });
+  /** @type {any[]} */
+  const pushed = [];
+  svc.runtime.on('commands', (m) => m.session_id === s.id && pushed.push(m.commands));
+  svc.send(s.id, 'hi');
+  await until(() => pushed.length === 1);
+  assert.deepEqual(pushed[0], COMMANDS, 'pushed when the session starts');
+  svc.send(s.id, 'new skill');
+  await until(() => pushed.length === 2);
+  assert.deepEqual(pushed[1].map((c) => c.name), ['compact', 'bench:make-verify', 'deploy']);
+  assert.deepEqual((await svc.runtime.listCommands(s.id)).map((c) => c.name), ['compact', 'bench:make-verify', 'deploy']);
+  svc.shutdown();
+});
+
+test('the composer matches commands by name, after a plugin prefix, then anywhere in the name', () => {
+  const cmds = ['compact', 'bench:make-verify', 'verify', 'code-review', 'security-review'].map((name) => ({ name, description: '', argumentHint: '' }));
+  const names = (t) => slashMatches(cmds, t).map((c) => c.name);
+  assert.deepEqual(names('/'), ['bench:make-verify', 'code-review', 'compact', 'security-review', 'verify']);
+  assert.deepEqual(names('/make'), ['bench:make-verify']);
+  assert.deepEqual(names('/ver'), ['verify', 'bench:make-verify']);
+  assert.deepEqual(names('/review'), ['code-review', 'security-review']);
+  assert.deepEqual(names('/compact now'), [], 'a space means the command is chosen');
+  assert.deepEqual(names('hello'), []);
 });

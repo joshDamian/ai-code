@@ -5,6 +5,7 @@
 //   "plan"                 asks to leave plan mode with a plan
 //   "slow"                 holds the turn open until interrupted
 //   "fail"                 ends the turn as an error
+//   "new skill"            pushes a changed command list, as a skill found mid-session does
 //   anything else          replies "echo: <text>"
 //
 // Stop hooks in options.hooks run at the end of each turn; see below.
@@ -14,6 +15,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const calls = [];
+
+/** What supportedCommands() answers, as Claude Code describes them. */
+export const COMMANDS = [
+  { name: 'compact', description: 'Free up context by summarizing the conversation so far', argumentHint: '<optional custom summarization instructions>' },
+  { name: 'bench:make-verify', description: '(bench) Writes a verify skill for this project', argumentHint: '' },
+];
 
 export function fakeQuery({ prompt, options }) {
   const sessionId = options.resume || `claude-${Math.random().toString(36).slice(2, 10)}`;
@@ -59,6 +66,10 @@ export function fakeQuery({ prompt, options }) {
         reply = 'interrupted';
         isError = true;
       } else if (text === 'fail') isError = true;
+      else if (text === 'new skill') {
+        record.commands = [...COMMANDS, { name: 'deploy', description: 'Ship it', argumentHint: '<env>' }];
+        emit({ type: 'system', subtype: 'commands_changed', commands: record.commands, session_id: sessionId });
+      }
       emit({ type: 'assistant', parent_tool_use_id: null, message: { id: `${id}b`, content: [{ type: 'text', text: reply }] } });
       // Stop hooks, as Claude Code runs them: a block sends the model back to work with
       // the reason. This model answers each one by changing a file, which is what a real
@@ -114,6 +125,10 @@ export function fakeQuery({ prompt, options }) {
     },
     async setPermissionMode(m) {
       record.mode = m;
+    },
+    async supportedCommands() {
+      record.asked = (record.asked || 0) + 1;
+      return record.commands || COMMANDS;
     },
     async setModel(m) {
       record.model = m;

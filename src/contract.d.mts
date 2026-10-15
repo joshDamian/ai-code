@@ -71,6 +71,15 @@ export interface Task {
 
 export type CheckStatus = 'running' | 'passed' | 'failed';
 
+/** A slash command a session's Claude Code offers: a built-in, a project's own, or a plugin's. */
+export interface SlashCommand {
+  /** Without the slash; a plugin's is namespaced, e.g. `bench:make-verify`. */
+  name: string;
+  description: string;
+  /** What it takes after its name, e.g. `<file>`; empty when nothing. */
+  argumentHint: string;
+}
+
 /** idle: waiting on the person. running: a turn is in flight. waiting: blocked on an approval. */
 export type SessionStatus = 'idle' | 'running' | 'waiting' | 'error';
 
@@ -201,6 +210,7 @@ export type ServerMessage =
   | { type: 'hello'; sessions: Session[]; approvals: Approval[] }
   | { type: 'session'; session: Session }
   | { type: 'session-removed'; id: string }
+  | { type: 'commands'; session_id: string; commands: SlashCommand[] }
   | { type: 'task'; task: Task }
   | { type: 'event'; event: SessionEvent }
   | { type: 'delta'; session_id: string; text: string; thinking?: boolean }

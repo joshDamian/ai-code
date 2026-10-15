@@ -14,6 +14,7 @@ import { workingTree } from './git.mjs';
 
 /** @typedef {import('./contract.mjs').Session} Session */
 /** @typedef {import('./contract.mjs').Task} Task */
+/** @typedef {import('./contract.mjs').SlashCommand} SlashCommand */
 /** @typedef {import('./check.mjs').CheckResult & {fresh:boolean}} CheckRun */
 /** @typedef {import('./contract.mjs').Approval} Approval */
 /** @typedef {import('./contract.mjs').ApprovalAnswer} ApprovalAnswer */
@@ -56,6 +57,16 @@ export const PACK = fileURLToPath(new URL('../pack', import.meta.url));
 // How many times one message from a person can be sent back to work by a failing check,
 // before the stop is let through and the failure is left for the person to read.
 export const CHECK_TRIES = 3;
+
+// A folder's command list, learned from a session there or from a probe, is trusted this
+// long before a session with nothing live asks Claude Code again.
+const COMMANDS_FRESH_MS = 10 * 60 * 1000;
+// A probe starts Claude Code only to ask for its commands; one that takes longer than
+// this has something wrong, and the composer goes without suggestions.
+const COMMANDS_PROBE_MS = 20 * 1000;
+
+/** @param {any[]} list @returns {SlashCommand[]} */
+const commandList = (list) => (list || []).map((c) => ({ name: String(c.name), description: String(c.description || ''), argumentHint: String(c.argumentHint || '') }));
 
 export const MODES = /** @type {const} */ (['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']);
 
@@ -129,8 +140,8 @@ class Live {
     this.q = null;
     this.turns = 0;
     this.lastUsed = Date.now();
-    /** @type {string[]} */
-    this.commands = [];
+    /** The slash commands this session's Claude Code offers, once it has said. @type {SlashCommand[]|null} */
+    this.commands = null;
     /** @type {string|null} */
     this.providerId = null;
     /** @type {string|undefined} */
@@ -179,6 +190,11 @@ export class Runtime extends EventEmitter {
     /** A task's check in flight, shared by every session that stops while it runs.
      * @type {Map<string, Promise<CheckRun|null>>} */
     this.checks = new Map();
+    /** Command lists by working directory, so a session that is not running still has one.
+     * @type {Map<string, {at:number, list:SlashCommand[]}>} */
+    this.commandCache = new Map();
+    /** @type {Map<string, Promise<SlashCommand[]>>} */
+    this.commandProbes = new Map();
     store.resetLiveSessions();
     // A check that was running when the server stopped never finished: it was not judged.
     for (const t of store.listTasks()) if (t.check_status === 'running') store.updateTask(t.id, { check_status: null, check_tree: null });
@@ -217,9 +233,84 @@ export class Runtime extends EventEmitter {
     return this.claudePids;
   }
 
-  /** The slash commands the session's Claude Code offers, once it has started. @param {string} id */
+  /**
+   * The slash commands a session can use, as far as Bench knows without asking: its live
+   * process's list, else the last list seen for its folder. Empty when there is neither;
+   * listCommands() asks. @param {string} id @returns {SlashCommand[]}
+   */
   commands(id) {
-    return this.live.get(id)?.commands || [];
+    const live = this.live.get(id)?.commands;
+    if (live) return live;
+    const s = this.store.getSession(id);
+    return (s && this.commandCache.get(s.cwd)?.list) || [];
+  }
+
+  /**
+   * The slash commands a session can use, asking Claude Code when nothing live or recent
+   * says. The list depends on the folder (its commands and skills) and on Bench's plugin,
+   * not on the conversation, so a session that has never run gets one too.
+   * @param {string} id @returns {Promise<SlashCommand[]>}
+   */
+  async listCommands(id) {
+    const s = this.#session(id);
+    const live = this.live.get(id)?.commands;
+    if (live) return live;
+    const cached = this.commandCache.get(s.cwd);
+    if (cached && Date.now() - cached.at < COMMANDS_FRESH_MS) return cached.list;
+    let probe = this.commandProbes.get(s.cwd);
+    if (!probe) {
+      probe = this.#probeCommands(s).finally(() => this.commandProbes.delete(s.cwd));
+      this.commandProbes.set(s.cwd, probe);
+    }
+    return probe;
+  }
+
+  /**
+   * Starts Claude Code in the session's folder with an input that never sends anything,
+   * asks for its commands, and closes it. No message means no model call; it takes
+   * under a second. @param {Session} s @returns {Promise<SlashCommand[]>}
+   */
+  async #probeCommands(s) {
+    /** @type {() => void} */
+    let stop = () => {};
+    const idle = (async function* () {
+      await new Promise((r) => (stop = () => r(undefined)));
+    })();
+    let env = { ...cleanEnv(), CLAUDE_AGENT_SDK_CLIENT_APP: 'bench' };
+    try {
+      const provider = this.store.getProvider(s.provider_id);
+      const model = s.model_id ? this.store.getModel(s.model_id) || null : null;
+      if (provider) env = { ...env, ...providerEnv(provider, model) };
+    } catch {
+      /* a provider missing its key still has commands to list */
+    }
+    /** @type {any} */
+    const q = this.query({ prompt: /** @type {any} */ (idle), options: { cwd: s.cwd, env, settingSources: ['project', 'local'], plugins: [{ type: 'local', path: PACK }] } });
+    /** @type {ReturnType<typeof setTimeout>|undefined} */
+    let timer;
+    try {
+      const list = commandList(await Promise.race([q.supportedCommands(), new Promise((_, no) => (timer = setTimeout(() => no(new Error('timed out')), COMMANDS_PROBE_MS)))]));
+      this.commandCache.set(s.cwd, { at: Date.now(), list });
+      return list;
+    } catch {
+      return this.commandCache.get(s.cwd)?.list || [];
+    } finally {
+      clearTimeout(timer);
+      stop();
+      try {
+        q.close();
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+
+  /** A session's process said what its commands are. @param {string} id @param {Live} live @param {any[]} list */
+  #setCommands(id, live, list) {
+    live.commands = commandList(list);
+    const s = this.store.getSession(id);
+    if (s) this.commandCache.set(s.cwd, { at: Date.now(), list: live.commands });
+    this.emit('commands', { session_id: id, commands: live.commands });
   }
 
   /** Where a session's attached files are kept. It is opened to the session, so reading them asks nothing. @param {string} id */
@@ -461,13 +552,15 @@ export class Runtime extends EventEmitter {
     }
     if (m.type === 'system') {
       if (m.subtype === 'init') {
-        live.commands = m.slash_commands || [];
+        // The init message names the commands; supportedCommands() describes them.
+        live.q.supportedCommands?.().then((/** @type {any[]} */ list) => !live.closed && this.#setCommands(id, live, list)).catch(() => {});
         const s = this.store.getSession(id);
         if (s && s.claude_session_id !== m.session_id) this.#update(id, { claude_session_id: m.session_id });
         this.#event(id, 'init', { model: m.model, permissionMode: m.permissionMode, cwd: m.cwd, version: m.claude_code_version });
         // A plugin that fails to load is otherwise silent: its skills are just missing.
         for (const e of m.plugin_errors || []) this.#event(id, 'notice', { text: `Plugin ${e.plugin} did not load fully: ${e.message}` });
-      } else if (m.subtype === 'compact_boundary') this.#event(id, 'notice', { text: 'Context compacted' });
+      } else if (m.subtype === 'commands_changed') this.#setCommands(id, live, m.commands);
+      else if (m.subtype === 'compact_boundary') this.#event(id, 'notice', { text: 'Context compacted' });
       else if (m.subtype === 'api_retry') this.#event(id, 'notice', { text: `API error, retrying (attempt ${m.attempt ?? '?'})` });
       return;
     }

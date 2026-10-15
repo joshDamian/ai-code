@@ -1,5 +1,5 @@
-// Formatting shared by the views: times, costs, token counts, and the diff parser
-// the diff viewer renders from.
+// Formatting shared by the views: times, costs, token counts, the diff parser the diff
+// viewer renders from, and the slash-command matching the composer suggests from.
 
 export function formatDuration(ms) {
   if (ms == null) return '—';
@@ -373,4 +373,27 @@ function hashText(text) {
     h = Math.imul(h, 0x01000193);
   }
   return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * The commands that match what is typed after a slash, before any space. A plugin's
+ * commands are namespaced (`bench:make-verify`), so the part after the colon matches
+ * too; then any name containing what is typed. Names that start with it come first.
+ * @param {{name:string, description:string, argumentHint:string}[]} commands @param {string} text
+ */
+export function slashMatches(commands, text) {
+  if (!text.startsWith('/') || /\s/.test(text)) return [];
+  const q = text.slice(1).toLowerCase();
+  const rank = (/** @type {string} */ name) => {
+    const n = name.toLowerCase();
+    if (n.startsWith(q)) return 0;
+    if (n.slice(n.indexOf(':') + 1).startsWith(q)) return 1;
+    return n.includes(q) ? 2 : -1;
+  };
+  return commands
+    .map((c) => ({ c, r: rank(c.name) }))
+    .filter((x) => x.r >= 0)
+    .sort((a, b) => a.r - b.r || a.c.name.localeCompare(b.c.name))
+    .slice(0, 200)
+    .map((x) => x.c);
 }

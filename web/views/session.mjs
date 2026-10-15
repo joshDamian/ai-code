@@ -2,6 +2,7 @@
 import { html, useEffect, useMemo, useRef, useState, recall, remember, isTouch, formatCost, formatDuration } from '../lib.mjs';
 import { api, useStore, watchSession, outboxCount } from '../api.mjs';
 import { Markdown } from '../components/markdown.mjs';
+import { slashMatches } from '../format.mjs';
 import { MoreMenu } from '../components/menu.mjs';
 import { CopyButton } from '../components/copy.mjs';
 import { showToast } from '../components/toast.mjs';
@@ -31,6 +32,9 @@ export function SessionPane({ sessionId, onArchived }) {
   const [events, setEvents] = useState([]);
   const [stream, setStream] = useState({ text: '', thinking: '' });
   const [suggestion, setSuggestion] = useState('');
+  // The slash commands the composer suggests. Asked for on open, so a session that has
+  // never run has them too, and replaced when the session's Claude Code says they changed.
+  const [commands, setCommands] = useState([]);
   const [more, setMore] = useState(false);
   const [terminal, setTerminal] = useState(false);
   const [sheet, setSheet] = useState(false);
@@ -49,6 +53,7 @@ export function SessionPane({ sessionId, onArchived }) {
       .session(sessionId)
       .then((r) => {
         setLoaded(r);
+        if (r.commands?.length) setCommands(r.commands);
         setEvents(r.events);
         setMore(r.events.length >= 400);
         setStream({ text: '', thinking: '' });
@@ -60,8 +65,10 @@ export function SessionPane({ sessionId, onArchived }) {
     setLoaded(null);
     setEvents(recall(eventsKey(sessionId), []));
     setSuggestion('');
+    setCommands([]);
     pinned.current = true;
     load();
+    api.sessionCommands(sessionId).then(setCommands).catch(() => {});
     // Streaming text is gathered and drawn at most once a frame: re-rendering the
     // Markdown for every few characters is what made a long reply crawl on a phone.
     let pending = { text: '', thinking: '' };
@@ -79,6 +86,7 @@ export function SessionPane({ sessionId, onArchived }) {
     };
     const off = watchSession(sessionId, (m) => {
       if (m.type === 'suggestion') setSuggestion(m.text);
+      else if (m.type === 'commands') setCommands(m.commands);
       else if (m.type === 'event') {
         // A new turn makes the last prediction stale.
         if (m.event.kind === 'user' || m.event.kind === 'assistant') setSuggestion('');
@@ -238,7 +246,7 @@ export function SessionPane({ sessionId, onArchived }) {
               ? html`<span>This task is ${taskState}. Its sessions are kept as a record.</span>`
               : html`<span>Archived. <button class="link-btn" type="button" onClick=${() => api.archiveSession(s.id, false).catch(toast)}>Unarchive</button> to continue.</span>`}
           </div>`
-        : html`<${Composer} session=${s} commands=${loaded?.commands || []} quick=${showQuick ? QUICK : null} />`}
+        : html`<${Composer} session=${s} commands=${commands} quick=${showQuick ? QUICK : null} />`}
       ${viewing ? html`<${FileViewer} sessionId=${s.id} file=${viewing} onClose=${closeViewer} />` : null}
       ${sheet
         ? html`<${Sheet} title="Session settings" onClose=${() => setSheet(false)}>
@@ -669,9 +677,15 @@ function Composer({ session: s, commands, quick }) {
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
   }, [text]);
 
-  // A plugin's commands are namespaced (`bench:make-verify`), so `/make` finds them by
-  // the part after the colon too.
-  const slash = text.startsWith('/') && !text.includes(' ') ? commands.filter((c) => c.startsWith(text.slice(1)) || c.slice(c.indexOf(':') + 1).startsWith(text.slice(1))).slice(0, 8) : [];
+  const slash = slashMatches(commands, text);
+  const [pick, setPick] = useState(0);
+  const menu = useRef(null);
+  useEffect(() => setPick(0), [text]);
+  useEffect(() => menu.current?.querySelector('.active')?.scrollIntoView({ block: 'nearest' }), [pick]);
+  const choose = (/** @type {{name:string}} */ c) => {
+    setText(`/${c.name} `);
+    box.current?.focus();
+  };
   const uploading = items.some((it) => !it.inline && !it.upload);
   const empty = !text.trim() && !items.length;
 
@@ -801,7 +815,15 @@ function Composer({ session: s, commands, quick }) {
         attachExternal([...e.dataTransfer.files]);
       }}
     >
-      ${slash.length ? html`<div class="slash">${slash.map((c) => html`<button type="button" onClick=${() => setText(`/${c} `)}>/${c}</button>`)}</div>` : null}
+      ${slash.length
+        ? html`<div class="slash" role="listbox" ref=${menu}>
+            ${slash.map(
+              (c, i) => html`<button type="button" role="option" aria-selected=${i === pick} class="slash-item ${i === pick ? 'active' : ''}" key=${c.name} onMouseDown=${(e) => e.preventDefault()} onClick=${() => choose(c)} title=${c.description}>
+                <code>/${c.name}</code>${c.argumentHint ? html`<span class="slash-hint">${c.argumentHint}</span>` : null}<span class="slash-desc">${c.description}</span>
+              </button>`
+            )}
+          </div>`
+        : null}
       ${quick && !text.trim() && !items.length
         ? html`<div class="quick-replies">${quick.map((q) => html`<button class="quick-chip" type="button" key=${q} onClick=${() => setText(q)}>${q}</button>`)}</div>`
         : null}
@@ -843,7 +865,18 @@ function Composer({ session: s, commands, quick }) {
             }
           }}
           onKeyDown=${(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isTouch()) {
+            // With the command menu open, arrows move through it and Tab takes the one
+            // marked. Enter takes it too, unless what is typed is already a whole command.
+            if (slash.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+              e.preventDefault();
+              setPick((p) => (p + (e.key === 'ArrowDown' ? 1 : slash.length - 1)) % slash.length);
+            } else if (slash.length && e.key === 'Tab' && !e.shiftKey) {
+              e.preventDefault();
+              choose(slash[pick]);
+            } else if (slash.length && e.key === 'Enter' && !e.shiftKey && !e.isComposing && !slash.some((c) => `/${c.name}` === text.trim())) {
+              e.preventDefault();
+              choose(slash[pick]);
+            } else if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isTouch()) {
               e.preventDefault();
               send();
             } else if (e.key === 'Tab' && e.shiftKey) {

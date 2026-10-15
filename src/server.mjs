@@ -226,6 +226,7 @@ svc.runtime.on('approval', (a) => {
   if (s) pushAll({ title: `Approval needed: ${a.tool}`, body: `${s.title}${a.title ? ` — ${a.title}` : ''}`, url: sessionUrl(s), tag: `approval-${a.id}`, approvalId: a.id, sessionId: s.id }, 'approval').catch(() => {});
 });
 svc.runtime.on('suggestion', ({ session_id, text }) => text && broadcast({ type: 'suggestion', session_id, text }, session_id));
+svc.runtime.on('commands', ({ session_id, commands }) => broadcast({ type: 'commands', session_id, commands }, session_id));
 svc.runtime.on('approval-done', (a) => broadcast({ type: 'approval-done', ...a }));
 svc.runtime.on('turn-done', ({ session, ok }) => {
   if (session) pushAll({ title: ok ? 'Claude finished' : 'Claude stopped with an error', body: session.title, url: sessionUrl(session), tag: `turn-${session.id}`, sessionId: session.id }, ok ? 'finished' : 'error').catch(() => {});
@@ -590,6 +591,7 @@ route('GET', '/api/sessions/:id', ({ params }) => ({
   live: svc.runtime.isLive(params[0]),
   commands: svc.runtime.commands(params[0]),
 }));
+route('GET', '/api/sessions/:id/commands', ({ params }) => svc.runtime.listCommands(params[0]));
 route('GET', '/api/sessions/:id/events', ({ params, u }) => svc.events(params[0], { before: Number(u.searchParams.get('before')) || undefined, limit: Number(u.searchParams.get('limit')) || undefined }));
 route('POST', '/api/sessions/:id/messages', ({ params, body }) => svc.send(params[0], body.text, { images: body.images, files: body.files, uploads: body.uploads }));
 route('GET', '/api/sessions/:id/files', ({ req, res, params, u }) => sendSessionFile(req, res, params[0], u));

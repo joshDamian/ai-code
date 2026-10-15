@@ -151,6 +151,7 @@ export const api = {
 
   createSession: (/** @type {any} */ b) => post('/api/sessions', b),
   session: (/** @type {string} */ id) => get(`/api/sessions/${id}`),
+  sessionCommands: (/** @type {string} */ id) => get(`/api/sessions/${id}/commands`),
   events: (/** @type {string} */ id, /** @type {number} */ before) => get(`/api/sessions/${id}/events?before=${before}`),
   send: sendMessage,
   upload,
@@ -368,7 +369,7 @@ function onMessage(m) {
   }
   else if (m.type === 'git') bumpGit(m.project_id);
   else if (m.type === 'event') for (const fn of watchers.get(m.event.session_id) || []) fn(m);
-  else if (m.type === 'delta' || m.type === 'suggestion') for (const fn of watchers.get(m.session_id) || []) fn(m);
+  else if (m.type === 'delta' || m.type === 'suggestion' || m.type === 'commands') for (const fn of watchers.get(m.session_id) || []) fn(m);
 }
 
 let retry = 0;
