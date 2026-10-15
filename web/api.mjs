@@ -140,6 +140,7 @@ export const api = {
   checkTask: (/** @type {string} */ id) => post(`/api/tasks/${id}/check`),
   taskGit: (/** @type {string} */ id) => get(`/api/tasks/${id}/git`),
   taskDiff: (/** @type {string} */ id) => get(`/api/tasks/${id}/diff`),
+  taskLog: (/** @type {string} */ id) => get(`/api/tasks/${id}/log`),
   commitTask: (/** @type {string} */ id, /** @type {string} */ message) => post(`/api/tasks/${id}/commit`, { message }),
   updateTask: (/** @type {string} */ id) => post(`/api/tasks/${id}/update`),
   abortMerge: (/** @type {string} */ id) => post(`/api/tasks/${id}/abort-merge`),

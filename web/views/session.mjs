@@ -340,6 +340,7 @@ function Entry({ event: e, results, reply }) {
   }
   if (e.kind === 'init') return html`<div class="sys-line">Claude Code ${d.version || ''} · ${d.model} · ${MODES.find((m) => m.value === d.permissionMode)?.label || d.permissionMode}</div>`;
   if (e.kind === 'notice') return html`<div class="sys-line">${d.text}</div>`;
+  if (e.kind === 'log') return html`<div class="sys-line log-line" title=${`Evidence: ${d.evidence}`}>Logged: ${d.decision}</div>`;
   if (e.kind === 'check') {
     const head = d.ok ? 'Check passed' : d.timedOut ? 'Check timed out' : `Check failed (exit ${d.code ?? '?'})`;
     return html`<details class="tool check-run ${d.ok ? '' : 'failed'}">
@@ -467,8 +468,9 @@ function ToolCall({ call, result }) {
       head = html`Search <code>${i.query}</code>`;
       break;
     default:
-      head = html`${call.name}`;
-      detail = open ? html`<pre class="tool-out">${JSON.stringify(i, null, 2)}</pre>` : null;
+      // Bench's own tools read as what they do: "Bench: run check", not mcp__bench__run_check.
+      head = call.name.startsWith('mcp__bench__') ? html`Bench: ${call.name.slice(12).replace(/_/g, ' ')}` : html`${call.name}`;
+      detail = open && Object.keys(i).length ? html`<pre class="tool-out">${JSON.stringify(i, null, 2)}</pre>` : null;
   }
   const out = resultText(result);
   // A Write that made an artifact gets View and Download beside its header - which is a
@@ -585,6 +587,11 @@ function ApprovalPreview({ tool, input: i }) {
   if (tool === 'Bash') return html`<pre class="tool-out">$ ${i.command}</pre>`;
   if (tool === 'Edit' || tool === 'MultiEdit') return html`<${ToolCall} call=${{ name: tool, input: i }} result=${{ content: '' }} />`;
   if (tool === 'Write') return html`<div><code>${rel(i.file_path)}</code><pre class="tool-out">${String(i.content || '').slice(0, 4000)}</pre></div>`;
+  // A bench tool's input as labelled fields; one with none (run check) needs no preview.
+  if (tool.startsWith('mcp__bench__')) {
+    const fields = Object.entries(i).filter(([, v]) => v !== undefined && v !== '');
+    return fields.length ? html`<dl class="bench-input">${fields.map(([k, v]) => html`<dt>${k.replace(/_/g, ' ')}</dt><dd>${String(v).slice(0, 4000)}</dd>`)}</dl>` : null;
+  }
   return html`<pre class="tool-out">${JSON.stringify(i, null, 2).slice(0, 4000)}</pre>`;
 }
 

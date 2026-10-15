@@ -27,6 +27,7 @@ import { Pair, Unpaired } from './views/pair.mjs';
 // #/p/:pid/t/:tid[/s/:sid]        a task, on one of its sessions
 // #/p/:pid/t/:tid/changes         a task's diff
 // #/p/:pid/t/:tid/terminal        a shell in its worktree
+// #/p/:pid/t/:tid/log             its decision log
 // #/settings, #/pair/:code
 function parse() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
@@ -41,7 +42,7 @@ function parse() {
     if (parts[2] === 't' && parts[3]) {
       const t = { ...r, view: 'task', taskId: parts[3] };
       if (parts[4] === 's' && parts[5]) return { ...t, sessionId: parts[5] };
-      if (parts[4] === 'changes' || parts[4] === 'terminal') return { ...t, tab: parts[4] };
+      if (parts[4] === 'changes' || parts[4] === 'terminal' || parts[4] === 'log') return { ...t, tab: parts[4] };
       return t;
     }
     return r;

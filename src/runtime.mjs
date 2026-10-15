@@ -11,6 +11,7 @@ import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { cleanEnv, providerEnv, invocationId, priceUsage } from './providers.mjs';
 import { runCheck, CHECK_TIMEOUT_MS } from './check.mjs';
 import { workingTree } from './git.mjs';
+import { benchApproval } from './tools.mjs';
 
 /** @typedef {import('./contract.mjs').Session} Session */
 /** @typedef {import('./contract.mjs').Task} Task */
@@ -171,13 +172,16 @@ class Live {
 export class Runtime extends EventEmitter {
   /**
    * @param {Store} store
-   * @param {{query?: typeof sdkQuery, idleMs?: number}} [o] `query` is replaced in tests
+   * @param {{query?: typeof sdkQuery, idleMs?: number, mcp?: (sessionId: string) => import('@anthropic-ai/claude-agent-sdk').McpSdkServerConfigWithInstance}} [o]
+   * `query` is replaced in tests. `mcp` makes a session's bench MCP server; the Service
+   * hands it in, so this module never needs the Service itself.
    */
   constructor(store, o = {}) {
     super();
     this.store = store;
     this.query = o.query || sdkQuery;
     this.idleMs = o.idleMs ?? IDLE_MS;
+    this.mcp = o.mcp || null;
     /** @type {Map<string, Live>} */
     this.live = new Map();
     /** Claude Code's own process, by pid, for the session it is running. Filled by the
@@ -222,6 +226,11 @@ export class Runtime extends EventEmitter {
     const s = this.store.getSession(id);
     if (!s) throw Object.assign(new Error('No such session'), { status: 404 });
     return s;
+  }
+
+  /** Adds an entry to a session's transcript from outside a turn: a bench tool's note. @param {string} id @param {string} kind @param {unknown} data */
+  record(id, kind, data) {
+    return this.#event(id, kind, data);
   }
 
   isLive(/** @type {string} */ id) {
@@ -482,6 +491,9 @@ export class Runtime extends EventEmitter {
       canUseTool: (tool, input, opts) => this.#ask(s.id, tool, input, opts),
       // A task session may not stop on a failing check: Bench runs it, and a failure goes
       // back to the model as the reason it has to keep going.
+      // Bench's own tools, acting on this session's task and project. In-process: no
+      // port, nothing to log in to, nothing exposed.
+      ...(this.mcp ? { mcpServers: { bench: this.mcp(s.id) } } : {}),
       ...(s.task_id ? { hooks: { Stop: [{ hooks: [(input, _id, { signal }) => this.#onStop(s.id, /** @type {any} */ (input), signal)], timeout: CHECK_TIMEOUT_MS / 1000 + 60 }] } } : {}),
       ...(model ? { model: invocationId(model) } : {}),
       ...(s.effort ? { effort: /** @type {any} */ (s.effort) } : {}),
@@ -621,6 +633,10 @@ export class Runtime extends EventEmitter {
    * @returns {Promise<PermissionResult>}
    */
   #ask(id, tool, input, opts) {
+    // Bench's own tools: the read-only ones never ask, `log` asks only in the modes that
+    // ask about edits, and the rest are put to the person in words rather than a tool id.
+    const bench = benchApproval(tool, input, this.store.getSession(id), (taskId) => this.store.getTask(taskId));
+    if (bench?.allow) return Promise.resolve({ behavior: 'allow', updatedInput: input });
     return new Promise((resolve) => {
       /** @type {Approval} */
       const approval = {
@@ -628,7 +644,7 @@ export class Runtime extends EventEmitter {
         session_id: id,
         tool,
         input,
-        title: opts.title || null,
+        title: bench?.title || opts.title || null,
         reason: opts.decisionReason || opts.blockedPath || null,
         created_at: new Date().toISOString(),
       };
