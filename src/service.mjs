@@ -144,9 +144,17 @@ export class Service extends EventEmitter {
     return { ready: true, repos: await g.githubRepos() };
   }
 
-  /** Unregisters a project. Its directory, worktrees and branches are left alone. @param {string} id */
+  /**
+   * Unregisters a project. Its directory, worktrees and branches are left alone. Its
+   * sessions are closed and their scratch folders removed with them, so nothing of the
+   * project's is left behind for the sweep to find.
+   * @param {string} id
+   */
   removeProject(id) {
-    for (const s of this.store.listSessions({ projectId: id, archived: true })) this.runtime.close(s.id);
+    for (const s of this.store.listSessions({ projectId: id, archived: true })) {
+      this.runtime.close(s.id);
+      this.runtime.dropScratch(s.id);
+    }
     this.store.deleteProject(id);
   }
 

@@ -561,6 +561,24 @@ test('closing a task or deleting a session removes the scratch folder too', asyn
   svc.shutdown();
 });
 
+test("removing a project removes its sessions' scratch folders at once", async () => {
+  const { svc, project } = setup();
+  const { session } = svc.createTask(project.id, { title: 'Scratch', prompt: 'hi' });
+  await until(() => svc.events(session.id).some((e) => e.kind === 'result'));
+  fs.writeFileSync(path.join(svc.runtime.scratchDir(session.id), 'shot.png'), 'x');
+  const s = svc.createSession({ projectId: project.id });
+  svc.send(s.id, 'hi');
+  await until(() => svc.events(s.id).some((e) => e.kind === 'result'));
+  const scratch = svc.runtime.scratchDir(s.id);
+  assert.ok(fs.existsSync(scratch) && fs.existsSync(svc.runtime.scratchDir(session.id)));
+
+  svc.removeProject(project.id);
+
+  assert.ok(!fs.existsSync(scratch), 'gone with the project, not left for the sweep');
+  assert.ok(!fs.existsSync(svc.runtime.scratchDir(session.id)), "the task session's goes too");
+  svc.shutdown();
+});
+
 test("the sweep removes scratch left by sessions that are gone, and keeps a live session's", async () => {
   const { svc, project } = setup();
   const s = svc.createSession({ projectId: project.id });
