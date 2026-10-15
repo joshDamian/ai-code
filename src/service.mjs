@@ -8,6 +8,7 @@ import { env } from './env.mjs';
 import { Store } from './store.mjs';
 import { Runtime, MODES } from './runtime.mjs';
 import { providerReady } from './providers.mjs';
+import { benchServer } from './tools.mjs';
 import * as g from './git.mjs';
 
 /** @typedef {import('./contract.mjs').Task} Task */
@@ -54,7 +55,14 @@ export class Service extends EventEmitter {
     super();
     this.root = root;
     this.store = new Store(root);
-    this.runtime = new Runtime(this.store, o);
+    // Each session's own bench MCP server: tools that act on its task and project.
+    this.runtime = new Runtime(this.store, { ...o, mcp: (sessionId) => benchServer(this, sessionId) });
+    /**
+     * Sends a push notification to the person's devices, and says to how many. Set by
+     * the server, which holds the push keys; null where there is no push (the CLI, tests).
+     * @type {((payload: {title:string, body:string, url?:string, tag?:string, sessionId?:string}) => Promise<number>) | null}
+     */
+    this.notifier = null;
     this.runtime.on('turn-done', ({ session }) => session && this.emit('git', session.project_id));
     this.runtime.on('task', (t) => this.emit('task', t));
     this.#importLegacy();
@@ -224,7 +232,8 @@ export class Service extends EventEmitter {
    * @param {string} projectId
    * `done` says in words what finished looks like; `check` is the command Bench runs to
    * check it, and defaults to the project's. An empty `check` means none.
-   * @param {{title?:string, prompt?:string, baseBranch?:string, providerId?:string, modelId?:string|null, mode?:PermissionMode, effort?:string|null, done?:string|null, check?:string|null}} o
+   * `createdBy` is the session that asked for the task through the bench tool.
+   * @param {{title?:string, prompt?:string, baseBranch?:string, providerId?:string, modelId?:string|null, mode?:PermissionMode, effort?:string|null, done?:string|null, check?:string|null, createdBy?:string|null}} o
    */
   createTask(projectId, o) {
     const p = this.project(projectId);
@@ -249,7 +258,7 @@ export class Service extends EventEmitter {
     }
     const done = (o.done || '').trim() || null;
     const check = (o.check === undefined ? p.check_command : o.check)?.trim() || null;
-    const task = this.store.addTask({ id, project_id: p.id, title, description: prompt || null, base_branch: base, base_commit: baseCommit, branch, worktree, done, check_command: check });
+    const task = this.store.addTask({ id, project_id: p.id, title, description: prompt || null, base_branch: base, base_commit: baseCommit, branch, worktree, done, check_command: check, created_by_session: o.createdBy || null });
     this.emit('task', task);
     this.emit('git', p.id);
     const session = this.createSession({ projectId: p.id, taskId: id, title, providerId: o.providerId, modelId: o.modelId, mode: o.mode, effort: o.effort });
@@ -294,9 +303,9 @@ export class Service extends EventEmitter {
     return { diff: g.workingDiff(t.worktree, from) };
   }
 
-  /** @param {string} id */
-  #liveTaskWork(id) {
-    return this.store.listSessions({ taskId: id }).find((s) => s.status === 'running' || s.status === 'waiting');
+  /** A session working in the task, other than `except`. @param {string} id @param {string} [except] */
+  #liveTaskWork(id, except) {
+    return this.store.listSessions({ taskId: id }).find((s) => s.id !== except && (s.status === 'running' || s.status === 'waiting'));
   }
 
   /** @param {string} id @param {string} [message] */
@@ -308,10 +317,14 @@ export class Service extends EventEmitter {
     return { commit: sha };
   }
 
-  /** Merges the base branch's new commits into the task. Conflicts stay in the worktree. @param {string} id */
-  updateFromBase(id) {
+  /**
+   * Merges the base branch's new commits into the task. Conflicts stay in the worktree.
+   * `except` is a session asking for it itself, which is working by definition.
+   * @param {string} id @param {{except?:string}} [o]
+   */
+  updateFromBase(id, o = {}) {
     const t = this.task(id);
-    if (this.#liveTaskWork(id)) throw fail('A session is working in this task; wait for it or stop it', 409);
+    if (this.#liveTaskWork(id, o.except)) throw fail('A session is working in this task; wait for it or stop it', 409);
     if (g.status(t.worktree).dirty.length) throw fail('Commit the task\'s changes first, so the merge cannot mix with them', 409);
     let r;
     try {
@@ -454,6 +467,29 @@ export class Service extends EventEmitter {
     if (t.state !== 'active') throw fail(`The task is ${t.state}`, 409);
     await this.runtime.check(id, { force: true });
     return this.task(id);
+  }
+
+  /** A task's decision log, newest first. @param {string} id */
+  taskLog(id) {
+    this.task(id);
+    return this.store.listLog(id);
+  }
+
+  /**
+   * One entry in the decision log of the task a session works in. It shows in the
+   * session's transcript too, and the task is touched so its page picks it up.
+   * @param {string} sessionId @param {{decision:string, evidence:string}} e
+   */
+  logDecision(sessionId, e) {
+    const s = this.session(sessionId);
+    if (!s.task_id) throw fail('This session is not in a task, so there is no decision log to write to');
+    const decision = String(e.decision || '').trim();
+    const evidence = String(e.evidence || '').trim();
+    if (!decision || !evidence) throw fail('A log entry needs both a decision and its evidence');
+    const entry = this.store.addLog({ task_id: s.task_id, session_id: s.id, decision, evidence });
+    this.runtime.record(s.id, 'log', { decision, evidence, entry: entry.id });
+    this.emit('task', this.store.updateTask(s.task_id, {}));
+    return entry;
   }
 
   // -- sessions ---------------------------------------------------------------------

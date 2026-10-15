@@ -11,6 +11,7 @@ import { BUILTIN_PROVIDERS } from './providers.mjs';
 /** @typedef {import('./contract.mjs').Task} Task */
 /** @typedef {import('./contract.mjs').Session} Session */
 /** @typedef {import('./contract.mjs').SessionEvent} SessionEvent */
+/** @typedef {import('./contract.mjs').TaskLogEntry} TaskLogEntry */
 
 // The tables the pipeline harness wrote. A v1 database keeps them, renamed with a
 // `legacy_` prefix, so nothing anybody recorded is lost by the upgrade and nothing in
@@ -48,6 +49,11 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY,name TEXT NOT NULL,token_hash TEXT UNIQUE NOT NULL,created_at TEXT NOT NULL,last_seen_at TEXT,revoked_at TEXT);
   -- A one-time pairing code, also stored as a hash.
   CREATE TABLE IF NOT EXISTS pairings(code_hash TEXT PRIMARY KEY,expires_at TEXT NOT NULL,used_at TEXT);
+
+  -- A task's decision log: what a session decided, and what it measured or saw that
+  -- made it decide. Written by the bench tool \`log\`, read on the task's Log tab.
+  CREATE TABLE IF NOT EXISTS task_log(id INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT NOT NULL,session_id TEXT,decision TEXT NOT NULL,evidence TEXT NOT NULL,created_at TEXT NOT NULL);
+  CREATE INDEX IF NOT EXISTS task_log_by_task ON task_log(task_id,id);
 `;
 
 export const hash = (/** @type {string} */ s) => crypto.createHash('sha256').update(s).digest('hex');
@@ -75,7 +81,9 @@ export class Store {
     if (!this.db.prepare('PRAGMA table_info(push_subscriptions)').all().some((c) => c.name === 'choices')) this.db.exec('ALTER TABLE push_subscriptions ADD COLUMN choices TEXT');
     // A task's bar for done: what it means in words, the command that checks it, and the
     // last time Bench ran that command - its result and the working tree it ran against.
-    for (const col of ['done', 'check_command', 'check_status', 'check_tree', 'check_output', 'check_at']) {
+    // created_by_session: the session that made the task with the bench tool, if one did.
+    // A task made that way may not make another, so a chain of tasks cannot grow.
+    for (const col of ['done', 'check_command', 'check_status', 'check_tree', 'check_output', 'check_at', 'created_by_session']) {
       if (!this.db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
     }
     this.#seedProviders();
@@ -289,12 +297,12 @@ export class Store {
 
   // -- tasks ------------------------------------------------------------------
 
-  /** @param {Omit<Task,'state'|'merge_commit'|'merged_at'|'created_at'|'updated_at'|'done'|'check_command'|'check_status'|'check_tree'|'check_output'|'check_at'> & {created_at?:string, done?:string|null, check_command?:string|null}} t @returns {Task} */
+  /** @param {Omit<Task,'state'|'merge_commit'|'merged_at'|'created_at'|'updated_at'|'done'|'check_command'|'check_status'|'check_tree'|'check_output'|'check_at'|'created_by_session'> & {created_at?:string, done?:string|null, check_command?:string|null, created_by_session?:string|null}} t @returns {Task} */
   addTask(t) {
     const at = t.created_at || now();
     this.db
-      .prepare('INSERT INTO tasks(id,project_id,title,description,base_branch,base_commit,branch,worktree,state,done,check_command,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(t.id, t.project_id, t.title, t.description ?? null, t.base_branch, t.base_commit, t.branch, t.worktree, 'active', t.done ?? null, t.check_command ?? null, at, now());
+      .prepare('INSERT INTO tasks(id,project_id,title,description,base_branch,base_commit,branch,worktree,state,done,check_command,created_by_session,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(t.id, t.project_id, t.title, t.description ?? null, t.base_branch, t.base_commit, t.branch, t.worktree, 'active', t.done ?? null, t.check_command ?? null, t.created_by_session ?? null, at, now());
     return /** @type {Task} */ (this.getTask(t.id));
   }
 
@@ -312,6 +320,18 @@ export class Store {
   updateTask(id, patch) {
     this.#patch('tasks', id, { ...patch, updated_at: now() });
     return /** @type {Task} */ (this.getTask(id));
+  }
+
+  /** @param {{task_id:string, session_id:string|null, decision:string, evidence:string}} e @returns {TaskLogEntry} */
+  addLog(e) {
+    const at = now();
+    const r = this.db.prepare('INSERT INTO task_log(task_id,session_id,decision,evidence,created_at) VALUES(?,?,?,?,?)').run(e.task_id, e.session_id, e.decision, e.evidence, at);
+    return { id: Number(r.lastInsertRowid), ...e, created_at: at };
+  }
+
+  /** A task's log, newest first. @param {string} taskId @param {number} [limit] @returns {TaskLogEntry[]} */
+  listLog(taskId, limit = 500) {
+    return this.#all('SELECT * FROM task_log WHERE task_id=? ORDER BY id DESC LIMIT ?', taskId, limit);
   }
 
   // -- sessions ---------------------------------------------------------------

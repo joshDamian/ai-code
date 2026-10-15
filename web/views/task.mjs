@@ -117,6 +117,7 @@ export function TaskView({ projectId, taskId, sessionId, tab }) {
         ${active ? html`<button class="task-tab add" type="button" onClick=${newSession} aria-label="New session in this task"><${Icon} name="plus" /></button>` : null}
         <span class="tab-gap"></span>
         <a role="tab" class="task-tab ${tab === 'changes' ? 'active' : ''}" href=${`${base}/changes`}>Changes${git?.files ? html` <span class="count">${git.files}</span>` : ''}${git?.conflicted?.length ? html` <span class="badge badge-bad">!</span>` : ''}</a>
+        <a role="tab" class="task-tab ${tab === 'log' ? 'active' : ''}" href=${`${base}/log`}>Log</a>
         ${active ? html`<a role="tab" class="task-tab ${tab === 'terminal' ? 'active' : ''}" href=${`${base}/terminal`}><${Icon} name="terminal" /> Terminal</a>` : null}
       </nav>
 
@@ -146,6 +147,8 @@ export function TaskView({ projectId, taskId, sessionId, tab }) {
       >
         ${tab === 'changes'
           ? html`<${Changes} task=${task} git=${git} sessions=${sessions} reload=${reload} />`
+          : tab === 'log'
+            ? html`<${DecisionLog} task=${task} sessions=${sessions} />`
           : tab === 'terminal'
             ? html`<div class="terminal-page"><${TerminalPane} query=${{ task: taskId }} /></div>`
             : current
@@ -252,6 +255,32 @@ function Changes({ task, git, sessions, reload }) {
         : null}
       ${diff === null ? html`<div class="muted">Loading…</div>` : diff ? html`<${DiffViewer} diff=${diff} nav storageKey=${`bench:viewed:${task.id}`} />` : html`<div class="muted pane-empty">No changes against ${task.base_branch} yet.</div>`}
     </div>
+  `;
+}
+
+/**
+ * The task's decision log, newest first: what its sessions decided, and the evidence
+ * they gave, written with the bench tool `log`. A new entry touches the task, which is
+ * what reloads this.
+ */
+function DecisionLog({ task, sessions }) {
+  const [log, setLog] = useState(null);
+  useEffect(() => {
+    api.taskLog(task.id).then(setLog).catch(toast);
+  }, [task.id, task.updated_at]);
+  if (log === null) return html`<div class="muted pane-empty">Loading…</div>`;
+  if (!log.length) return html`<div class="muted pane-empty">No decisions logged yet. Sessions add them with the <code>log</code> tool, each with the evidence behind it.</div>`;
+  const titled = (id) => sessions.find((s) => s.id === id)?.title || (id ? id.slice(0, 8) : '');
+  return html`
+    <ol class="decision-log">
+      ${log.map(
+        (e) => html`<li key=${e.id} class="decision">
+          <div class="decision-text">${e.decision}</div>
+          <div class="decision-evidence"><span class="muted">Evidence:</span> ${e.evidence}</div>
+          <div class="muted mono-sm">${new Date(e.created_at).toLocaleString()}${e.session_id ? html` · <a href=${`#/p/${task.project_id}/t/${task.id}/s/${e.session_id}`}>${titled(e.session_id)}</a>` : null}</div>
+        </li>`
+      )}
+    </ol>
   `;
 }
 

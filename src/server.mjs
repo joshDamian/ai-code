@@ -15,6 +15,7 @@ import { MODES, MAX_UPLOAD } from './runtime.mjs';
 import { collect } from './metrics.mjs';
 import { worktreeRoot } from './git.mjs';
 import { releaseInfo, updateStatus, startUpdate } from './update.mjs';
+import { sessionPath } from './tools.mjs';
 
 /** @typedef {import('./contract.mjs').ServerMessage} ServerMessage */
 
@@ -143,24 +144,31 @@ function wantsPush(choices, kind) {
   }
 }
 
-/** @param {{title:string, body:string, url?:string, tag?:string, approvalId?:string, sessionId?:string}} payload @param {'approval'|'finished'|'error'|'always'} [kind] */
+/**
+ * Sends to every subscribed device that wants this kind of alert, and says how many took it.
+ * @param {{title:string, body:string, url?:string, tag?:string, approvalId?:string, sessionId?:string}} payload @param {'approval'|'finished'|'error'|'always'} [kind]
+ */
 async function pushAll(payload, kind = 'always') {
-  if (!vapid) return;
+  if (!vapid) return 0;
+  let sent = 0;
   await Promise.allSettled(
     svc.store.listPushSubscriptions().map(async (/** @type {any} */ s) => {
       if (kind !== 'always' && !wantsPush(s.choices, kind)) return;
       try {
         await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, JSON.stringify(payload));
+        sent++;
       } catch (e) {
         const code = /** @type {any} */ (e)?.statusCode;
         if (code === 404 || code === 410) svc.store.deletePushSubscription(s.endpoint);
       }
     })
   );
+  return sent;
 }
+// The bench tool `notify` reaches the person the same way.
+if (vapid) svc.notifier = (payload) => pushAll(payload);
 
-/** @param {import('./contract.mjs').Session} s */
-const sessionUrl = (s) => (s.task_id ? `/#/p/${s.project_id}/t/${s.task_id}/s/${s.id}` : `/#/p/${s.project_id}/s/${s.id}`);
+const sessionUrl = sessionPath;
 
 // -- the event hub ----------------------------------------------------------------------
 
@@ -227,7 +235,7 @@ svc.runtime.on('approval', (a) => {
   const s = svc.store.getSession(a.session_id);
   // The approval id travels with the push so the notification's own Allow and Deny can
   // answer it without the app being opened.
-  if (s) pushAll({ title: `Approval needed: ${a.tool}`, body: `${s.title}${a.title ? ` — ${a.title}` : ''}`, url: sessionUrl(s), tag: `approval-${a.id}`, approvalId: a.id, sessionId: s.id }, 'approval').catch(() => {});
+  if (s) pushAll({ title: `Approval needed: ${a.tool.startsWith('mcp__bench__') ? 'Bench' : a.tool}`, body: `${s.title}${a.title ? ` — ${a.title}` : ''}`, url: sessionUrl(s), tag: `approval-${a.id}`, approvalId: a.id, sessionId: s.id }, 'approval').catch(() => {});
 });
 svc.runtime.on('suggestion', ({ session_id, text }) => text && broadcast({ type: 'suggestion', session_id, text }, session_id));
 svc.runtime.on('commands', ({ session_id, commands }) => broadcast({ type: 'commands', session_id, commands }, session_id));
@@ -583,6 +591,7 @@ route('POST', '/api/tasks/:id/pr', ({ params, body }) => svc.pullRequest(params[
 route('POST', '/api/tasks/:id/close', ({ params, body }) => svc.closeTask(params[0], body));
 route('POST', '/api/tasks/:id/reopen', ({ params }) => svc.reopenTask(params[0]));
 route('POST', '/api/tasks/:id/check', ({ params }) => svc.checkTask(params[0]));
+route('GET', '/api/tasks/:id/log', ({ params }) => svc.taskLog(params[0]));
 
 route('GET', '/api/sessions', ({ u }) =>
   svc.sessions({ projectId: u.searchParams.get('projectId') || undefined, taskId: u.searchParams.get('taskId') || undefined, archived: u.searchParams.get('archived') === '1' })

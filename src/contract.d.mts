@@ -65,8 +65,21 @@ export interface Task {
   /** The end of the last run's output. */
   check_output: string | null;
   check_at: string | null;
+  /** The session that made this task through the bench tool `create_task`, if one did. */
+  created_by_session: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** One entry in a task's decision log, written by a session with the bench tool `log`. */
+export interface TaskLogEntry {
+  id: number;
+  task_id: string;
+  session_id: string | null;
+  decision: string;
+  /** What was measured or seen, not what was believed. */
+  evidence: string;
+  created_at: string;
 }
 
 export type CheckStatus = 'running' | 'passed' | 'failed';
