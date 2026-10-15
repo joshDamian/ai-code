@@ -59,9 +59,18 @@ Hosted-provider keys (`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `FIREWORKS_API_K
 bench serve | open | add <path> [name] | projects
 bench share [--off] | pair | devices | revoke <id>
 bench service install | uninstall | status
+bench tasks [project] [--all]
+bench task <id> | task close <id> [--delete-branch] | task check <id>
+bench task merge <id> [--squash] [--message <m>] [--keep]
+bench sessions [project] [--all]
+bench update [--yes]
 bench doctor
 bench shell <provider> [claude args]
 ```
+
+The task, session and update commands act through the running server, as the app does,
+so open pages see what they change. Ids can be any unique prefix of 4 or more characters,
+and `--json` prints the server's raw answer.
 
 ## Development
 

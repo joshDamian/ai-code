@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { env, envFile, loadEnvFile, addToEnvFile, PROVIDER_KEYS } from './env.mjs';
@@ -30,30 +31,50 @@ const HELP = `bench - a workbench for Claude sessions
   bench service install       run the server at login and keep it running
   bench service uninstall     remove that service
   bench service status        whether the service is installed and running
+  bench tasks [project]       active tasks, newest first (--all adds merged and closed)
+  bench task <id>             a task's branch, worktree, check, git state and sessions
+  bench task close <id>       close it: worktree removed, sessions archived (--delete-branch)
+  bench task merge <id>       merge it into its base and clean up
+                              --squash, --message <m>, --keep (leave worktree and sessions)
+  bench task check <id>       run its check now; exits 1 if it fails
+  bench sessions [project]    open sessions (--all adds archived ones)
+  bench update                whether Bench can update from its checkout (--yes to do it)
   bench doctor                check git, node, claude, gh and the providers
   bench shell <provider> [..] an interactive \`claude\` billed to that provider
 
 Environment: PORT (default 4317), BENCH_ROOT (where the database lives),
-BENCH_PUBLIC_URL (the address other devices reach this server at).`;
+BENCH_PUBLIC_URL (the address other devices reach this server at).
+
+Task and session commands go through the running server. Ids may be shortened to any
+unique prefix of 4 or more characters. --json prints the server's raw answer.`;
 
 /** @param {unknown} x */
 const out = (x) => console.log(typeof x === 'string' ? x : JSON.stringify(x, null, 2));
 
-/** A call to the running server, over loopback, which needs no token. @param {string} method @param {string} p @param {unknown} [body] */
-async function api(method, p, body) {
-  let res;
-  try {
-    res = await fetch(`http://127.0.0.1:${port}${p}`, {
-      method,
-      headers: body === undefined ? {} : { 'content-type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
+/**
+ * A call to the running server, over loopback, which needs no token. Over node:http
+ * rather than fetch, whose five-minute header timeout a task's check can outlast.
+ * @param {string} method @param {string} p @param {unknown} [body] @returns {Promise<any>}
+ */
+function api(method, p, body) {
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, method, path: p, headers: payload === undefined ? {} : { 'content-type': 'application/json' } }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (d) => (text += d));
+      res.on('end', () => {
+        let data = null;
+        try {
+          data = JSON.parse(text);
+        } catch {}
+        if ((res.statusCode || 500) >= 400) reject(new Error(data?.error || `Server answered ${res.statusCode}`));
+        else resolve(data);
+      });
     });
-  } catch {
-    throw new Error(`No server on port ${port}. Start it with \`bench serve\` or \`bench service install\`.`);
-  }
-  const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(data?.error || `Server answered ${res.status}`);
-  return data;
+    req.on('error', () => reject(new Error(`No server on port ${port}. Start it with \`bench serve\` or \`bench service install\`.`)));
+    req.end(payload);
+  });
 }
 
 async function service() {
@@ -303,6 +324,227 @@ async function shell(providerId, args) {
   process.exitCode = r.status ?? 1;
 }
 
+// -- tasks, sessions and updates, through the running server ----------------------------------
+//
+// Never through a Service of their own: the server owns live sessions and tells every open
+// page what changed, and a second process changing the database behind its back leaves
+// sessions working in removed worktrees and pages out of date.
+
+/**
+ * Words and flags. `valued` names the flags that take the next word as their value.
+ * @param {string[]} args @param {string[]} [valued]
+ */
+function parseArgs(args, valued = []) {
+  /** @type {string[]} */
+  const words = [];
+  /** @type {Record<string, string|true>} */
+  const flags = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (!a.startsWith('--')) words.push(a);
+    else if (valued.includes(a.slice(2))) {
+      if (i + 1 >= args.length) throw new Error(`${a} needs a value`);
+      flags[a.slice(2)] = args[++i];
+    } else flags[a.slice(2)] = true;
+  }
+  return { words, flags };
+}
+
+const shortId = (/** @type {string} */ id) => id.slice(0, 8);
+const shortCommit = (/** @type {string|null|undefined} */ c) => (c ? c.slice(0, 7) : 'unknown');
+const plural = (/** @type {number} */ n, /** @type {string} */ word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/** Lines of aligned columns. @param {string[][]} rows */
+function table(rows) {
+  const widths = rows[0]?.map((_, i) => Math.max(...rows.map((r) => r[i].length))) || [];
+  return rows.map((r) => r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(widths[i]))).join('  ')).join('\n');
+}
+
+/**
+ * The one item whose id is `given` or starts with it, as git takes a commit. A prefix
+ * shorter than four characters matches too much to be safe, and an ambiguous one lists
+ * what it matches.
+ * @template {{id: string}} T
+ * @param {string|undefined} given @param {T[]} items @param {string} kind @param {(x: T) => string} describe
+ * @returns {T}
+ */
+function byId(given, items, kind, describe) {
+  if (!given) throw new Error(`Give a ${kind} id`);
+  const exact = items.find((x) => x.id === given);
+  if (exact) return exact;
+  if (given.length < 4) throw new Error(`A ${kind} id needs at least 4 characters: ${given}`);
+  const found = items.filter((x) => x.id.startsWith(given)).sort((a, b) => a.id.localeCompare(b.id));
+  if (found.length === 1) return found[0];
+  if (!found.length) throw new Error(`No ${kind} matches ${given}`);
+  throw new Error(`${given} matches ${found.length} ${kind}s:\n${found.map((x) => `  ${shortId(x.id)}  ${describe(x)}`).join('\n')}`);
+}
+
+/** A project by name or id. @param {string} given */
+async function findProject(given) {
+  /** @type {{id: string, name: string, path: string}[]} */
+  const projects = await api('GET', '/api/projects');
+  const named = projects.filter((p) => p.name === given);
+  if (named.length === 1) return named[0];
+  if (named.length > 1) throw new Error(`${named.length} projects are called ${given}; give its id:\n${named.map((p) => `  ${shortId(p.id)}  ${p.path}`).join('\n')}`);
+  return byId(given, projects, 'project', (p) => `${p.name} (${p.path})`);
+}
+
+/** @param {string} given */
+async function findTask(given) {
+  /** @type {import('./contract.mjs').Task[]} */
+  const tasks = await api('GET', '/api/tasks');
+  return byId(given, tasks, 'task', (t) => `${t.state}  ${t.title}`);
+}
+
+/** @param {import('./contract.mjs').Task} t */
+const checkWord = (t) => (!t.check_command ? 'no check' : t.check_status || 'unchecked');
+
+const newestFirst = (/** @type {{created_at: string}} */ a, /** @type {{created_at: string}} */ b) => b.created_at.localeCompare(a.created_at);
+
+/** @param {string[]} args */
+async function tasksCmd(args) {
+  const { words, flags } = parseArgs(args);
+  const project = words[0] ? await findProject(words[0]) : null;
+  /** @type {import('./contract.mjs').Task[]} */
+  const all = await api('GET', `/api/tasks${project ? `?projectId=${encodeURIComponent(project.id)}` : ''}`);
+  const tasks = all.filter((t) => flags.all || t.state === 'active').sort(newestFirst);
+  if (flags.json) return out(tasks);
+  if (!tasks.length) return out(flags.all ? 'No tasks.' : 'No active tasks. --all includes merged and closed ones.');
+  out(table(tasks.map((t) => [shortId(t.id), t.state, checkWord(t), t.title])));
+}
+
+/** The last lines of a check's output. @param {string|null} output */
+const tail = (output, lines = 20) => (output || '').trimEnd().split('\n').slice(-lines).join('\n');
+
+/** @param {string[]} args */
+async function taskCmd(args) {
+  const [sub, ...rest] = args;
+  if (sub === 'close') {
+    const { words, flags } = parseArgs(rest);
+    const t = await findTask(words[0]);
+    const r = await api('POST', `/api/tasks/${t.id}/close`, { deleteBranch: !!flags['delete-branch'] });
+    if (flags.json) return out(r);
+    return out(`Closed ${shortId(t.id)} ${t.title}: worktree removed, sessions archived${flags['delete-branch'] ? `, branch ${t.branch} deleted` : `; branch ${t.branch} kept`}.`);
+  }
+  if (sub === 'merge') {
+    const { words, flags } = parseArgs(rest, ['message']);
+    const t = await findTask(words[0]);
+    /** @type {{strategy: string, cleanup: boolean, message?: string}} */
+    const body = { strategy: flags.squash ? 'squash' : 'merge', cleanup: !flags.keep };
+    if (typeof flags.message === 'string') body.message = flags.message;
+    const r = await api('POST', `/api/tasks/${t.id}/merge`, body);
+    if (flags.json) return out(r);
+    return out(`Merged ${shortId(t.id)} ${t.title} into ${t.base_branch}${r.commit ? ` at ${shortCommit(r.commit)}` : ''}.${flags.keep ? ' Worktree and sessions kept.' : ' Worktree removed, sessions archived.'}`);
+  }
+  if (sub === 'check') {
+    const { words, flags } = parseArgs(rest);
+    const t = await findTask(words[0]);
+    /** @type {import('./contract.mjs').Task} */
+    const r = await api('POST', `/api/tasks/${t.id}/check`, {});
+    if (r.check_status !== 'passed') process.exitCode = 1;
+    if (flags.json) return out(r);
+    const end = tail(r.check_output);
+    return out(`${r.check_status === 'passed' ? 'Passed' : 'Failed'}: ${r.check_command}${end ? `\n\n${end}` : ''}`);
+  }
+  const { words, flags } = parseArgs(args);
+  const t = await findTask(words[0]);
+  /** @type {{task: import('./contract.mjs').Task, git: any, sessions: import('./contract.mjs').Session[]}} */
+  const r = await api('GET', `/api/tasks/${t.id}`);
+  if (flags.json) return out(r);
+  const { task, git, sessions } = r;
+  const gone = !fs.existsSync(task.worktree);
+  const state = [`${git.ahead} ahead`, `${git.behind} behind`, git.dirty.length ? `${plural(git.dirty.length, 'uncommitted file')}` : 'clean'];
+  if (git.conflicted.length) state.push(`${plural(git.conflicted.length, 'conflict')}`);
+  const lines = [
+    task.title,
+    '',
+    table([
+      ['id', task.id],
+      ['state', task.state + (task.merge_commit ? ` (${shortCommit(task.merge_commit)})` : '')],
+      ['branch', `${task.branch} → ${task.base_branch}`],
+      ['worktree', `${task.worktree}${gone ? ' (removed)' : ''}`],
+      ['done means', task.done || '-'],
+      ['check', task.check_command || '-'],
+      ['last check', task.check_command ? `${checkWord(task)}${task.check_at ? ` at ${task.check_at}` : ''}` : '-'],
+      ['git', state.join(', ')],
+    ]),
+    '',
+    sessions.length ? `Sessions:\n${table(sessions.sort(newestFirst).map((s) => ['  ' + shortId(s.id), s.archived_at ? 'archived' : s.status, s.title]))}` : 'No sessions.',
+  ];
+  out(lines.join('\n'));
+}
+
+/** @param {string[]} args */
+async function sessionsCmd(args) {
+  const { words, flags } = parseArgs(args);
+  const project = words[0] ? await findProject(words[0]) : null;
+  const q = new URLSearchParams();
+  if (project) q.set('projectId', project.id);
+  if (flags.all) q.set('archived', '1');
+  /** @type {import('./contract.mjs').Session[]} */
+  const sessions = (await api('GET', `/api/sessions${q.size ? `?${q}` : ''}`)).sort(newestFirst);
+  if (flags.json) return out(sessions);
+  if (!sessions.length) return out('No sessions.');
+  out(table(sessions.map((s) => [shortId(s.id), s.archived_at ? 'archived' : s.status, s.task_id ? `task ${shortId(s.task_id)}` : '-', s.title])));
+}
+
+/** What Settings → Update shows. @param {import('./update.mjs').UpdateStatus} st */
+function describeUpdate(st) {
+  const lines = [];
+  if (st.installed) {
+    lines.push(`Installed ${shortCommit(st.installed.commit)}${st.installed.dirty ? ' with uncommitted changes' : ''}, at ${st.installed.installedAt}.`);
+    lines.push(`Checkout ${st.source} is at ${shortCommit(st.sourceCommit)}${st.newer === 0 ? ', the same commit' : st.newer ? `, ${plural(st.newer, 'newer commit')}` : ''}.`);
+    if (st.sourceDirty) lines.push('The checkout has uncommitted changes. An update installs the files as they are, changes included.');
+  }
+  lines.push(st.canUpdate ? 'Run `bench update --yes` to install it and restart the server.' : `Cannot update: ${st.reason}`);
+  if (st.last && !st.last.running && st.last.exit !== 0) lines.push('', `The last update failed (exit ${st.last.exit}, ${st.last.at}):`, st.last.tail);
+  return lines.join('\n');
+}
+
+/**
+ * Waits for a server running `commit` to answer, or for the update log to say the install
+ * failed, in which case the old server is still up. The Settings page waits the same way.
+ * @param {string|null} commit @param {number} oldPid
+ * @returns {Promise<'updated'|'failed'|'timeout'>}
+ */
+async function updatedTo(commit, oldPid, ms = 5 * 60000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      const s = await api('GET', '/api/server/status');
+      if (s.pid !== oldPid && (!commit || s.commit === commit)) return 'updated';
+      const u = await api('GET', '/api/server/update');
+      if (u.last && !u.last.running && u.last.exit !== 0) return 'failed';
+    } catch {
+      /* restarting */
+    }
+  }
+  return 'timeout';
+}
+
+/** @param {string[]} args */
+async function updateCmd(args) {
+  const { flags } = parseArgs(args);
+  /** @type {import('./update.mjs').UpdateStatus} */
+  const st = await api('GET', '/api/server/update');
+  if (!flags.yes) return out(flags.json ? st : describeUpdate(st));
+  if (!st.canUpdate) throw new Error(`Cannot update: ${st.reason}`);
+  const before = await api('GET', '/api/server/status');
+  // A session's shell is a child of the server it would restart.
+  if (env('PROVIDER')) console.error('This shell is inside a Bench session: the update restarts the server this session runs on.');
+  const started = await api('POST', '/api/server/update', {});
+  if (!flags.json) console.log(`Updating from ${started.source} (${shortCommit(started.from)} → ${shortCommit(started.to)}); waiting for the server to come back…`);
+  const result = await updatedTo(started.to, before.pid);
+  /** @type {import('./update.mjs').UpdateStatus|null} */
+  const after = await api('GET', '/api/server/update').catch(() => null);
+  if (result !== 'updated') process.exitCode = 1;
+  if (flags.json) return out({ ...started, result, status: after });
+  if (result === 'updated') return out(`Updated to ${shortCommit(started.to)}.`);
+  console.error(result === 'failed' ? 'The update failed; the old server is still running. The installer log:' : 'The server has not come back on the new commit. The installer log:');
+  console.error(after?.last?.tail || '(no log)');
+}
+
 async function main() {
   const [cmd = 'serve', ...rest] = process.argv.slice(2);
   if (cmd === 'help' || cmd === '--help' || cmd === '-h') return out(HELP);
@@ -375,6 +617,10 @@ async function main() {
   }
   if (cmd === 'devices') return out(await api('GET', '/api/devices'));
   if (cmd === 'revoke') return out(await api('DELETE', `/api/devices/${encodeURIComponent(rest[0] || '')}`));
+  if (cmd === 'tasks') return tasksCmd(rest);
+  if (cmd === 'task') return taskCmd(rest);
+  if (cmd === 'sessions') return sessionsCmd(rest);
+  if (cmd === 'update') return updateCmd(rest);
   if (cmd === 'doctor') {
     const s = await service();
     const { checks } = await s.doctor();
