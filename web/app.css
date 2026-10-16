@@ -854,7 +854,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .set-nav{position:sticky;top:var(--space-6);display:grid;gap:var(--space-1)}
 .set-nav-item{display:flex;align-items:center;min-height:32px;padding:0 var(--space-3);border:0;border-radius:var(--radius-sm);background:transparent;color:var(--muted);text-align:left;cursor:pointer;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
 .set-nav-item:hover{color:var(--text);background:var(--surface-2)}
-.set-nav-item.on{color:var(--accent);background:var(--surface-2);font-weight:600}
+.set-nav-item.on{color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);font-weight:600}
 .set-nav-item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .set-groups{display:grid;gap:calc(var(--space-6) * 2);min-width:0}
 .set-group{scroll-margin-top:var(--space-4)}
@@ -880,8 +880,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .set-error{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2);font-size:var(--text-sm);color:var(--bad)}
 .set-note{font-size:var(--text-sm);color:var(--muted)}
 .set-rows>.set-note{padding-top:var(--space-2)}
-.set-failed{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);padding:var(--space-4) 0}
-.skeleton{display:block;height:14px;border-radius:var(--radius-sm);background:linear-gradient(90deg,var(--surface-2) 25%,var(--surface-3) 50%,var(--surface-2) 75%);background-size:200% 100%;animation:shimmer 1.6s linear infinite}
+.skeleton{display:block;height:14px;border-radius:var(--radius-sm);background:linear-gradient(90deg,var(--line) 25%,var(--line-strong) 50%,var(--line) 75%);background-size:200% 100%;animation:shimmer 1.6s linear infinite}
 .skeleton.sm{height:11px}
 @media(prefers-reduced-motion:reduce){.skeleton{animation:none}.set-nav-item{transition:none}}
 .models{display:grid;gap:var(--space-1)}
@@ -890,8 +889,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .qr{width:200px;height:200px;background:#fff;border-radius:var(--radius-sm);padding:8px;box-sizing:border-box}
 .qr svg{width:100%;height:100%}
 .pair-url{overflow-wrap:anywhere;user-select:all}
-.checks{display:grid;padding-top:var(--space-2)}
-.check-row{display:grid;grid-template-columns:20px 180px 1fr;gap:var(--space-2);padding:var(--space-1) 0;font-size:var(--text-sm)}
+/* One grid for the whole table, so the name column is as wide as its longest name and
+   every value starts on the same line. */
+.checks{display:grid;grid-template-columns:20px max-content minmax(0,1fr);gap:var(--space-2) var(--space-3);padding-top:var(--space-2);font-size:var(--text-sm)}
+.check-row{display:contents}
 .check-name{font-weight:600}
 /* The nav needs room beside a readable column; below that the headings are the landmarks. */
 @media(max-width:1100px){.set-layout{grid-template-columns:minmax(0,680px)}.set-nav{display:none}}
@@ -901,6 +902,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
   .set-row.stack>.set-control{justify-self:stretch}
   .set-row.stack>.set-control>.select-field,.set-row.stack>.set-control>.picker{width:100%}
   .set-control{flex-wrap:wrap}
+  .set-row.wide .picker{flex-direction:column;align-items:stretch}
 }
 .gate{min-height:100dvh;display:grid;place-items:center;padding:var(--space-4)}
 .gate-card{max-width:420px;display:grid;gap:var(--space-3)}
@@ -924,8 +926,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
   .session-controls .select-trigger{padding-top:var(--space-1);padding-bottom:var(--space-1);font-size:var(--text-sm)}
   .hide-narrow{display:none}
   .page-header h1{font-size:var(--text-lg)}
-  .check-row{grid-template-columns:20px 1fr}
-  .check-row>:last-child{grid-column:2}
+  .checks{grid-template-columns:20px minmax(0,1fr) minmax(0,1fr)}
   .dialog{max-width:none}
   .confirm-overlay{padding:var(--space-2);align-items:flex-end}
 }

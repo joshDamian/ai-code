@@ -119,12 +119,15 @@ function SkeletonRows({ n = 2 }) {
   return html`${Array.from({ length: n }, (_, i) => html`<div class="set-row" key=${i} aria-hidden="true"><div class="set-text"><span class="skeleton" style="width:40%"></span><span class="skeleton sm" style="width:65%"></span></div></div>`)}`;
 }
 
-/** In place of a group's rows when they could not be loaded. */
+/** In place of a group's rows when they could not be loaded: a row of its own, so it says where. */
 function LoadFailed({ what, retry }) {
   return html`
-    <div class="set-failed" role="alert">
-      <span>Couldn't load ${what}.</span>
-      <button class="btn sm secondary" type="button" onClick=${retry}>Try again</button>
+    <div class="set-row set-failed" role="alert">
+      <div class="set-text">
+        <span class="set-label">Couldn't load ${what}</span>
+        <span class="set-hint">Check that the server is running, then try again.</span>
+      </div>
+      <div class="set-control"><button class="btn sm secondary" type="button" onClick=${retry}>Try again</button></div>
     </div>
   `;
 }
@@ -234,10 +237,7 @@ function Devices() {
         setDevices(d);
         setFailed(false);
       },
-      (e) => {
-        setFailed(true);
-        toast(e);
-      }
+      () => setFailed(true)
     );
   useEffect(() => {
     load();
@@ -398,10 +398,7 @@ function Doctor() {
     setFailed(false);
     api.doctor().then(
       (r) => setChecks(r.checks),
-      (e) => {
-        setFailed(true);
-        toast(e);
-      }
+      () => setFailed(true)
     );
   };
   useEffect(() => {
