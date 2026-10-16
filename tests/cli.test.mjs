@@ -191,6 +191,15 @@ test('task loop turns a loop on with caps, shows it, and turns it off', async ()
   assert.match(off.stdout, /^Loop off for [0-9a-f]{8} Looped task\./);
   assert.equal(JSON.parse((await bench(['task', looped.id.slice(0, 6), '--json'])).stdout).task.loop, null);
   assert.match((await bench(['task', looped.id.slice(0, 6)])).stdout, /loop\s+off/);
+
+  // With no session left to feed, a loop stops the moment it is turned on: the command says
+  // what happened instead of promising a loop that would never run.
+  const lonely = await api('POST', '/api/tasks', { projectId: project.id, title: 'Nobody home', check: 'true' });
+  await api('POST', `/api/sessions/${lonely.session.id}/archive`, {});
+  const nothing = await bench(['task', 'loop', lonely.task.id.slice(0, 6)]);
+  assert.equal(nothing.code, 1);
+  assert.equal(nothing.stdout, '');
+  assert.match(nothing.stderr, /^The loop did not start: there is no session in the task to feed/);
 });
 
 test('task close removes the worktree and hides it from tasks unless --all', async () => {

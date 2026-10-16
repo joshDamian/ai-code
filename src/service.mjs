@@ -483,11 +483,14 @@ export class Service extends EventEmitter {
       this.loop.off(id);
       change.loop = null;
     }
-    const t = this.store.updateTask(t0.id, change);
+    this.store.updateTask(t0.id, change);
     if (bar) for (const s of this.store.listSessions({ taskId: id })) if (!this.runtime.busy(s.id)) this.runtime.close(s.id);
     if (change.loop) void this.loop.start(id);
-    this.emit('task', t);
-    return t;
+    // Starting a loop can already have written to the task - an attempt, or a stop because
+    // there is no session to feed - so the answer is the task as it stands now.
+    const now = this.task(id);
+    this.emit('task', now);
+    return now;
   }
 
   /** Runs the task's check now, whether or not anything changed. @param {string} id */

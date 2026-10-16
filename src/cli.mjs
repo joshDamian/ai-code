@@ -480,7 +480,10 @@ async function taskCmd(args) {
     const r = await api('PATCH', `/api/tasks/${t.id}`, { loop: caps });
     if (flags.json) return out(r);
     const loop = r.loop;
-    return out(`Looping ${shortId(t.id)} ${t.title}: \`${r.check_command}\` runs when its session goes idle, and a failure sends it back to work — up to ${plural(loop?.max_attempts ?? 0, 'attempt')} or ${plural(loop?.max_minutes ?? 0, 'minute')}. Then it writes up why it is stuck and stops. \`bench task loop ${shortId(t.id)} --off\` ends it.`);
+    // A loop nothing can feed stops the moment it is turned on; saying "Looping" would be a
+    // promise the task cannot keep.
+    if (loop?.state !== 'looping') throw new Error(`The loop did not start: ${loop?.reason || 'the task has nothing to loop'}`);
+    return out(`Looping ${shortId(t.id)} ${t.title}: \`${r.check_command}\` runs when its session goes idle, and a failure sends it back to work — up to ${plural(loop.max_attempts, 'attempt')} or ${plural(loop.max_minutes, 'minute')}. Then it writes up why it is stuck and stops. \`bench task loop ${shortId(t.id)} --off\` ends it.`);
   }
   const { words, flags } = parseArgs(args);
   const t = await findTask(words[0]);

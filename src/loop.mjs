@@ -123,7 +123,9 @@ export class Loop {
       if (!t || !loop || loop.state !== 'looping') return;
       const bound = loop.session_id ? this.store.getSession(loop.session_id) : null;
       const s = bound && !bound.archived_at ? bound : this.#newest(taskId);
-      if (!s) return; // no session yet: the first one to finish a turn picks it up
+      // Nothing would ever finish a turn, so nothing would ever run the check or reach a cap:
+      // it would sit there looping in name only. Say so and stop instead.
+      if (!s) return this.stop(taskId, 'stopped', 'there is no session in the task to feed');
       this.#mark(s, `Looping until \`${t.check_command}\` passes: up to ${plural(loop.max_attempts, 'attempt')} or ${plural(loop.max_minutes, 'minute')}. Only a person can start or stop a loop.`);
       if (s.status === 'running' || s.status === 'waiting' || this.runtime.busy(s.id)) return;
       await this.turnDone(this.store.getSession(s.id) || s, true);

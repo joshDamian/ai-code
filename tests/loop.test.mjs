@@ -152,6 +152,29 @@ test('the wall-clock cap ends a loop too, without waiting for the attempt cap', 
   svc.shutdown();
 });
 
+test('a loop with no session to feed stops at once, and says so', async () => {
+  const { svc, project } = setup();
+  const { task, session } = svc.createTask(project.id, { title: 'Nobody to feed', check: 'true' });
+  svc.archiveSession(session.id);
+
+  // Nothing would ever finish a turn, so nothing would run the check or reach a cap.
+  const turned = svc.editTask(task.id, { loop: { max_attempts: 5, max_minutes: 30 } });
+  assert.equal(turned.loop.state, 'stopped', 'the answer carries what the loop did, not what it was asked for');
+  assert.match(turned.loop.reason, /no session in the task to feed/);
+  assert.equal(svc.task(task.id).loop.state, 'stopped');
+  assert.ok(
+    svc.taskLog(task.id).some((e) => e.kind === 'loop' && /no session in the task to feed/.test(e.decision)),
+    'and the log says why'
+  );
+
+  // Turning it on again with a session there does loop.
+  svc.archiveSession(session.id, false);
+  svc.editTask(task.id, { loop: { max_attempts: 5, max_minutes: 30 } });
+  await until(() => svc.task(task.id).loop?.state !== 'looping');
+  assert.equal(svc.task(task.id).loop.state, 'done', 'the check passes, so the loop is done');
+  svc.shutdown();
+});
+
 test('a loop needs a check: it is refused at creation and when turned on', () => {
   const { svc, project } = setup();
   const bare = svc.createTask(project.id, { title: 'No check', check: '' }).task;

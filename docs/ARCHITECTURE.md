@@ -56,9 +56,9 @@ A task can be marked to loop: the overnight contract, where Bench feeds a failin
 - **Caps are mandatory.** `max_attempts` (default 10, at most 100) and `max_minutes` (default 2 hours, at most 24). Either one reached with the check still failing ends the loop without another turn.
 - **The way out.** At a cap the loop is `gave-up`, and the session is asked once more, read-only, to write up why it is stuck: it is put in Plan mode (`setMode`, as a review's is) and `send(..., {writeUp: true})` sets `Live.writeUp`, so the Stop hook leaves the failing check alone for that turn. The write-up is recorded in the task log when the turn ends.
 - **Auditable.** Every attempt is a `loop` line in the session's transcript and a `loop` entry in the task log, with the check's result; the ending is logged with its reason and evidence.
-- **It ends cleanly** for a person turning it off (`stopped`; the task's field goes back to null and the log keeps the trail), a closed or merged task, an archived or deleted session, a session that errored (`error`), a check that could not run, or a send that failed.
+- **It ends cleanly** for a person turning it off (`stopped`; the task's field goes back to null and the log keeps the trail), a closed or merged task, an archived or deleted session, a session that errored (`error`), a task with no session left to feed, a check that could not run, or a send that failed.
 - **Never while waiting.** A session waiting on the person is theirs until they answer - a message now would sit behind the approval - so the loop waits and takes over from the turn-end after it.
-- **One session.** The loop binds to the task's newest non-review session at the first turn-end (`session_id`). `started_at` identifies a loop, so a turn already deciding an old loop can never write it back over a person's change.
+- **One session.** The loop binds to the task's newest non-review session at the first turn-end (`session_id`), and one turned on with no session to feed stops at once rather than sit there looping in name only: nothing else would ever run the check or reach a cap. `started_at` identifies a loop, so a turn already deciding an old loop can never write it back over a person's change; the loop's own writes are laid over the caps as they stand, so retuning one mid-flight keeps the progress it has.
 
 ## Access
 
