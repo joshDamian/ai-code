@@ -843,23 +843,65 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .terminal-page .terminal-host{flex:1;height:auto;min-height:280px}
 .terminal-dialog .terminal-host{height:60vh}
 
-/* ---- settings and gates ---- */
-.settings .section{display:grid;gap:var(--space-3)}
-.settings h2{margin:0}
-.models{display:grid;gap:2px;padding:var(--space-2) var(--space-4) var(--space-3) var(--space-7);border-bottom:1px solid var(--line)}
-.model-row{display:grid;grid-template-columns:auto 1fr auto;gap:var(--space-2);align-items:center;font-size:var(--text-sm);padding:2px 0}
+/* ---- settings ----
+   Groups of rows, the settings pattern: a group is a heading, a line of what it
+   controls, then its rows on the page's own background. Groups are told apart by space
+   (twice the largest step), never by a card each - borders stacked on borders made
+   every group shout equally. Inside a group a row is a label with its consequence
+   under it and the control on the right, so every control lines up on one right edge;
+   one --line between rows is the only rule. A wide screen gets a nav of the groups. */
+.set-layout{display:grid;grid-template-columns:200px minmax(0,680px);gap:var(--space-7);align-items:start}
+.set-nav{position:sticky;top:var(--space-6);display:grid;gap:var(--space-1)}
+.set-nav-item{display:flex;align-items:center;min-height:32px;padding:0 var(--space-3);border:0;border-radius:var(--radius-sm);background:transparent;color:var(--muted);text-align:left;cursor:pointer;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.set-nav-item:hover{color:var(--text);background:var(--wash)}
+.set-nav-item.on{color:var(--accent);background:var(--surface-2);font-weight:600}
+.set-nav-item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.set-groups{display:grid;gap:calc(var(--space-6) * 2);min-width:0}
+.set-group{scroll-margin-top:var(--space-4)}
+.set-head{display:grid;gap:var(--space-1)}
+.set-head h2{margin:0;font-size:var(--text-xl);font-family:var(--font-title,var(--font-ui));text-transform:var(--title-transform,none);letter-spacing:var(--title-spacing,normal)}
+.set-desc{color:var(--muted)}
+.set-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;column-gap:var(--space-6);row-gap:var(--space-3);padding:var(--space-4) 0}
+.set-row+.set-row{border-top:1px solid var(--line)}
+/* What a row carries under it - a model list, a pairing link, a note - spans the row. */
+.set-row>:not(.set-text):not(.set-control){grid-column:1/-1}
+.set-text{display:grid;gap:var(--space-1);min-width:0}
+.set-label{font-weight:600;color:var(--text);overflow-wrap:anywhere}
+.set-hint{font-size:var(--text-sm);color:var(--muted);overflow-wrap:anywhere}
+.set-control{display:flex;align-items:center;justify-content:flex-end;gap:var(--space-2);justify-self:end;min-width:0}
+.set-control>.select-field{width:240px}
+.set-control>.picker{width:400px}
+.set-row.wide{grid-template-columns:minmax(0,1fr)}
+.set-row.wide>.set-control{justify-self:stretch}
+.set-row.wide .input{flex:1}
+.set-row.wide .picker{width:100%}
+.set-value,.set-strong{color:var(--text)}
+.set-saved{font-size:var(--text-sm);color:var(--good);white-space:nowrap}
+.set-error{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2);font-size:var(--text-sm);color:var(--bad)}
+.set-note{font-size:var(--text-sm);color:var(--muted)}
+.set-rows>.set-note{padding-top:var(--space-2)}
+.set-failed{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);padding:var(--space-4) 0}
+.skeleton{display:block;height:14px;border-radius:var(--radius-sm);background:linear-gradient(90deg,var(--surface-2) 25%,var(--surface-3) 50%,var(--surface-2) 75%);background-size:200% 100%;animation:shimmer 1.6s linear infinite}
+.skeleton.sm{height:11px}
+@media(prefers-reduced-motion:reduce){.skeleton{animation:none}.set-nav-item{transition:none}}
+.models{display:grid;gap:var(--space-1)}
+.model-row{display:grid;grid-template-columns:auto 1fr auto;gap:var(--space-2);align-items:center;font-size:var(--text-sm);padding:var(--space-1) 0}
 .pairing{display:flex;gap:var(--space-5);align-items:center;flex-wrap:wrap}
 .qr{width:200px;height:200px;background:#fff;border-radius:var(--radius-sm);padding:8px;box-sizing:border-box}
 .qr svg{width:100%;height:100%}
 .pair-url{overflow-wrap:anywhere;user-select:all}
-.checks{display:grid;gap:var(--space-1)}
-.check-row{display:grid;grid-template-columns:20px 160px 1fr;gap:var(--space-2);font-size:var(--text-sm)}
-/* A switch and what it does, side by side. Not .check-row: that is the diagnostics table,
-   whose first column is a tick, and a 34px switch does not fit a tick's 20px. */
-.setting-row{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) 0}
-.setting-row+.setting-row{border-top:1px solid var(--line)}
-.setting-text{display:flex;flex-direction:column;gap:2px;min-width:0}
-.setting-text .muted{font-size:var(--text-xs)}
+.checks{display:grid;padding-top:var(--space-2)}
+.check-row{display:grid;grid-template-columns:20px 180px 1fr;gap:var(--space-2);padding:var(--space-1) 0;font-size:var(--text-sm)}
+.check-name{font-weight:600}
+/* The nav needs room beside a readable column; below that the headings are the landmarks. */
+@media(max-width:1100px){.set-layout{grid-template-columns:minmax(0,680px)}.set-nav{display:none}}
+/* A select or a field takes the width under its label; a switch or a button stays right. */
+@media(max-width:650px){
+  .set-row.stack{grid-template-columns:minmax(0,1fr)}
+  .set-row.stack>.set-control{justify-self:stretch}
+  .set-row.stack>.set-control>.select-field,.set-row.stack>.set-control>.picker{width:100%}
+  .set-control{flex-wrap:wrap}
+}
 .gate{min-height:100dvh;display:grid;place-items:center;padding:var(--space-4)}
 .gate-card{max-width:420px;display:grid;gap:var(--space-3)}
 
@@ -883,7 +925,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
   .hide-narrow{display:none}
   .page-header h1{font-size:var(--text-lg)}
   .check-row{grid-template-columns:20px 1fr}
-  .check-row .muted{grid-column:2}
+  .check-row>:last-child{grid-column:2}
   .dialog{max-width:none}
   .confirm-overlay{padding:var(--space-2);align-items:flex-end}
 }
