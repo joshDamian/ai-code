@@ -494,6 +494,20 @@ test("Bench's plugin is one Claude Code can load: a named manifest, and skills n
   }
 });
 
+test('design-check leaves later sessions a CLAUDE.md pointer that names skills which exist', () => {
+  // The skill is prose, so what can be held is the pointer it tells a session to write:
+  // it has to be fenced so a second run replaces it, and every skill it names has to be
+  // in the pack, or a rename would leave projects pointing at nothing.
+  const text = fs.readFileSync(path.join(PACK, 'skills', 'design-check', 'SKILL.md'), 'utf8');
+  const block = /<!-- bench:design-check -->\n([\s\S]*?)\n\s*<!-- \/bench:design-check -->/.exec(text)?.[1];
+  assert.ok(block, 'the block is fenced by markers');
+  const named = [...block.matchAll(/`\/bench:([\w-]+)`/g)].map((m) => m[1]);
+  assert.ok(named.length, 'the block names the skill to run');
+  for (const skill of named) assert.ok(fs.existsSync(path.join(PACK, 'skills', skill, 'SKILL.md')), `/bench:${skill} is a skill in the pack`);
+  assert.match(block, /sh \.bench\/design-check\.sh/, 'and the command the check runs');
+  assert.match(text, /git check-ignore/, 'the wiring is committed even where .bench/ is ignored');
+});
+
 test("a session gets the person's own skills, and nothing else from their Claude Code folder", async () => {
   const { svc, project, config, root } = setup();
   fs.mkdirSync(path.join(config, 'skills', 'code-style'), { recursive: true });
