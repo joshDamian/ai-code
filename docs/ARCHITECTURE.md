@@ -38,6 +38,7 @@ A session is a row plus, while in use, an open Agent SDK `query()` fed by an asy
   - Not tools, on purpose: merging or closing a task, changing any task's done means or check, turning a loop on or stopping it, deleting anything. A session must not lower its own bar, land its own work, or put itself into an unattended loop; the server's instructions say so. A task made by `create_task` records the session that made it (`tasks.created_by_session`) and cannot call `create_task` itself: one level, never a chain.
   - To add a tool, add it to `benchTools()`; if it only reads, add its name to `READ_ONLY`.
 - **Settings.** Sessions load `project` and `local` settings, never `user`: a user `settings.json` `env` block would override the provider's `ANTHROPIC_BASE_URL`. The user's `~/.claude/CLAUDE.md` is appended to the system prompt instead. A session in a worktree is pointed at the checkout's auto-memory directory.
+- **The person's own skills.** Skills come from the loaded setting sources, so `~/.claude/skills` would arrive only with `user` - and with the settings that must not load. They are handed over on their own instead, as a second plugin beside the pack: `<data>/person-skills/`, a manifest and a `skills/` linked to the person's folder. Nothing is copied, and the folder is read again for each session, so a skill added later is there for the next one. A session sees them as `person:<skill>`, next to the pack's `bench:<skill>`.
 
 ## Tasks and git
 
