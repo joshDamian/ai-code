@@ -37,10 +37,14 @@ function repo() {
 function setup() {
   const root = tmp('root');
   process.env.BENCH_WORKTREE_ROOT = path.join(root, 'worktrees');
+  // The person's Claude Code folder, so the machine running the tests has no say in
+  // what a session loads. A test that wants their skills writes them in here.
+  const config = path.join(root, 'claude');
+  process.env.CLAUDE_CONFIG_DIR = config;
   const svc = new Service(root, { query: fakeQuery });
   const dir = repo();
   const project = svc.addProject({ path: dir });
-  return { svc, dir, project, root };
+  return { svc, dir, project, root, config };
 }
 
 /** Resolves once `fn` is true, checking as the service changes. */
@@ -449,6 +453,49 @@ test("Bench's plugin is one Claude Code can load: a named manifest, and skills n
     assert.match(front, /^description: .+/m, `${dir}: it has a description`);
     assert.match(front, /^disable-model-invocation: true$/m, `${dir}: it runs in the main session, not a subagent`);
   }
+});
+
+test("a session gets the person's own skills, and nothing else from their Claude Code folder", async () => {
+  const { svc, project, config, root } = setup();
+  fs.mkdirSync(path.join(config, 'skills', 'code-style'), { recursive: true });
+  fs.writeFileSync(path.join(config, 'skills', 'code-style', 'SKILL.md'), "---\nname: code-style\ndescription: The person's code style.\n---\n\nNo semicolons.\n");
+  // A settings file a session must not read: its `env` block is why `user` is no source.
+  fs.writeFileSync(path.join(config, 'settings.json'), JSON.stringify({ model: 'opus', env: { ANTHROPIC_BASE_URL: 'https://not-the-provider.example', PERSON_SETTING: 'yes' } }));
+
+  const s = svc.createSession({ projectId: project.id });
+  // The composer's commands come from a probe: a session that has never run is offered
+  // the person's skills too.
+  await svc.runtime.listCommands(s.id);
+  assert.equal(calls.at(-1).options.plugins.length, 2, 'the probe loads what a session loads');
+
+  svc.send(s.id, 'hi');
+  await until(() => svc.events(s.id).some((e) => e.kind === 'result'));
+  const options = calls.at(-1).options;
+  assert.deepEqual(options.settingSources, ['project', 'local'], 'user settings are still not a source');
+  assert.equal(options.env.PERSON_SETTING, undefined, "so nothing in the person's settings file reaches the session");
+  assert.equal(options.env.ANTHROPIC_BASE_URL, undefined, 'their env block included');
+  assert.deepEqual(options.plugins[0], { type: 'local', path: PACK }, "Bench's pack still comes first");
+  assert.equal(options.plugins.length, 2, "and the person's skills come with it, as a plugin of their own");
+  const person = options.plugins[1].path;
+  assert.equal(JSON.parse(fs.readFileSync(path.join(person, '.claude-plugin', 'plugin.json'), 'utf8')).name, 'person');
+  assert.match(fs.readFileSync(path.join(person, 'skills', 'code-style', 'SKILL.md'), 'utf8'), /No semicolons/, 'the skill itself is there, through the link');
+
+  // Their skills folder is read again for each session, so one added later is there.
+  fs.mkdirSync(path.join(config, 'skills', 'later'), { recursive: true });
+  fs.writeFileSync(path.join(config, 'skills', 'later', 'SKILL.md'), '---\nname: later\ndescription: Added later.\n---\n\nAdded later.\n');
+  const other = svc.createSession({ projectId: project.id });
+  svc.send(other.id, 'hi');
+  assert.match(fs.readFileSync(path.join(calls.at(-1).options.plugins[1].path, 'skills', 'later', 'SKILL.md'), 'utf8'), /Added later/);
+
+  // Someone who moves their Claude Code folder gets the skills there now, not the old ones.
+  const moved = path.join(root, 'claude-moved');
+  fs.mkdirSync(path.join(moved, 'skills', 'moved'), { recursive: true });
+  fs.writeFileSync(path.join(moved, 'skills', 'moved', 'SKILL.md'), '---\nname: moved\ndescription: Moved.\n---\n\nMoved.\n');
+  process.env.CLAUDE_CONFIG_DIR = moved;
+  const third = svc.createSession({ projectId: project.id });
+  svc.send(third.id, 'hi');
+  assert.match(fs.readFileSync(path.join(calls.at(-1).options.plugins[1].path, 'skills', 'moved', 'SKILL.md'), 'utf8'), /Moved/);
+  svc.shutdown();
 });
 
 // -- a task's check ---------------------------------------------------------------------
