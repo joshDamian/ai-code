@@ -1,4 +1,6 @@
 // @ts-check
+import fs from 'node:fs';
+import path from 'node:path';
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { MODES } from './runtime.mjs';
@@ -47,6 +49,10 @@ export const TOOL_TIMEOUT_MS = (WAIT_MAX_S + 300) * 1000;
 // A review that outlasts the tool's wait is still recorded when it ends, up to this long.
 const REVIEW_KEEP_MS = 3 * 60 * 60 * 1000;
 const FINDINGS_CHARS = 20000;
+// A design review's screenshots: how many, and how large each may be, since they travel
+// with the reviewer's first message.
+const SHOTS_MAX = 24;
+const SHOT_BYTES = 5 * 1024 * 1024;
 
 const INSTRUCTIONS = `Bench runs this session. These tools show and act on the task and project this session belongs to.
 
@@ -54,7 +60,7 @@ const INSTRUCTIONS = `Bench runs this session. These tools show and act on the t
 - A trail and the person: log records a decision with its evidence in the task's decision log - evidence is what you measured or saw, not what you believe. notify sends a push notification to the person's devices, at most one a minute; use it when they need to know or act, not for progress.
 - The project: list_tasks, get_task, create_task, list_sessions, session_status, list_models.
 - Other sessions: start_session (a new session in this task, another task or the project's checkout, on any enabled model), send_to_session, wait_for_session (until it is idle, waiting on the person, or errored; returns the end of its reply).
-- A second opinion: request_review has a model of a different family review this task's change against what done means, waits for it, records its findings in the task's log, and returns them. Check each finding in the code before acting on it.
+- A second opinion: request_review has a model of a different family review this task's change against what done means, waits for it, records its findings in the task's log, and returns them. Given \`screenshots\`, it is a design review: the critic judges the rendered UI in them against a design rubric instead of the diff. Check each finding before acting on it.
 
 Ids can be shortened to any unique prefix of 4 or more characters.
 
@@ -395,7 +401,7 @@ function underCap(svc, projectId) {
  * Waits out a reviewer, then records what it found on the task. A plan it offers by asking
  * to leave Plan mode is taken as its findings, and the request declined so it stops there.
  * Runs on after request_review returns, so a long review is still recorded when it ends.
- * @param {Service} svc @param {string} reviewerId @param {{taskId:string, by:string, askedBy:string}} o
+ * @param {Service} svc @param {string} reviewerId @param {{taskId:string, by:string, askedBy:string, design?:boolean}} o
  * @returns {Promise<{session: Session|null, findings: string|null, entry: import('./contract.mjs').TaskLogEntry|null}>}
  */
 async function finishReview(svc, reviewerId, o) {
@@ -413,7 +419,7 @@ async function finishReview(svc, reviewerId, o) {
     if (!session || !settled || session.status === 'error') return { session, findings: null, entry: null };
     const reply = lastReply(svc, reviewerId)?.text || '';
     const findings = cut([plan, reply].filter(Boolean).join('\n\n').trim(), FINDINGS_CHARS) || '(the reviewer gave no reply)';
-    const entry = svc.recordReview(o.taskId, { reviewer: reviewerId, by: o.by, findings, askedBy: o.askedBy });
+    const entry = svc.recordReview(o.taskId, { reviewer: reviewerId, by: o.by, findings, askedBy: o.askedBy, design: o.design });
     return { session, findings, entry };
   }
 }
@@ -437,6 +443,57 @@ function reviewBrief(svc, t, focus) {
       'Find concrete problems in this diff against what done means. Read the surrounding code, and run read-only commands if they help you be sure.',
       'For each problem: file:line, what goes wrong, and how to see it (an input, a command, a test).',
       'No style notes, no praise, no summary of the change. "Nothing found" is a valid answer.',
+      'Reply with the findings as plain text, numbered. Do not call ExitPlanMode and do not edit anything.',
+    ].join('\n'),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+/**
+ * A design review's screenshots, read from disk: paths relative to the task's worktree or
+ * absolute, each a PNG, JPEG or WebP by its bytes, not its name.
+ * @param {Task} t @param {string[]} paths @returns {{path:string, media_type:string, data:string}[]}
+ */
+function readShots(t, paths) {
+  if (paths.length > SHOTS_MAX) throw new Error(`At most ${SHOTS_MAX} screenshots per review; pick the key routes.`);
+  return paths.map((p) => {
+    const file = path.resolve(t.worktree, p);
+    const st = fs.statSync(file, { throwIfNoEntry: false });
+    if (!st?.isFile()) throw new Error(`No screenshot at ${file}. Take them first (verify-ui), then pass their paths.`);
+    if (st.size > SHOT_BYTES) throw new Error(`${file} is ${Math.round(st.size / 1024)} KB; a screenshot may be at most ${SHOT_BYTES / 1024 / 1024} MB.`);
+    const buf = fs.readFileSync(file);
+    const media_type =
+      buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) ? 'image/png'
+      : buf[0] === 0xff && buf[1] === 0xd8 ? 'image/jpeg'
+      : buf.subarray(0, 4).toString() === 'RIFF' && buf.subarray(8, 12).toString() === 'WEBP' ? 'image/webp'
+      : null;
+    if (!media_type) throw new Error(`${file} is not a PNG, JPEG or WebP image.`);
+    return { path: file, media_type, data: buf.toString('base64') };
+  });
+}
+
+/** A design reviewer's first message: the bar, the screenshots and the rubric. @param {Task} t @param {string[]} shots @param {string} [focus] */
+function designBrief(t, shots, focus) {
+  return [
+    `You are a senior product designer reviewing the rendered UI of another session's work on the task "${t.title}", in this worktree. You are in Plan mode: read only, change nothing.`,
+    `What done means for this task: ${t.done || '(not written down; judge it by the task title and the screens themselves)'}`,
+    `The screenshots are attached to this message, in this order, and on disk where Read opens them again. Each name says its route, width and theme:
+${shots.map((p) => `- ${p}`).join('\n')}`,
+    'Judge what is on screen, not the code. If the project has design tokens or a Design.md, read them: a value on screen that is not in them is a finding.',
+    [
+      'The rubric:',
+      '- Visual hierarchy: one primary action per view; the eye lands where the task is.',
+      '- Typographic scale: a few deliberate sizes and weights, not many near-misses.',
+      '- Spacing: a consistent rhythm; related things grouped, sections clearly separated.',
+      '- States: empty, loading and error look designed, not left over.',
+      '- Responsiveness: the phone width is designed, not squeezed; nothing clipped or overflowing.',
+      '- Polish: alignment, contrast in both themes, consistent radii and icons, nothing that looks like a default.',
+    ].join('\n'),
+    focus ? `Look hardest at: ${focus}` : null,
+    [
+      'Return the reasons a senior designer would reject this - at most three, the most serious first. For each: which screenshot, what is wrong, which rubric line, and what it should be instead.',
+      'Concrete only: no praise, no summary, no "consider". "Nothing found" is a valid answer.',
       'Reply with the findings as plain text, numbered. Do not call ExitPlanMode and do not edit anything.',
     ].join('\n'),
   ]
@@ -732,28 +789,32 @@ export function benchTools(svc, sessionId) {
 
     tool(
       'request_review',
-      `Has a model of a different family review this task's change against what done means: a fresh session in this task's worktree, in Plan mode (read-only), on the first enabled provider of another family with its key set, else your own provider in a fresh context (the result says which). Waits for it up to \`timeout_s\` (default ${WAIT_S}, at most ${WAIT_MAX_S}), records its findings in the task's log, and returns them. Check each finding in the code before acting on it.`,
+      `Has a model of a different family review this task's change against what done means: a fresh session in this task's worktree, in Plan mode (read-only), on the first enabled provider of another family with its key set, else your own provider in a fresh context (the result says which). Waits for it up to \`timeout_s\` (default ${WAIT_S}, at most ${WAIT_MAX_S}), records its findings in the task's log, and returns them. Given \`screenshots\` of the rendered UI, it is a design review: the critic judges the screens against a design rubric (hierarchy, type scale, spacing, states, responsiveness, polish) instead of the diff. Check each finding before acting on it.`,
       {
         provider: z.string().optional().describe('Provider id or name to review on, instead of the first of another family'),
         model: z.string().optional().describe('Model id or name to review with'),
         focus: z.string().optional().describe('What to look hardest at'),
         timeout_s: z.number().int().positive().max(WAIT_MAX_S).optional().describe(`Seconds to wait at most; default ${WAIT_S}. A review still running then is recorded when it ends.`),
+        screenshots: z.array(z.string()).max(SHOTS_MAX).optional().describe('Screenshot files (PNG, JPEG or WebP; relative to the worktree or absolute) of the rendered UI. Given these, it is a design review: the critic judges the screens against a design rubric, not the diff.'),
       },
-      guard(async ({ provider, model, focus, timeout_s }, /** @type {any} */ extra) => {
+      guard(async ({ provider, model, focus, timeout_s, screenshots }, /** @type {any} */ extra) => {
         const { me, task } = mine();
         oneLevel(me, task, 'request reviews');
         if (task.state !== 'active') return no(`The task is ${task.state}; there is nothing to review.`);
+        const shots = screenshots?.length ? readShots(task, screenshots) : null;
+        const kind = shots ? 'Design review' : 'Review';
         const chosen = provider || model ? { ...pickModel(svc, provider, model), fallback: false } : pickReviewer(svc, me);
         underCap(svc, me.project_id);
         const reviewer = svc.createSession({
           projectId: me.project_id,
           taskId: task.id,
-          title: `Review: ${task.title}`,
+          title: `${kind}: ${task.title}`,
           providerId: chosen.providerId,
           modelId: chosen.modelId,
           mode: 'plan',
           effort: null,
-          prompt: reviewBrief(svc, task, focus),
+          prompt: shots ? designBrief(task, shots.map((x) => x.path), focus) : reviewBrief(svc, task, focus),
+          images: shots?.map(({ media_type, data }) => ({ media_type, data })),
           startedBy: me.id,
           purpose: 'review',
         });
@@ -765,15 +826,15 @@ export function benchTools(svc, sessionId) {
           : sameFamily
             ? `Note: ${by} is the same model family as this session; it reviewed in a fresh context.`
             : null;
-        const done = finishReview(svc, reviewer.id, { taskId: task.id, by, askedBy: me.id });
+        const done = finishReview(svc, reviewer.id, { taskId: task.id, by, askedBy: me.id, design: !!shots });
         // Stop waiting early when the reviewer needs the person for anything but leaving Plan mode.
         const blocked = (/** @type {Session} */ s) => s.status === 'idle' || s.status === 'error' || svc.runtime.pending(s.id).some((a) => a.tool !== 'ExitPlanMode');
         const { session, settled } = await watch(svc, reviewer.id, blocked, waitMs(timeout_s), extra?.signal);
-        const head = [`Review by ${by}, in Plan mode in this task's worktree (session ${short(reviewer.id)}).`, note].filter(Boolean).join('\n');
+        const head = [`${kind} by ${by}, in Plan mode in this task's worktree (session ${short(reviewer.id)})${shots ? `, of ${plural(shots.length, 'screenshot')}` : ''}.`, note].filter(Boolean).join('\n');
         if (settled && session && session.status !== 'waiting') {
           const r = await done;
           if (!r.findings) return no(`${head}\nThe review failed, so nothing was recorded.${r.session?.error ? `\n${quoted('its error', tail(r.session.error, 600))}` : ''}`);
-          return ok(`${head}\nRecorded in the task's log as entry ${r.entry?.id}.\n${quoted("the reviewer's findings", r.findings)}\nCheck each finding in the code before acting on it: real (fix it, then run_check), not real (say why), or the person's call.`);
+          return ok(`${head}\nRecorded in the task's log as entry ${r.entry?.id}.\n${quoted("the reviewer's findings", r.findings)}\n${shots ? "Check each finding against the screens before acting on it: real (fix it, re-run design-check and re-shoot), not real (say why), or the person's call." : "Check each finding in the code before acting on it: real (fix it, then run_check), not real (say why), or the person's call."}`);
         }
         const why = settled && session ? `The reviewer is waiting on the person: ${svc.runtime.pending(session.id).map((a) => a.title || a.tool).join('; ')}.` : settled ? 'The review session is gone.' : `The reviewer is still working after ${Math.round(waitMs(timeout_s) / 1000)}s.`;
         return ok(`${head}\n${why} Its findings will be recorded in the task's log when it finishes; wait_for_session ${short(reviewer.id)} waits for it, and task_status shows the log.`);

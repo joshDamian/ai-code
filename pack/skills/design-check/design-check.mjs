@@ -31,6 +31,8 @@ const USAGE = `design-check - render a page and hold it to the mechanical rules.
   --ignore <sel,...>    selectors to leave alone
   --shots <dir>         also write screenshots here (they are the before/after evidence)
   --shots-widths <a,b>  widths for --shots (default: 1280,390)
+  --shots-themes <a,b>  themes for --shots (default: light); any other adds "-<theme>" to the name
+  --click <selector>    also shoot each route after clicking this, named "-<selector>"; repeatable
   --only-shots          screenshots only, no audit
   --label <name>        prefix for screenshot names, e.g. "after"
   --wait <ms>           wait this long for the app to answer before giving up
@@ -533,7 +535,7 @@ function motionFindings(motion, route) {
 /** @param {string[]} argv @param {Record<string, any>} base */
 function options(argv, base) {
   /** @type {Record<string, any>} */
-  const o = { routes: ['/'], widths: [280, 320, 414], themes: ['light', 'dark'], shotsWidths: [1280, 390], ignore: [], grid: 8, width: 1280, wait: 0, json: false, ...base };
+  const o = { routes: ['/'], widths: [280, 320, 414], themes: ['light', 'dark'], shotsWidths: [1280, 390], shotsThemes: ['light'], click: [], ignore: [], grid: 8, width: 1280, wait: 0, json: false, ...base };
   const list = (/** @type {string} */ v) => String(v).split(',').map((s) => s.trim()).filter(Boolean);
   for (let i = 0; i < argv.length; i++) {
     const [flag, inline] = argv[i].includes('=') ? argv[i].split(/=(.*)/s) : [argv[i], null];
@@ -552,6 +554,9 @@ function options(argv, base) {
       case '--ignore': o.ignore = [...o.ignore, ...list(next())]; break;
       case '--shots': o.shots = next(); break;
       case '--shots-widths': o.shotsWidths = list(next()).map(Number); break;
+      case '--shots-themes': o.shotsThemes = list(next()); break;
+      // One selector each, since a selector may itself hold a comma.
+      case '--click': o.click = [...o.click, next()]; break;
       case '--only-shots': o.onlyShots = true; break;
       case '--label': o.label = next(); break;
       case '--wait': o.wait = Number(next()); break;
@@ -775,13 +780,28 @@ async function main() {
       }
 
       if (o.shots) {
-        for (const width of o.shotsWidths) {
-          await page.setMedia({ colorScheme: 'light' });
-          await page.setViewport(width, 900);
-          if (!(await page.goto(url)).ok) throw new Unrenderable(`${url} did not render at ${width}px for its screenshot`);
-          const file = path.resolve(cwd, o.shots, `${o.label ? `${o.label}-` : ''}${slug(route)}-${width}.png`);
-          await page.screenshot(file);
-          shots.push(file.endsWith(cwd) ? file : path.relative(cwd, file));
+        for (const theme of o.shotsThemes) {
+          for (const width of o.shotsWidths) {
+            // Each state from a fresh load, so one click's menu is not in the next one's picture.
+            for (const click of [null, ...o.click]) {
+              await page.setMedia({ colorScheme: theme });
+              await page.setViewport(width, 900);
+              if (!(await page.goto(url)).ok) throw new Unrenderable(`${url} did not render at ${width}px for its screenshot`);
+              if (click) {
+                const hit = await page.evaluate(`(() => { const el = document.querySelector(${JSON.stringify(click)}); if (!el) return false; el.click(); return true; })()`);
+                // Nothing to click here is not a picture of the clicked state, so none is taken.
+                if (!hit) {
+                  page.note(`--click ${click}: nothing matches it on ${route}, so no shot of it there`);
+                  continue;
+                }
+                await new Promise((r) => setTimeout(r, 300));
+              }
+              const name = `${o.label ? `${o.label}-` : ''}${slug(route)}-${width}${click ? `-${slug(click)}` : ''}${theme === 'light' ? '' : `-${theme}`}.png`;
+              const file = path.resolve(cwd, o.shots, name);
+              await page.screenshot(file);
+              shots.push(file.endsWith(cwd) ? file : path.relative(cwd, file));
+            }
+          }
         }
       }
     }

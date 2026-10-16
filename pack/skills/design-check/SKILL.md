@@ -9,7 +9,7 @@ disable-model-invocation: true
 A session can see a page's HTML but not the page. This renders it in a real browser and holds it to what a machine can judge. It cannot tell you the layout is right or the design is any good - `verify-ui` and the person's eyes are for that.
 
 1. Find how the app runs and at what URL: package scripts, README, the project's own verify skill. Start it. Every command you write down, run first.
-2. Find the design tokens - a CSS file of custom properties, or JSON of values. The gate looks for the usual names itself (`tokens.css`, `design-tokens.json`, `src/styles/tokens.css`) and takes `--tokens <file>` for anything else. **No token file: say so and move on** - the colour and spacing token rules are skipped, and the gate says so in its report. Do not add a token file so the gate has something to read.
+2. Find the design tokens - a CSS file of custom properties, or JSON of values. The gate looks for the usual names itself (`tokens.css`, `design-tokens.json`, `src/styles/tokens.css`) and takes `--tokens <file>` for anything else. **No token file: say so and move on** - the colour and spacing token rules are skipped, and the gate says so in its report. Do not add a token file so the gate has something to read; a project gets one through `design-tokens`, with the person.
 3. Write `.bench/design-check.json` so every later run and the task's check judge the same pages:
    ```json
    { "routes": ["/", "/settings"], "themes": ["light", "dark"], "grid": 8, "wait": 30000 }

@@ -486,6 +486,49 @@ test('request_review reviews on a different model family, records the findings, 
   svc.shutdown();
 });
 
+test('request_review with screenshots is a design review of the rendered UI, recorded in the task log', async () => {
+  const { svc, project } = setup();
+  process.env.DEEPSEEK_API_KEY = 'test-key';
+  svc.updateProvider('deepseek-claude-code', { enabled: true });
+  const { task, session } = svc.createTask(project.id, { title: 'Restyle settings', done: 'looks right' });
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(16)]);
+  fs.mkdirSync(path.join(task.worktree, 'shots'));
+  for (const f of ['home-1280.png', 'home-390-dark.png']) fs.writeFileSync(path.join(task.worktree, 'shots', f), png);
+  fs.writeFileSync(path.join(task.worktree, 'shots', 'notes.png'), 'not a picture');
+
+  const bad = await call(svc, session.id, 'request_review', { screenshots: ['shots/notes.png'] });
+  assert.equal(bad.error, true);
+  assert.match(bad.text, /is not a PNG, JPEG or WebP image/);
+  const missing = await call(svc, session.id, 'request_review', { screenshots: ['shots/gone.png'] });
+  assert.match(missing.text, /No screenshot at .*gone\.png/);
+  assert.equal(svc.sessions({ taskId: task.id }).length, 1, 'no reviewer is started for screenshots that are not there');
+
+  const r = await call(svc, session.id, 'request_review', { screenshots: ['shots/home-1280.png', 'shots/home-390-dark.png'], focus: 'the settings page', timeout_s: 30 });
+  assert.equal(r.error, false, r.text);
+  assert.match(r.text, /^Design review by DeepSeek, DeepSeek V4 Pro, in Plan mode in this task's worktree \(session \w+\), of 2 screenshots\./);
+  assert.match(r.text, /re-run design-check/);
+  // The critic is a fresh session on the other family, told to judge the screens, not the diff.
+  const reviewer = svc.sessions({ taskId: task.id }).find((s) => s.purpose === 'review');
+  assert.ok(reviewer);
+  assert.equal(reviewer.provider_id, 'deepseek-claude-code');
+  assert.equal(reviewer.title, 'Design review: Restyle settings');
+  const asked = svc.events(reviewer.id).find((e) => e.kind === 'user');
+  assert.equal(asked.data.images, 2, 'the screenshots travel with its first message');
+  assert.match(asked.data.text, /senior product designer/);
+  assert.match(asked.data.text, /one primary action per view/);
+  assert.match(asked.data.text, /shots\/home-390-dark\.png/);
+  assert.match(asked.data.text, /Look hardest at: the settings page/);
+
+  const log = svc.taskLog(task.id);
+  assert.equal(log.length, 1);
+  assert.equal(log[0].kind, 'review');
+  assert.match(log[0].decision, /^Design review by DeepSeek, DeepSeek V4 Pro/);
+  assert.match(log[0].evidence, /echo: You are a senior product designer/);
+  assert.equal(svc.events(session.id).filter((e) => e.kind === 'log').length, 1);
+  delete process.env.DEEPSEEK_API_KEY;
+  svc.shutdown();
+});
+
 test('request_review falls back to the caller provider with a note when no other family is ready', async () => {
   const { svc, project } = setup();
   for (const p of ['deepseek-claude-code', 'openrouter', 'fireworks']) svc.updateProvider(p, { enabled: false });

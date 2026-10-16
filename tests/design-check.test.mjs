@@ -143,6 +143,16 @@ test('the screenshots a session shows as evidence are written at both widths', l
   }
 });
 
+test('a design review gets both themes and the clicked state, and no picture of a click that missed', looking, async () => {
+  const dir = copy('good');
+  const { url } = /** @type {any} */ (served.get('good'));
+  const { code, out } = await gate(dir, ['--url', url, '--only-shots', '--shots', 'shots', '--shots-widths', '390', '--shots-themes', 'light,dark', '--click', 'button', '--click', '#nowhere', '--json']);
+  assert.equal(code, 0, `expected the shots to be written, got:\n${out}`);
+  const written = fs.readdirSync(path.join(dir, 'shots')).sort();
+  assert.deepEqual(written, ['home-390-button-dark.png', 'home-390-button.png', 'home-390-dark.png', 'home-390.png']);
+  assert.ok(JSON.parse(out).notes.some((/** @type {string} */ n) => /#nowhere: nothing matches it/.test(n)), 'the missed click is said, not silently skipped');
+});
+
 test('a config file in the project is read, and what it ignores is left alone', looking, async () => {
   const dir = copy('bad');
   fs.mkdirSync(path.join(dir, '.bench'), { recursive: true });

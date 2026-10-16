@@ -475,7 +475,7 @@ test("Bench's plugin is one Claude Code can load: a named manifest, and skills n
   const manifest = JSON.parse(fs.readFileSync(path.join(PACK, '.claude-plugin', 'plugin.json'), 'utf8'));
   assert.equal(manifest.name, 'bench');
   const skills = fs.readdirSync(path.join(PACK, 'skills'));
-  assert.ok(skills.length, 'the pack has skills');
+  for (const name of ['review', 'catch-up', 'verify-ui', 'design-check', 'design-review', 'design-tokens']) assert.ok(skills.includes(name), `the pack ships ${name}`);
   for (const dir of skills) {
     const text = fs.readFileSync(path.join(PACK, 'skills', dir, 'SKILL.md'), 'utf8');
     const front = /^---\n([\s\S]*?)\n---\n/.exec(text)?.[1];
@@ -492,6 +492,22 @@ test("Bench's plugin is one Claude Code can load: a named manifest, and skills n
       assert.match(text, /bench pack/, `${dir}: it says how to find the script it ships`);
     }
   }
+});
+
+test('design-review shoots both themes at both widths and hands the shots to the critic; design-tokens writes the token source the gate reads', () => {
+  // Prose again, so what is held is what it tells a session to run: the shooter's flags must
+  // be ones the shooter takes, and the token file must be one the gate finds by itself.
+  const review = fs.readFileSync(path.join(PACK, 'skills', 'design-review', 'SKILL.md'), 'utf8');
+  const shooter = fs.readFileSync(path.join(PACK, 'skills', 'design-check', 'design-check.mjs'), 'utf8');
+  for (const flag of review.match(/--[a-z][\w-]+/g) || []) assert.ok(shooter.includes(`case '${flag}'`), `design-check.mjs takes ${flag}`);
+  assert.match(review, /--shots-themes light,dark/);
+  assert.match(review, /request_review.*`screenshots`/);
+  assert.match(review, /Nothing found/);
+  const tokens = fs.readFileSync(path.join(PACK, 'skills', 'design-tokens', 'SKILL.md'), 'utf8');
+  assert.match(tokens, /`design-tokens\.json`/);
+  assert.match(tokens, /`Design\.md`/);
+  assert.match(tokens, /do not invent new values/);
+  assert.match(shooter, /'design-tokens\.json'/, 'the gate finds design-tokens.json without being told');
 });
 
 test('design-check leaves later sessions a CLAUDE.md pointer that names skills which exist', () => {

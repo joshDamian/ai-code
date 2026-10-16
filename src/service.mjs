@@ -536,12 +536,13 @@ export class Service extends EventEmitter {
   /**
    * A review of a task's change, in its log: who reviewed it and what it found. It shows in
    * the transcript of the session that asked for it, as a log entry does.
-   * @param {string} taskId @param {{reviewer:string, by:string, findings:string, askedBy?:string|null}} r
-   * `reviewer` is the reviewing session, `by` its provider and model in words.
+   * @param {string} taskId @param {{reviewer:string, by:string, findings:string, askedBy?:string|null, design?:boolean}} r
+   * `reviewer` is the reviewing session, `by` its provider and model in words; `design` for a
+   * review of the rendered UI rather than the diff.
    */
   recordReview(taskId, r) {
     this.task(taskId);
-    const entry = this.store.addLog({ task_id: taskId, session_id: r.reviewer, kind: 'review', decision: `Review by ${r.by}`, evidence: r.findings.trim() || '(no reply)' });
+    const entry = this.store.addLog({ task_id: taskId, session_id: r.reviewer, kind: 'review', decision: `${r.design ? 'Design review' : 'Review'} by ${r.by}`, evidence: r.findings.trim() || '(no reply)' });
     if (r.askedBy) this.runtime.record(r.askedBy, 'log', { decision: entry.decision, evidence: entry.evidence, entry: entry.id, kind: 'review' });
     this.emit('task', this.store.updateTask(taskId, {}));
     return entry;
@@ -585,8 +586,8 @@ export class Service extends EventEmitter {
   /**
    * A session in a task's worktree, or in the project's own checkout when there is no task.
    * `startedBy` is the session that started it through a bench tool; `purpose` is 'review'
-   * for one request_review started.
-   * @param {{projectId:string, taskId?:string|null, title?:string, providerId?:string, modelId?:string|null, mode?:PermissionMode, effort?:string|null, prompt?:string, startedBy?:string|null, purpose?:string|null}} o
+   * for one request_review started. `images` go with the prompt, as a person's pasted ones do.
+   * @param {{projectId:string, taskId?:string|null, title?:string, providerId?:string, modelId?:string|null, mode?:PermissionMode, effort?:string|null, prompt?:string, images?:{media_type:string, data:string}[], startedBy?:string|null, purpose?:string|null}} o
    */
   createSession(o) {
     const p = this.project(o.projectId);
@@ -616,7 +617,7 @@ export class Service extends EventEmitter {
       purpose: o.purpose || null,
     });
     this.runtime.emit('session', s);
-    if (o.prompt?.trim()) this.send(s.id, o.prompt);
+    if (o.prompt?.trim()) this.send(s.id, o.prompt, o.images?.length ? { images: o.images } : undefined);
     return this.session(s.id);
   }
 
