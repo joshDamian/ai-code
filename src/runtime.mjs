@@ -71,15 +71,19 @@ const commandList = (list) => (list || []).map((c) => ({ name: String(c.name), d
 
 export const MODES = /** @type {const} */ (['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']);
 
+/** The person's Claude Code folder: their settings, instructions and skills. */
+function configDir() {
+  return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+}
+
 /**
  * The person's own CLAUDE.md. User settings are not loaded - their `env` block would
  * outrank the provider's routing - so the instructions in that directory are handed
  * over explicitly, which is what a `claude` typed in a terminal would have read.
  */
 function userInstructions() {
-  const home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   try {
-    return fs.readFileSync(path.join(home, 'CLAUDE.md'), 'utf8').trim() || null;
+    return fs.readFileSync(path.join(configDir(), 'CLAUDE.md'), 'utf8').trim() || null;
   } catch {
     return null;
   }
@@ -91,9 +95,57 @@ function userInstructions() {
  * @param {string} projectPath
  */
 function memoryDir(projectPath) {
-  const home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-  const dir = path.join(home, 'projects', projectPath.replace(/[^a-zA-Z0-9]/g, '-'), 'memory');
+  const dir = path.join(configDir(), 'projects', projectPath.replace(/[^a-zA-Z0-9]/g, '-'), 'memory');
   return fs.existsSync(dir) ? dir : null;
+}
+
+/**
+ * The person's own skills, as a plugin a session can load - the way Bench's pack is,
+ * because they cannot arrive any other way.
+ *
+ * Skills come from the setting sources, and a session loads only `project` and `local`:
+ * the `user` source would bring the person's settings in with them, and its `env` block
+ * would outrank the provider's routing. So `~/.claude/skills` is handed over on its own,
+ * as a plugin folder under Bench's data holding a manifest and a `skills/` linked to the
+ * person's own - nothing is copied, and a skill added later is there for the next session.
+ *
+ * Null when the person has no skills - no folder, or an empty one: then a session loads
+ * Bench's pack and its project's skills, exactly as it did before.
+ * @param {string} root where Bench keeps its data
+ */
+function personSkillsPlugin(root) {
+  const skills = path.resolve(configDir(), 'skills');
+  try {
+    if (!fs.readdirSync(skills).length) return null;
+  } catch {
+    return null;
+  }
+  const dir = path.join(root, 'person-skills');
+  const manifest = path.join(dir, '.claude-plugin', 'plugin.json');
+  const link = path.join(dir, 'skills');
+  try {
+    if (!fs.existsSync(manifest)) {
+      fs.mkdirSync(path.dirname(manifest), { recursive: true });
+      fs.writeFileSync(manifest, `${JSON.stringify({ name: 'person', version: '1.0.0', description: "The person's own skills, from ~/.claude/skills." }, null, 2)}\n`);
+    }
+    // A link left behind by a folder that moved, or by a person who moved their Claude
+    // Code folder, is replaced rather than left pointing at nothing.
+    /** @type {string|null} */
+    let points = null;
+    try {
+      points = fs.readlinkSync(link);
+    } catch {
+      /* not a link, or not there yet */
+    }
+    if (points !== skills) {
+      fs.rmSync(link, { recursive: true, force: true });
+      fs.symlinkSync(skills, link, 'junction');
+    }
+  } catch {
+    // A folder Bench cannot write to costs the person their skills, not their session.
+    return null;
+  }
+  return dir;
 }
 
 /**
@@ -256,8 +308,9 @@ export class Runtime extends EventEmitter {
 
   /**
    * The slash commands a session can use, asking Claude Code when nothing live or recent
-   * says. The list depends on the folder (its commands and skills) and on Bench's plugin,
-   * not on the conversation, so a session that has never run gets one too.
+   * says. The list depends on the folder (its commands and skills) and on the plugins a
+   * session loads - Bench's pack, and the person's own skills - not on the conversation,
+   * so a session that has never run gets one too.
    * @param {string} id @returns {Promise<SlashCommand[]>}
    */
   async listCommands(id) {
@@ -294,7 +347,7 @@ export class Runtime extends EventEmitter {
       /* a provider missing its key still has commands to list */
     }
     /** @type {any} */
-    const q = this.query({ prompt: /** @type {any} */ (idle), options: { cwd: s.cwd, env, settingSources: ['project', 'local'], plugins: [{ type: 'local', path: PACK }] } });
+    const q = this.query({ prompt: /** @type {any} */ (idle), options: { cwd: s.cwd, env, settingSources: ['project', 'local'], plugins: this.#plugins() } });
     /** @type {ReturnType<typeof setTimeout>|undefined} */
     let timer;
     try {
@@ -460,6 +513,16 @@ export class Runtime extends EventEmitter {
     this.#update(id, { status: this.#pendingFor(id) ? 'waiting' : 'running', error: null, ...(first && title && /^New (session|task)/.test(s.title) ? { title } : {}) });
   }
 
+  /**
+   * The plugins a session loads, wherever it is: Bench's own pack, which every session
+   * gets, and the person's own skills when they have any.
+   * @returns {import('@anthropic-ai/claude-agent-sdk').SdkPluginConfig[]}
+   */
+  #plugins() {
+    const person = personSkillsPlugin(this.store.dir);
+    return person ? [{ type: 'local', path: PACK }, { type: 'local', path: person }] : [{ type: 'local', path: PACK }];
+  }
+
   /** @param {Session} s */
   #start(s) {
     const provider = this.store.getProvider(s.provider_id);
@@ -481,7 +544,7 @@ export class Runtime extends EventEmitter {
       additionalDirectories: [this.attachmentsDir(s.id), scratch],
       env,
       settingSources: ['project', 'local'],
-      plugins: [{ type: 'local', path: PACK }],
+      plugins: this.#plugins(),
       permissionMode: /** @type {PermissionMode} */ (s.permission_mode),
       allowDangerouslySkipPermissions: true,
       includePartialMessages: true,
