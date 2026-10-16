@@ -35,4 +35,4 @@ A task that has to be done in an order, where later steps depend on earlier answ
 - Continue and Back as two equal primary buttons.
 
 ## Why
-Splitting a long, dependent task into named steps lets a person hold one question at a time and see how far they have to go. The review step catches mistakes before they cost anything, and keeping answers across Back and Exit makes it safe to explore. The navigation stays in one place on every step so the hand never hunts for it.
+Splitting a long, dependent task into named steps lets a person hold one question at a time and see how far they have to go. The review step catches mistakes before they cost anything, and keeping answers across Back and Exit makes it safe to explore. The navigation stays in one place on every step so the hand never hunts for it. Continue sits on the right here, unlike a `form`'s left-aligned button, because Back and Continue are a direction - backwards on the left, forwards on the right - and the pair only reads that way side by side.
