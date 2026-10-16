@@ -8,14 +8,14 @@ disable-model-invocation: true
 
 A passing gate is never evidence of taste. `design-check` holds the page to what has numbers; this asks a separate critic, in a fresh context on another model family, what a senior designer would reject.
 
-1. Shoot the key routes - the ones this task touched, plus the main one - at 1280 and 390, light and dark, with the shooter `verify-ui` uses. `--click` (repeatable, one selector each) also shoots each route after clicking it: the menu, the dialog, the primary button. `PACK="$(bench pack)"`:
+1. Read `Design-brief.md` if there is one: each view's states and both widths are what you have to shoot. Shoot the key routes - the ones this task touched, plus the main one - at 1280 and 390, light and dark, with the shooter `verify-ui` uses. `--click` (repeatable, one selector each) also shoots each route after clicking it: the menu, the dialog, the primary button. `PACK="$(bench pack)"`:
    ```sh
    node "$PACK/skills/design-check/design-check.mjs" --url http://127.0.0.1:5173 --routes /,/settings \
      --only-shots --shots .bench/evidence --label review --shots-themes light,dark \
      --click '[aria-haspopup]' --click 'button[type=submit]'
    ```
    Empty, loading and error states are part of the rubric: reach them however the app allows - a route, a query flag, an empty database, the server stopped - and shoot those too. Open every PNG yourself first; a blank or half-loaded shot is a broken run, not something to review. A `--click` that matched nothing is named in the output's notes - fix the selector rather than drop it.
-2. Call `request_review` with `screenshots` set to those paths (at most 24 - pick, do not dump) and `focus` naming what changed. The critic judges them against the rubric - visual hierarchy (one primary action per view), typographic scale, spacing, empty/loading/error states, responsiveness, polish - and against `design-tokens.json` / `Design.md` if the project has them. Its findings are recorded in the task's log and come back to you.
+2. Call `request_review` with `screenshots` set to those paths (at most 24 - pick, do not dump) and `focus` naming what changed. The critic judges them against the rubric - visual hierarchy (one primary action per view), typographic scale, spacing, empty/loading/error states, responsiveness, polish - and against `design-tokens.json` / `Design.md` and `Design-brief.md` if the project has them. A layout that contradicts the brief - a different primary action, a hierarchy in another order, a missing state, a phone layout that is not the one it describes - is a finding, exactly like a value on screen that is not in the tokens. Name in `focus` which views of the brief the shots show. Its findings are recorded in the task's log and come back to you.
 3. Triage each finding against the screens and the code:
    - **Real** - fix it from the tokens (no new hardcoded values), re-run `design-check`, re-shoot, and look at the new picture.
    - **Not real** - say why, with what you saw: the screenshot, the token, the rule.

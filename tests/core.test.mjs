@@ -475,7 +475,7 @@ test("Bench's plugin is one Claude Code can load: a named manifest, and skills n
   const manifest = JSON.parse(fs.readFileSync(path.join(PACK, '.claude-plugin', 'plugin.json'), 'utf8'));
   assert.equal(manifest.name, 'bench');
   const skills = fs.readdirSync(path.join(PACK, 'skills'));
-  for (const name of ['review', 'catch-up', 'verify-ui', 'design-check', 'design-review', 'design-tokens']) assert.ok(skills.includes(name), `the pack ships ${name}`);
+  for (const name of ['review', 'catch-up', 'verify-ui', 'design-check', 'design-review', 'design-tokens', 'design-brief']) assert.ok(skills.includes(name), `the pack ships ${name}`);
   for (const dir of skills) {
     const text = fs.readFileSync(path.join(PACK, 'skills', dir, 'SKILL.md'), 'utf8');
     const front = /^---\n([\s\S]*?)\n---\n/.exec(text)?.[1];
@@ -508,6 +508,75 @@ test('design-review shoots both themes at both widths and hands the shots to the
   assert.match(tokens, /`Design\.md`/);
   assert.match(tokens, /do not invent new values/);
   assert.match(shooter, /'design-tokens\.json'/, 'the gate finds design-tokens.json without being told');
+});
+
+test('the pattern library is one shape per file, and speaks the tokens design-tokens writes', () => {
+  // A pattern is what a session composes a screen from, so it is held to the same system as
+  // the rest: the token names it uses must be ones design-tokens tells a session to write, and
+  // every size it gives must sit on the 4/8 grid or the type scale, or a session building
+  // from it would fail design-check on the first page.
+  const tokens = fs.readFileSync(path.join(PACK, 'skills', 'design-tokens', 'SKILL.md'), 'utf8');
+  const colours = [.../the same names in both: ([^)]*)\)/.exec(tokens)[1].matchAll(/`([\w-]+)`/g)].map((m) => m[1]);
+  assert.ok(colours.includes('text-muted'), 'design-tokens names its colours');
+  const scale = /a scale - ([\d, ]+)/.exec(tokens)[1].split(',').map(Number);
+  const groups = ['color', 'font', 'line-height', 'space', 'radius', 'shadow'];
+  const dir = path.join(PACK, 'patterns');
+  const names = fs.readdirSync(dir).map((f) => { assert.match(f, /^[a-z]+(-[a-z]+)*\.md$/, `${f} is a kebab-case markdown file`); return f.slice(0, -3); });
+  for (const name of ['page-shell', 'list-detail', 'form', 'settings', 'states', 'dashboard', 'auth', 'cards-grid']) assert.ok(names.includes(name), `the library has ${name}`);
+  assert.ok(names.length >= 8 && names.length <= 12, `${names.length} patterns: enough to compose from, few enough to read`);
+  const headings = ['When to use', 'The layout', 'States', 'Spacing & rhythm', 'Tokens', 'What to avoid', 'Why'];
+  for (const name of names) {
+    const text = fs.readFileSync(path.join(dir, `${name}.md`), 'utf8');
+    assert.match(text, new RegExp(`^# ${name}\n`), `${name}: titled with its name`);
+    assert.deepEqual([...text.matchAll(/^## (.+)$/gm)].map((m) => m[1]), headings, `${name}: the same sections, in order`);
+    const section = (h) => text.split(`## ${h}\n`)[1].split('\n## ')[0].trim();
+    for (const h of headings) assert.ok(section(h).length > 80, `${name}: ${h} says something`);
+    const layout = section('The layout');
+    assert.match(layout, /primary/i, `${name}: the layout says where the primary action is`);
+    if (name !== 'states') assert.match(layout, /\b390\b/, `${name}: the layout says what changes at phone width`);
+    assert.ok(section('What to avoid').split('\n').filter((l) => l.startsWith('- ')).length >= 4, `${name}: names the tells it exists to prevent`);
+    for (const [, group, rest] of text.matchAll(/`([a-z-]+)\.([\w.*-]+)`/g)) {
+      assert.ok(groups.includes(group), `${name}: \`${group}.${rest}\` is a token group design-tokens writes`);
+      if (group === 'color') assert.ok(colours.includes(rest), `${name}: color.${rest} is a colour design-tokens names in both themes`);
+    }
+    for (const [, n] of text.matchAll(/(\d+)px/g)) {
+      const px = Number(n);
+      assert.ok(px % 4 === 0 || scale.includes(px) || [1, 2, 390].includes(px), `${name}: ${px}px is on the grid or the type scale`);
+    }
+    for (const [, ref] of text.matchAll(/`([a-z]+(?:-[a-z]+)*)`/g)) assert.ok(names.includes(ref), `${name}: \`${ref}\` is a pattern in the library`);
+    assert.doesNotMatch(text, /clean and modern|sleek|modern look/i, `${name}: concrete, not aspirational`);
+  }
+});
+
+test('design-brief reads the patterns, asks once, and writes the brief that design-review holds the work to', () => {
+  const brief = fs.readFileSync(path.join(PACK, 'skills', 'design-brief', 'SKILL.md'), 'utf8');
+  // The list it reads from is the library on disk: a pattern added or renamed has to be
+  // offered here too, or a session would never reach for it.
+  const listed = [...brief.matchAll(/^ {3}- `([\w-]+)` - /gm)].map((m) => m[1]).sort();
+  assert.deepEqual(listed, fs.readdirSync(path.join(PACK, 'patterns')).map((f) => f.slice(0, -3)).sort());
+  assert.match(brief, /bench pack/, 'it says how to find the patterns');
+  assert.match(brief, /one `AskUserQuestion` round at most/);
+  assert.match(brief, /Write `Design-brief\.md`/);
+  // The template is what later sessions and the critic check against, so every part the
+  // brief promises is a field of it: the job, the one primary action, the hierarchy, all four
+  // states, and the layout at the two widths the shooter takes.
+  const template = /```md\n\s*(# Design brief[\s\S]*?)```/.exec(brief)?.[1];
+  assert.ok(template, 'it gives the brief a shape');
+  for (const field of ['**Job:**', '**Pattern:**', '**Primary action:**', '**Hierarchy:**', '- Empty:', '- Loading:', '- Error:', '- Happy path:', '**Layout - desktop (1280):**', '**Layout - phone (390):**']) {
+    assert.ok(template.includes(field), `the brief has ${field}`);
+  }
+  const block = /<!-- bench:design-brief -->\n([\s\S]*?)\n\s*<!-- \/bench:design-brief -->/.exec(brief)?.[1];
+  assert.ok(block, 'the CLAUDE.md pointer is fenced so a second run replaces it');
+  assert.match(block, /`Design-brief\.md`/);
+  assert.match(brief, /^\*\*Reply:\*\*/m);
+
+  // The brief only has value if something reads it.
+  const review = fs.readFileSync(path.join(PACK, 'skills', 'design-review', 'SKILL.md'), 'utf8');
+  assert.match(review, /`Design-brief\.md`/);
+  assert.match(review, /contradicts the brief .* is a finding, exactly like a value on screen that is not in the tokens/);
+  const tokens = fs.readFileSync(path.join(PACK, 'skills', 'design-tokens', 'SKILL.md'), 'utf8');
+  assert.match(tokens, /patterns\//, 'design-tokens points on to the patterns');
+  assert.match(tokens, /`design-brief`/);
 });
 
 test('design-check leaves later sessions a CLAUDE.md pointer that names skills which exist', () => {

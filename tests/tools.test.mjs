@@ -518,6 +518,11 @@ test('request_review with screenshots is a design review of the rendered UI, rec
   assert.match(asked.data.text, /one primary action per view/);
   assert.match(asked.data.text, /shots\/home-390-dark\.png/);
   assert.match(asked.data.text, /Look hardest at: the settings page/);
+  // The brief and the patterns are what it judges the layout against, and the patterns'
+  // folder it is pointed at is the one the pack ships.
+  assert.match(asked.data.text, /Design-brief\.md.*contradicts the brief is a finding/);
+  const patterns = /The patterns the brief names are in (\S+);/.exec(asked.data.text)?.[1];
+  assert.ok(patterns && fs.existsSync(path.join(patterns, 'page-shell.md')), 'the critic is pointed at the real pattern library');
 
   const log = svc.taskLog(task.id);
   assert.equal(log.length, 1);

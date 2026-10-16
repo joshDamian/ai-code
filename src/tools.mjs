@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { MODES } from './runtime.mjs';
+import { MODES, PACK } from './runtime.mjs';
 import { mergeBase, revParse } from './git.mjs';
 
 /** @typedef {import('./contract.mjs').Task} Task */
@@ -481,6 +481,7 @@ function designBrief(t, shots, focus) {
     `The screenshots are attached to this message, in this order, and on disk where Read opens them again. Each name says its route, width and theme:
 ${shots.map((p) => `- ${p}`).join('\n')}`,
     'Judge what is on screen, not the code. If the project has design tokens or a Design.md, read them: a value on screen that is not in them is a finding.',
+    `If the project has a Design-brief.md, read it: each view's job, its one primary action and where it lives, its hierarchy, its states, and its layout at desktop and phone width. A screen that contradicts the brief is a finding, exactly like a value on screen that is not in the tokens. The patterns the brief names are in ${path.join(PACK, 'patterns')}; a screen showing what a pattern's "What to avoid" names is a finding too.`,
     [
       'The rubric:',
       '- Visual hierarchy: one primary action per view; the eye lands where the task is.',
