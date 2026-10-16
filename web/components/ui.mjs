@@ -43,8 +43,8 @@ export function TaskBadge({ state }) {
   return html`<span class="badge ${cls}">${label}</span>`;
 }
 
-/** A modal. Escape and a click outside close it. */
-export function Dialog({ title, onClose, children, wide, actions }) {
+/** A modal. Escape and a click outside close it. `tools` sit at the end of the title row. */
+export function Dialog({ title, onClose, children, wide, actions, tools }) {
   const ref = useRef(null);
   useEffect(() => {
     const prev = document.activeElement;
@@ -66,7 +66,7 @@ export function Dialog({ title, onClose, children, wide, actions }) {
           }
         }}
       >
-        <h2 class="dialog-title">${title}</h2>
+        ${tools ? html`<div class="dialog-head"><h2 class="dialog-title">${title}</h2>${tools}</div>` : html`<h2 class="dialog-title">${title}</h2>`}
         <div class="stack">${children}</div>
         ${actions ? html`<div class="dialog-actions">${actions}</div>` : null}
       </div>
@@ -160,6 +160,9 @@ export function Icon({ name, size = 16 }) {
     stop: 'M4.5 4.5h7v7h-7z',
     send: 'M3 8h9M8.5 4.5 12 8l-3.5 3.5',
     terminal: 'M3 4.5 6 8l-3 3.5M8 11.5h5',
+    // A window with its right side split off: docked beside, and its way back out.
+    dock: 'M2.5 3.5h11v9h-11zM9.5 3.5v9',
+    popout: 'M9 2.5h4.5V7M13.5 2.5 8 8M11.5 9.5v4h-9v-9h4',
     gear: 'M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4',
     attach: 'M10.5 5 6 9.5a1.4 1.4 0 0 0 2 2l5-5a2.8 2.8 0 0 0-4-4l-5 5a4.2 4.2 0 0 0 6 6l4-4',
     check: 'm3.5 8.5 3 3 6-7',

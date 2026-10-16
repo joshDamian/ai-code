@@ -1,5 +1,5 @@
 // A Claude session: its transcript, what it is waiting on, and the box to talk to it.
-import { html, useEffect, useMemo, useRef, useState, recall, remember, isTouch, formatCost, formatDuration } from '../lib.mjs';
+import { html, useEffect, useMemo, useRef, useState, recall, remember, isTouch, shortDir, formatCost, formatDuration } from '../lib.mjs';
 import { api, useStore, watchSession, outboxCount } from '../api.mjs';
 import { Markdown } from '../components/markdown.mjs';
 import { slashMatches } from '../format.mjs';
@@ -21,6 +21,32 @@ const toast = (e) => showToast(e.message || String(e), 'error');
 const eventsKey = (id) => `bench:events:${id}`;
 const EVENTS_CACHED = 150;
 
+// The shell can sit beside the conversation instead of over it. Whether it docks is one
+// choice for every session; whether it is open is per session, so going back to one
+// brings its shell back with it. The dock's width is the person's, within limits the
+// stylesheet keeps (it never takes the chat below a readable column).
+const DOCK_KEY = 'bench:terminal:docked';
+const DOCK_WIDTH_KEY = 'bench:terminal:dock-width';
+const dockOpenKey = (id) => `bench:terminal:open:${id}`;
+const DOCK_MIN = 320;
+const DOCK_DEFAULT = 520;
+// Where docking stops making sense: below this the two columns are each too narrow to
+// use, and the phone layout begins, so the terminal is a modal there whatever was chosen.
+const DOCK_MEDIA = '(min-width: 1000px)';
+
+function useMedia(query) {
+  const get = () => typeof matchMedia === 'function' && matchMedia(query).matches;
+  const [on, setOn] = useState(get);
+  useEffect(() => {
+    if (typeof matchMedia !== 'function') return undefined;
+    const mq = matchMedia(query);
+    const change = () => setOn(mq.matches);
+    mq.addEventListener('change', change);
+    return () => mq.removeEventListener('change', change);
+  }, [query]);
+  return on;
+}
+
 export function SessionPane({ sessionId, onArchived }) {
   const live = useStore((s) => s.sessions.find((x) => x.id === sessionId));
   const providers = useStore((s) => s.providers);
@@ -37,7 +63,20 @@ export function SessionPane({ sessionId, onArchived }) {
   const [commands, setCommands] = useState([]);
   const [more, setMore] = useState(false);
   const [terminal, setTerminal] = useState(false);
-  const [shell, setShell] = useState(false);
+  const [docked, setDocked] = useState(() => recall(DOCK_KEY, false));
+  const [shell, setShellState] = useState(() => docked && recall(dockOpenKey(sessionId), false));
+  const [dockWidth, setDockWidth] = useState(() => recall(DOCK_WIDTH_KEY, DOCK_DEFAULT));
+  const canDock = useMedia(DOCK_MEDIA);
+  const setShell = (open) => {
+    setShellState(open);
+    remember(dockOpenKey(sessionId), open && docked ? true : null);
+  };
+  const dock = (on) => {
+    setDocked(on);
+    remember(DOCK_KEY, on || null);
+    remember(dockOpenKey(sessionId), on && shell ? true : null);
+  };
+  const sectionRef = useRef(null);
   const [sheet, setSheet] = useState(false);
   // The reader is at the bottom (following) or has scrolled up to read. `pinned` is what
   // the auto-scroll follows; `showJump` is the tap-to-catch-up button, offered only when
@@ -163,8 +202,10 @@ export function SessionPane({ sessionId, onArchived }) {
   const modelName = model ? model.display_name || model.name : provider?.name || 'Model';
   const modeName = MODES.find((m) => m.value === s.permission_mode)?.label || s.permission_mode;
   const setMode = (mode) => api.updateSession(s.id, { mode }).catch(toast);
+  const inDock = shell && docked && canDock;
+  const shellTitle = `Terminal · ${s.cwd}`;
   const items = [
-    { label: 'Terminal in this folder', onSelect: () => setShell(true) },
+    inDock ? { label: 'Close the terminal', onSelect: () => setShell(false) } : { label: 'Terminal in this folder', onSelect: () => setShell(true) },
     { label: 'Open in terminal (claude --resume)', disabled: !s.claude_session_id || running, onSelect: () => setTerminal(true) },
     { label: 'Rename', onSelect: rename },
     s.archived_at
@@ -191,65 +232,78 @@ export function SessionPane({ sessionId, onArchived }) {
   const QUICK = [...new Set([suggestion, 'Continue', 'Run the tests', 'Commit it', 'Explain the change'].filter(Boolean))].slice(0, 5);
 
   return html`
-    <section class="session">
-      <header class="session-head">
-        <div class="session-title">
-          <button class="title-btn" type="button" title="Rename" onClick=${rename}>${s.title}</button>
-          <${StatusBadge} status=${s.status} />
-          ${s.cost ? html`<span class="muted mono-sm hide-touch" title="Estimated spend">${formatCost(s.cost)}</span>` : null}
+    <section class="session ${inDock ? 'docked' : ''}" ref=${sectionRef}>
+      <div class="session-main">
+        <header class="session-head">
+          <div class="session-title">
+            <button class="title-btn" type="button" title="Rename" onClick=${rename}>${s.title}</button>
+            <${StatusBadge} status=${s.status} />
+            ${s.cost ? html`<span class="muted mono-sm hide-touch" title="Estimated spend">${formatCost(s.cost)}</span>` : null}
+          </div>
+          <div class="session-controls">
+            <${ModelPicker} compact providers=${providers} value=${{ providerId: s.provider_id, modelId: s.model_id }} onChange=${(v) => api.updateSession(s.id, v).catch(toast)} />
+            <${EffortPicker} compact value=${s.effort} onChange=${(effort) => api.updateSession(s.id, { effort }).catch(toast)} />
+            <${ModePicker} compact value=${s.permission_mode} onChange=${setMode} />
+            <button class="btn sm ghost" type="button" title=${inDock ? 'Close the terminal' : `Terminal in ${s.cwd}`} aria-pressed=${docked && canDock ? String(inDock) : undefined} onClick=${() => setShell(!inDock)}><${Icon} name="terminal" size=${14} /> Terminal</button>
+            <${MoreMenu} items=${items} />
+          </div>
+          <button class="session-chip" type="button" onClick=${() => setSheet(true)} aria-haspopup="dialog">
+            <span class="session-chip-model">${modelName}</span>
+            <span class="session-chip-mode">${modeName}</span>
+            <${Icon} name="chevron" size=${14} />
+          </button>
+        </header>
+        <div
+          class="transcript"
+          ref=${scroller}
+          onScroll=${(e) => {
+            const el = e.currentTarget;
+            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+            pinned.current = atBottom;
+            setShowJump((v) => (atBottom ? false : v));
+          }}
+        >
+          ${more ? html`<button class="btn sm ghost earlier" type="button" onClick=${earlier}>Load earlier</button>` : null}
+          ${events.length === 0 && loaded ? html`<div class="transcript-empty muted">Say what you want done. Claude works in <code>${s.cwd}</code>.</div>` : null}
+          <${FilesContext.Provider} value=${filesCtx}><${Transcript} events=${events} /><//>
+          ${stream.thinking && !stream.text ? html`<div class="msg-thinking live"><span class="muted">Thinking…</span></div>` : null}
+          ${stream.text ? html`<div class="msg assistant streaming"><${Markdown} text=${stream.text} /></div>` : null}
+          ${s.status === 'running' && !stream.text ? html`<div class="working"><span class="dot dot-running"></span> Working…</div>` : null}
+          ${s.status === 'error' && s.error ? html`<div class="notice notice-bad">${s.error}</div>` : null}
+          ${approvals.map((a) => html`<div id=${`approval-${a.id}`} key=${a.id}><${ApprovalCard} approval=${a} /></div>`)}
+          ${showJump ? html`<button class="jump-btn" type="button" onClick=${toBottom}><${Icon} name="down" size=${14} /> New reply</button>` : null}
         </div>
-        <div class="session-controls">
-          <${ModelPicker} compact providers=${providers} value=${{ providerId: s.provider_id, modelId: s.model_id }} onChange=${(v) => api.updateSession(s.id, v).catch(toast)} />
-          <${EffortPicker} compact value=${s.effort} onChange=${(effort) => api.updateSession(s.id, { effort }).catch(toast)} />
-          <${ModePicker} compact value=${s.permission_mode} onChange=${setMode} />
-          <button class="btn sm ghost" type="button" title=${`Terminal in ${s.cwd}`} aria-label="Open terminal" onClick=${() => setShell(true)}><${Icon} name="terminal" size=${14} /> Terminal</button>
-          <${MoreMenu} items=${items} />
-        </div>
-        <button class="session-chip" type="button" onClick=${() => setSheet(true)} aria-haspopup="dialog">
-          <span class="session-chip-model">${modelName}</span>
-          <span class="session-chip-mode">${modeName}</span>
-          <${Icon} name="chevron" size=${14} />
-        </button>
-      </header>
-      <div
-        class="transcript"
-        ref=${scroller}
-        onScroll=${(e) => {
-          const el = e.currentTarget;
-          const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-          pinned.current = atBottom;
-          setShowJump((v) => (atBottom ? false : v));
-        }}
-      >
-        ${more ? html`<button class="btn sm ghost earlier" type="button" onClick=${earlier}>Load earlier</button>` : null}
-        ${events.length === 0 && loaded ? html`<div class="transcript-empty muted">Say what you want done. Claude works in <code>${s.cwd}</code>.</div>` : null}
-        <${FilesContext.Provider} value=${filesCtx}><${Transcript} events=${events} /><//>
-        ${stream.thinking && !stream.text ? html`<div class="msg-thinking live"><span class="muted">Thinking…</span></div>` : null}
-        ${stream.text ? html`<div class="msg assistant streaming"><${Markdown} text=${stream.text} /></div>` : null}
-        ${s.status === 'running' && !stream.text ? html`<div class="working"><span class="dot dot-running"></span> Working…</div>` : null}
-        ${s.status === 'error' && s.error ? html`<div class="notice notice-bad">${s.error}</div>` : null}
-        ${approvals.map((a) => html`<div id=${`approval-${a.id}`} key=${a.id}><${ApprovalCard} approval=${a} /></div>`)}
-        ${showJump ? html`<button class="jump-btn" type="button" onClick=${toBottom}><${Icon} name="down" size=${14} /> New reply</button>` : null}
+        ${approvals.length
+          ? html`<div class="pending-bar">
+              <button class="pending-main" type="button" onClick=${review}>
+                <span class="dot dot-waiting"></span>
+                <span class="pending-text">${approvals.length > 1 ? `${approvals.length} waiting on you` : first.title || `Claude needs you`}</span>
+              </button>
+              ${quickAnswer
+                ? html`<button class="btn sm" type="button" onClick=${() => api.answer(first.id, { allow: true }).catch(toast)}>Allow</button>
+                    <button class="btn sm secondary" type="button" onClick=${() => api.answer(first.id, { allow: false, message: '' }).catch(toast)}>Deny</button>`
+                : html`<button class="btn sm secondary" type="button" onClick=${review}>Review</button>`}
+            </div>`
+          : null}
+        ${s.archived_at
+          ? html`<div class="composer archived muted">
+              ${taskState && taskState !== 'active'
+                ? html`<span>This task is ${taskState}. Its sessions are kept as a record.</span>`
+                : html`<span>Archived. <button class="link-btn" type="button" onClick=${() => api.archiveSession(s.id, false).catch(toast)}>Unarchive</button> to continue.</span>`}
+            </div>`
+          : html`<${Composer} session=${s} commands=${commands} quick=${showQuick ? QUICK : null} />`}
       </div>
-      ${approvals.length
-        ? html`<div class="pending-bar">
-            <button class="pending-main" type="button" onClick=${review}>
-              <span class="dot dot-waiting"></span>
-              <span class="pending-text">${approvals.length > 1 ? `${approvals.length} waiting on you` : first.title || `Claude needs you`}</span>
-            </button>
-            ${quickAnswer
-              ? html`<button class="btn sm" type="button" onClick=${() => api.answer(first.id, { allow: true }).catch(toast)}>Allow</button>
-                  <button class="btn sm secondary" type="button" onClick=${() => api.answer(first.id, { allow: false, message: '' }).catch(toast)}>Deny</button>`
-              : html`<button class="btn sm secondary" type="button" onClick=${review}>Review</button>`}
-          </div>`
+      ${inDock
+        ? html`<${DockSplit} width=${dockWidth} container=${sectionRef} onChange=${setDockWidth} onDone=${(w) => remember(DOCK_WIDTH_KEY, w)} />
+            <aside class="term-dock" style=${{ width: `${dockWidth}px` }} aria-label="Terminal">
+              <div class="term-dock-head">
+                <span class="term-dock-title mono-sm" title=${s.cwd}>Terminal · ${shortDir(s.cwd)}</span>
+                <button class="btn sm ghost icon-only" type="button" title="Undock into a window" aria-label="Undock into a window" onClick=${() => dock(false)}><${Icon} name="popout" size=${14} /></button>
+                <button class="btn sm ghost icon-only" type="button" title="Close the terminal" aria-label="Close the terminal" onClick=${() => setShell(false)}><${Icon} name="x" size=${14} /></button>
+              </div>
+              <div class="term-dock-body"><${TerminalPane} query=${{ session: s.id, shell: 1 }} /></div>
+            </aside>`
         : null}
-      ${s.archived_at
-        ? html`<div class="composer archived muted">
-            ${taskState && taskState !== 'active'
-              ? html`<span>This task is ${taskState}. Its sessions are kept as a record.</span>`
-              : html`<span>Archived. <button class="link-btn" type="button" onClick=${() => api.archiveSession(s.id, false).catch(toast)}>Unarchive</button> to continue.</span>`}
-          </div>`
-        : html`<${Composer} session=${s} commands=${commands} quick=${showQuick ? QUICK : null} />`}
       ${viewing ? html`<${FileViewer} sessionId=${s.id} file=${viewing} onClose=${closeViewer} />` : null}
       ${sheet
         ? html`<${Sheet} title="Session settings" onClose=${() => setSheet(false)}>
@@ -263,8 +317,13 @@ export function SessionPane({ sessionId, onArchived }) {
             </div>
           <//>`
         : null}
-      ${shell
-        ? html`<${Dialog} wide title=${`Terminal · ${s.cwd}`} onClose=${() => setShell(false)}>
+      ${shell && !inDock
+        ? html`<${Dialog}
+            wide
+            title=${shellTitle}
+            onClose=${() => setShell(false)}
+            tools=${canDock ? html`<button class="btn sm ghost" type="button" title="Dock beside the chat" onClick=${() => dock(true)}><${Icon} name="dock" size=${14} /> Dock</button>` : null}
+          >
             <div class="terminal-dialog"><${TerminalPane} query=${{ session: s.id, shell: 1 }} /></div>
           <//>`
         : null}
@@ -277,6 +336,72 @@ export function SessionPane({ sessionId, onArchived }) {
     </section>
   `;
 }
+
+/**
+ * The edge between the chat and a docked terminal: drag it, or focus it and use the
+ * arrow keys. A double click puts it back. The width is clamped here against the
+ * section, and again by the stylesheet, so a window made narrower later cannot squeeze
+ * the chat out.
+ */
+function DockSplit({ width, container, onChange, onDone }) {
+  const clamp = (w) => {
+    const room = container.current?.clientWidth || window.innerWidth;
+    return Math.round(Math.max(DOCK_MIN, Math.min(w, room - CHAT_MIN)));
+  };
+  const down = (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    const right = container.current?.getBoundingClientRect().right ?? window.innerWidth;
+    let last = width;
+    const move = (ev) => {
+      last = clamp(right - ev.clientX);
+      onChange(last);
+    };
+    const up = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      el.classList.remove('dragging');
+      onDone(last);
+    };
+    el.classList.add('dragging');
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  };
+  const key = (e) => {
+    const step = e.shiftKey ? 96 : 32;
+    const w = e.key === 'ArrowLeft' ? width + step : e.key === 'ArrowRight' ? width - step : null;
+    if (w === null) return;
+    e.preventDefault();
+    const next = clamp(w);
+    onChange(next);
+    onDone(next);
+  };
+  const reset = () => {
+    const next = clamp(DOCK_DEFAULT);
+    onChange(next);
+    onDone(null);
+  };
+  return html`<div
+    class="dock-split"
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Resize the terminal"
+    aria-valuenow=${width}
+    aria-valuemin=${DOCK_MIN}
+    tabindex="0"
+    title="Drag to resize · double-click to reset"
+    onPointerDown=${down}
+    onKeyDown=${key}
+    onDblClick=${reset}
+  ></div>`;
+}
+// The narrowest the conversation is let get beside a docked terminal. Matches the
+// stylesheet's max-width on .term-dock.
+const CHAT_MIN = 420;
 
 // -- the transcript ------------------------------------------------------------------------
 

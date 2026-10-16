@@ -387,6 +387,8 @@ a.list-row:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .confirm-overlay{align-items:center;padding:var(--space-5)}
 .dialog{width:100%;max-width:420px;padding:var(--space-5);box-shadow:var(--shadow-3)}
 .dialog-title{margin:0 0 var(--space-2);font-size:var(--text-lg);font-weight:650;line-height:1.35}
+.dialog-head{display:flex;align-items:flex-start;gap:var(--space-2);margin-bottom:var(--space-2)}
+.dialog-head .dialog-title{flex:1;min-width:0;margin:0;overflow-wrap:anywhere}
 .dialog-body{margin:0;color:var(--muted);font-size:var(--text-md);line-height:1.55}
 .dialog-actions{display:flex;justify-content:flex-end;gap:var(--space-2);margin-top:var(--space-5)}
 /* The form variant. Fields want more room than a two-line question does. */
@@ -726,7 +728,25 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 
 /* ---- a session ---- */
 .session-page{display:flex;flex-direction:column;flex:1;min-height:0}
-.session{display:flex;flex-direction:column;flex:1;min-height:0}
+.session{display:flex;flex:1;min-height:0}
+.session-main{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0}
+/* A terminal docked beside the chat. Its width is set inline by the split, and held here
+   between a usable shell and a chat column that still reads (CHAT_MIN in session.mjs):
+   a window made narrower takes from the terminal, never the conversation. */
+.term-dock{flex:0 0 auto;min-width:320px;max-width:calc(100% - 420px);display:flex;flex-direction:column;min-height:0;background:var(--surface-rail)}
+.term-dock-head{display:flex;align-items:center;gap:var(--space-1);padding:var(--space-2) var(--space-2) var(--space-2) var(--space-4);border-bottom:1px solid var(--line)}
+.term-dock-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.term-dock-body{flex:1;display:flex;flex-direction:column;min-height:0;padding:var(--space-2) var(--space-3) var(--space-3)}
+.term-dock-body .terminal-frame,.term-dock-body .terminal-box{flex:1;display:flex;flex-direction:column;min-height:0}
+.term-dock-body .terminal-host{flex:1;height:auto;min-height:0}
+/* The bar only speaks when the connection is not open; docked, it takes no line until then. */
+.term-dock-body .terminal-bar{min-height:0}
+.term-dock-body .terminal-bar:has(.terminal-state:empty):not(:has(button)){display:none}
+/* The edge is a 1px line with a wider grab area, so it is easy to hit and costs no room. */
+.dock-split{flex:0 0 1px;position:relative;background:var(--line);cursor:col-resize;touch-action:none;z-index:1}
+.dock-split::after{content:"";position:absolute;inset:0 -4px}
+.dock-split:hover,.dock-split:focus-visible,.dock-split.dragging{background:var(--accent);outline:none}
+.dock-split.dragging~.term-dock{pointer-events:none}
 .session-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--space-2);padding:var(--space-3) var(--space-5);border-bottom:1px solid var(--line)}
 .session-title{display:flex;align-items:center;gap:var(--space-2);min-width:0}
 .title-btn{font-weight:650;text-align:left;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -792,12 +812,12 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size
 .choice span{font-size:var(--text-sm)}
 .check{display:flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm)}
 
-.composer{border-top:1px solid var(--line);padding:var(--space-3) var(--space-5);padding-bottom:max(var(--space-3),env(safe-area-inset-bottom));background:var(--surface-rail);display:grid;gap:var(--space-2)}
+.composer{border-top:1px solid var(--line);padding:var(--space-3) var(--space-5);padding-bottom:max(var(--space-3),env(safe-area-inset-bottom));background:var(--surface-rail);display:grid;grid-template-columns:minmax(0,1fr);gap:var(--space-2)}
 .composer>*{max-width:900px;width:100%;margin:0 auto;box-sizing:border-box}
 .composer.archived{text-align:center}
 /* The composer is one box: the text spans its full width, and the controls sit in a
    slim bar underneath rather than beside it, so a phone keeps the whole line to type in. */
-.composer-box{display:grid;gap:0;background:var(--surface-0);border:1px solid var(--line);border-radius:var(--radius);transition:border-color var(--dur-fast) var(--ease)}
+.composer-box{display:grid;grid-template-columns:minmax(0,1fr);gap:0;background:var(--surface-0);border:1px solid var(--line);border-radius:var(--radius);transition:border-color var(--dur-fast) var(--ease)}
 .composer-box:focus-within{border-color:var(--accent-dim)}
 .composer-input{display:block;width:100%;box-sizing:border-box;resize:none;border:0;outline:none;background:transparent;color:var(--text);font-family:var(--font-ui);font-size:16px;line-height:1.45;padding:var(--space-3) var(--space-3) var(--space-1);min-height:44px;max-height:240px;overflow-y:auto}
 .composer-input::placeholder{color:var(--muted)}
@@ -1059,6 +1079,15 @@ button.side-settings{width:100%;text-align:left}
 @media(prefers-reduced-motion:reduce){.btn.listening .ic{animation:none}}
 
 @media(max-width:860px){
+  .session-head .session-controls{display:none}
+  .session-chip{display:inline-flex}
+  .session-title{flex:1;min-width:0}
+}
+/* Beside a docked terminal the chat column is narrower than the header's row of pickers,
+   which would wrap to three lines; it takes the phone's one chip and sheet instead.
+   After the rule above so it wins over .session-chip's display:none. */
+.session.docked .session-main{container:chat / inline-size}
+@container chat (max-width:900px){
   .session-head .session-controls{display:none}
   .session-chip{display:inline-flex}
   .session-title{flex:1;min-width:0}
