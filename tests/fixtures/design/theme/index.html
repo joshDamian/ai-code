@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Theme</title>
+<!-- The app picks its own theme from localStorage, as Bench does with bench:theme, and never
+     asks prefers-color-scheme: only a theme script makes it render dark. -->
+<script>document.documentElement.dataset.theme = localStorage.getItem('fixture:theme') === 'dark' ? 'dark' : 'light';</script>
+<link rel="stylesheet" href="/app.css"></head>
+<body>
+  <h1>An app with its own theme switch</h1>
+  <p class="muted">Light unless its own setting says dark.</p>
+  <div><button>Save</button></div>
+</body></html>

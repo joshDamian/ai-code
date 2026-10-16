@@ -593,6 +593,17 @@ test('design-check leaves later sessions a CLAUDE.md pointer that names skills w
   assert.match(text, /git check-ignore/, 'the wiring is committed even where .bench/ is ignored');
 });
 
+test('design-check tells a session only flags and config keys the gate takes', () => {
+  const text = fs.readFileSync(path.join(PACK, 'skills', 'design-check', 'SKILL.md'), 'utf8');
+  const gate = fs.readFileSync(path.join(PACK, 'skills', 'design-check', 'design-check.mjs'), 'utf8');
+  for (const flag of text.match(/--[a-z][\w-]+/g) || []) assert.ok(gate.includes(`case '${flag}'`), `design-check.mjs takes ${flag}`);
+  // A config key is an option's own name, which the line that reads its flag sets.
+  const keys = [...text.matchAll(/"(\w+)":/g)].map((m) => m[1]);
+  for (const key of ['bodyPx', 'themeScript']) assert.ok(keys.includes(key), `the skill names the ${key} key`);
+  for (const key of keys) assert.match(gate, new RegExp(`o\\.${key} =`), `design-check.mjs reads the ${key} key`);
+  assert.match(text, /!\.bench\/design-check\.\*/, 'and says how to un-ignore the config');
+});
+
 test("a session gets the person's own skills, and nothing else from their Claude Code folder", async () => {
   const { svc, project, config, root } = setup();
   fs.mkdirSync(path.join(config, 'skills', 'code-style'), { recursive: true });

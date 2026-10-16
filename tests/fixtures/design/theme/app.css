@@ -1,0 +1,5 @@
+body { margin: 0; padding: 24px; background-color: #ffffff; color: #1f2937; font-size: 16px; line-height: 1.5; }
+[data-theme='dark'] body { background-color: #0b1220; color: #e5e7eb; }
+h1 { font-size: 32px; margin: 0 0 16px; }
+p { margin: 0 0 16px; font-size: 16px; }
+button { min-height: 40px; padding: 8px 16px; background-color: #1d4ed8; color: #ffffff; border: 1px solid #d1d5db; font-size: 16px; }

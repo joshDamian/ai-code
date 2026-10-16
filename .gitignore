@@ -1,4 +1,5 @@
 node_modules/
 .idea/
-.bench/
+.bench/*
+!.bench/design-check.*
 .ai-code/
