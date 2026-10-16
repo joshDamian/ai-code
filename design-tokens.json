@@ -1,0 +1,94 @@
+{
+  "$source": "web/app.css :root (Classic, and every non-colour token) and web/themes.css :root[data-theme=...] (the ten other themes). Those stylesheets are the source of truth; this file records them in the shape design-check and the design skills read. Change a value there first, then here.",
+  "$themes": "Bench has eleven themes, not one light and one dark. color.dark is Classic, the default; color.light is Quiet Temple, the quietest light theme. Every theme defines the same names - see web/themes.css. Classic declares no --well-bg/--well-text: its code sits on --surface-sunken, already dark; the light themes need the well.",
+  "$names": "Each name here is a CSS custom property in the stylesheets: bg=--bg, surface=--surface-1, surface-raised=--surface-2, surface-sunken=--surface-sunken, surface-rail=--surface-rail, text=--text, text-muted=--muted, primary=--accent, on-primary=--on-accent, border=--line, border-strong=--line-strong, danger=--bad (and --bad-bg, --bad-line), success=--good, warning=--warn, info=--info, wash/scrim/well-*=--wash/--scrim/--well-*; font.size.*=--text-*, space.N=--space-N, radius.default/sm=--radius/--radius-sm, shadow.N=--shadow-N. Components use the custom property, never the value.",
+  "color": {
+    "dark": {
+      "bg": "#0a0c10",
+      "surface": "#11151b",
+      "surface-raised": "#171c23",
+      "surface-sunken": "#090b0e",
+      "surface-rail": "#0d1014",
+      "text": "#edf2f7",
+      "text-muted": "#8e9aaa",
+      "primary": "#9fb9ff",
+      "on-primary": "#0b0d10",
+      "border": "#29313c",
+      "border-strong": "#39424f",
+      "danger": "#ff8585",
+      "danger-bg": "rgba(255,133,133,.10)",
+      "danger-line": "#5c2c2c",
+      "success": "#6fe0a1",
+      "warning": "#ffd37a",
+      "info": "#9fb9ff",
+      "wash": "rgba(255,255,255,.02)",
+      "scrim": "rgba(4,6,9,.62)"
+    },
+    "light": {
+      "bg": "#f7f8fb",
+      "surface": "#ffffff",
+      "surface-raised": "#f5f5f5",
+      "surface-sunken": "#eff1f4",
+      "surface-rail": "#f2f3f6",
+      "text": "#1f2228",
+      "text-muted": "#696e7d",
+      "primary": "#5a6882",
+      "on-primary": "#ffffff",
+      "border": "#e1e3e8",
+      "border-strong": "#cdd0d9",
+      "danger": "#b3362c",
+      "danger-bg": "rgba(179,54,44,0.09)",
+      "danger-line": "#e2b3af",
+      "success": "#1d7a4a",
+      "warning": "#8a5d00",
+      "info": "#5a6882",
+      "wash": "rgba(31,34,40,0.035)",
+      "scrim": "rgba(31,34,40,0.3)",
+      "well-bg": "#1e2130",
+      "well-text": "#e9e9ea"
+    }
+  },
+  "font": {
+    "family": {
+      "ui": "-apple-system,BlinkMacSystemFont,\"Inter\",ui-sans-serif,system-ui,sans-serif",
+      "mono": "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",
+      "title": "var(--font-title): per theme - the UI face, a serif stack, or the mono face"
+    },
+    "size": {
+      "xs": "11px",
+      "sm": "12.5px",
+      "md": "14px",
+      "lg": "16px",
+      "xl": "20px",
+      "2xl": "28px"
+    },
+    "weight": {
+      "regular": "400",
+      "medium": "600",
+      "bold": "650"
+    }
+  },
+  "line-height": {
+    "body": "1.5",
+    "tight": "1.3"
+  },
+  "space": {
+    "1": "4px",
+    "2": "8px",
+    "3": "12px",
+    "4": "16px",
+    "5": "20px",
+    "6": "24px",
+    "7": "32px"
+  },
+  "radius": {
+    "default": "10px",
+    "sm": "6px",
+    "$note": "per theme: --radius 8-18px, --radius-sm 5-11px"
+  },
+  "shadow": {
+    "1": "0 1px 2px rgba(0,0,0,.30)",
+    "2": "0 6px 20px rgba(0,0,0,.40)",
+    "3": "0 20px 60px rgba(0,0,0,.50)"
+  }
+}
