@@ -235,6 +235,22 @@ test('update says why it cannot update, and --yes refuses', async () => {
   assert.match(yes.stderr, /^Cannot update: /);
 });
 
+test('bench pack prints the plugin folder, so a check can name a script inside it', async () => {
+  // The skills ship scripts, and a task's check has to call one by a path that works from
+  // anywhere - so this asks the CLI rather than guessing where Bench was installed.
+  const free = await new Promise((resolve) => {
+    const s = net.createServer().listen(0, '127.0.0.1', () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+  const r = await bench(['pack'], { port: free });
+  assert.equal(r.code, 0, r.stderr);
+  const dir = r.stdout.trim();
+  assert.ok(fs.existsSync(path.join(dir, '.claude-plugin', 'plugin.json')), `${dir} is the plugin folder`);
+  assert.ok(fs.existsSync(path.join(dir, 'skills', 'design-check', 'design-check.mjs')), 'and the gate the skill runs is in it');
+});
+
 test('with no server running, every command says so', async () => {
   const free = await new Promise((resolve) => {
     const s = net.createServer().listen(0, '127.0.0.1', () => {

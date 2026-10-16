@@ -481,8 +481,16 @@ test("Bench's plugin is one Claude Code can load: a named manifest, and skills n
     const front = /^---\n([\s\S]*?)\n---\n/.exec(text)?.[1];
     assert.ok(front, `${dir}: SKILL.md starts with frontmatter`);
     assert.match(front, new RegExp(`^name: ${dir}$`, 'm'), `${dir}: its name is its folder`);
-    assert.match(front, /^description: .+/m, `${dir}: it has a description`);
+    // The description is what the session reads to decide to open the skill, so it says
+    // when to reach for it rather than what is inside.
+    assert.match(front, /^description: "?Apply when .+/m, `${dir}: its description says when to apply it`);
     assert.match(front, /^disable-model-invocation: true$/m, `${dir}: it runs in the main session, not a subagent`);
+    const files = fs.readdirSync(path.join(PACK, 'skills', dir));
+    if (files.some((f) => f.endsWith('.mjs'))) {
+      // A skill that ships a script has to say how to reach it: the pack's folder is not
+      // the same on anyone's machine, so the path comes from the CLI, not from the text.
+      assert.match(text, /bench pack/, `${dir}: it says how to find the script it ships`);
+    }
   }
 });
 

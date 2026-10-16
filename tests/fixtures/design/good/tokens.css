@@ -1,0 +1,25 @@
+:root {
+  --bg: #ffffff;
+  --ink: #1f2937;
+  --muted: #4b5563;
+  --brand: #1d4ed8;
+  --brand-hover: #1e3a8a;
+  --brand-ink: #ffffff;
+  --focus: #1d4ed8;
+  --line: #d1d5db;
+  --space-1: 8px;
+  --space-2: 16px;
+  --space-3: 24px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1220;
+    --ink: #e5e7eb;
+    --muted: #cbd5e1;
+    --brand: #93c5fd;
+    --brand-hover: #bfdbfe;
+    --brand-ink: #0b1220;
+    --focus: #93c5fd;
+    --line: #334155;
+  }
+}

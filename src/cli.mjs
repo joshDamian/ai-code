@@ -43,6 +43,8 @@ const HELP = `bench - a workbench for Claude sessions
   bench sessions [project]    open sessions (--all adds archived ones)
   bench update                whether Bench can update from its checkout (--yes to do it)
   bench doctor                check git, node, claude, gh and the providers
+  bench pack                  the folder Bench's own plugin lives in: its skills and the
+                              scripts they run (a check can call one by its path)
   bench shell <provider> [..] an interactive \`claude\` billed to that provider
 
 Environment: PORT (default 4317), BENCH_ROOT (where the database lives),
@@ -669,6 +671,9 @@ async function main() {
     if (checks.some((c) => !c.ok && !c.optional)) process.exitCode = 1;
     return;
   }
+  // Where the plugin a session is given lives. A skill that ships a script says so here,
+  // so the command in a project's wiring - and in a task's check - has a path that works.
+  if (cmd === 'pack') return out(path.join(appRoot, 'pack'));
   if (cmd === 'shell') return shell(rest[0], rest.slice(1));
   if (cmd === 'service') {
     if (rest[0] === 'install') return serviceInstall();

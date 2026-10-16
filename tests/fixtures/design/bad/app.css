@@ -1,0 +1,23 @@
+/* The good fixture with one defect planted per rule, to prove the gate sees each of them.
+   Every planted line is marked; a test holds the gate to naming each rule below. */
+body { margin: 0; padding: var(--space-3); background-color: var(--bg); color: var(--ink); font-size: 16px; line-height: 1.5; }
+h1 { font-size: 32px; margin: 0 0 var(--space-2); }
+p { margin: 0 0 var(--space-2); font-size: 16px; }
+.muted { color: var(--muted); }
+button { min-height: 40px; padding: var(--space-1) var(--space-2); background-color: var(--brand); color: var(--brand-ink); border: 1px solid var(--line); font-size: 16px; }
+button:hover { background-color: var(--brand-hover); }
+button:focus-visible { outline: none; } /* focus: nothing changes when a button is focused */
+a { display: inline-block; padding: var(--space-1); color: var(--brand); font-size: 16px; }
+a:focus-visible { outline: none; } /* focus, again */
+
+.faint { color: #9ca3af; } /* contrast: 2.5:1 on white, and worse on midnight */
+.tiny { width: 20px; height: 20px; min-height: 0; padding: 0; } /* target: 20x20 */
+.off-grid { padding: 7px; } /* spacing: off the 8px grid, and not a spacing token */
+.hardcoded { color: #ff0000; } /* tokens: a colour written out by hand */
+.small { font-size: 14px; } /* type: under 16px */
+.card { background-color: var(--bg); }
+.card p { color: #1f2937; } /* contrast: ink for a white page, on midnight too - and, tokens: written out */
+.wide { width: 500px; height: 24px; background-color: var(--line); } /* overflow: 500px in a 280px viewport */
+.spin { width: 40px; height: 40px; background-color: var(--brand); animation: pulse 2s infinite; } /* motion: spins regardless */
+@keyframes pulse { from { opacity: 1 } to { opacity: 0.4 } }
+/* semantics: the div with onclick in index.html - a click target that is not a button */
