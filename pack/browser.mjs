@@ -250,6 +250,8 @@ export class Browser {
   /** @type {string} */ #session;
   /** @type {string} */ #profile;
   /** @type {Set<string>} */ #initScripts = new Set();
+  /** Init scripts that are swapped rather than added to, by name. @type {Map<string, string>} */ #named = new Map();
+  /** The size the page is being shown at, so a full-page shot can put it back. */ #viewport = { width: 1280, height: 900 };
   /** @type {string[]} */ #notes = [];
 
   /** @param {import('node:child_process').ChildProcess} proc @param {Cdp} cdp @param {string} session @param {string} profile */
@@ -353,6 +355,7 @@ export class Browser {
 
   /** @param {number} width @param {number} height */
   async setViewport(width, height) {
+    this.#viewport = { width, height };
     await this.#cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }, this.#session);
   }
 
@@ -374,6 +377,22 @@ export class Browser {
     if (this.#initScripts.has(source)) return;
     this.#initScripts.add(source);
     await this.#cdp.send('Page.addScriptToEvaluateOnNewDocument', { source }, this.#session);
+  }
+
+  /**
+   * Runs before every page's own scripts like `addInitScript`, but replaces whatever was
+   * last set under the same name - a theme that changes between loads, say.
+   * @param {string} name @param {string|null} source null removes it
+   */
+  async setInitScript(name, source) {
+    const old = this.#named.get(name);
+    if (old) {
+      this.#named.delete(name);
+      await this.#cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: old }, this.#session);
+    }
+    if (source === null) return;
+    const { identifier } = await this.#cdp.send('Page.addScriptToEvaluateOnNewDocument', { source }, this.#session);
+    this.#named.set(name, identifier);
   }
 
   /**
@@ -471,18 +490,45 @@ export class Browser {
   /**
    * Writes a PNG of the page as it stands. The whole page, not the window: a change below
    * the fold is still a change.
+   *
+   * Capturing beyond the viewport only reaches what the document scrolls, and an app
+   * whose shell is fixed at the window's height - 100dvh, with a scrolling main pane in
+   * it - has nothing there to scroll: its picture would stop at the fold. So the viewport
+   * is first made tall enough that the page's own scroller has nothing left to hide, and
+   * put back after.
    * @param {string} file
    */
   async screenshot(file) {
     /** @type {string} */
     let data;
+    const shown = this.#viewport;
     try {
+      const measure = async () => Number(await this.evaluate(`(${innerOverflow})()`)) || 0;
+      let height = shown.height;
+      let hidden = await measure();
+      // Growing the window can grow what is in it, so measured again until it fits. A box
+      // whose height is its own - not the window's - hides as much however tall the window
+      // is, and is left to scroll rather than padding the picture with empty page.
+      for (let i = 0; i < 4 && hidden > 0 && height < SHOT_MAX; i++) {
+        const tried = Math.min(SHOT_MAX, height + hidden);
+        await this.setViewport(shown.width, tried);
+        await this.evaluate('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null))))');
+        const left = await measure();
+        if (left >= hidden) {
+          await this.setViewport(shown.width, height);
+          break;
+        }
+        height = tried;
+        hidden = left;
+      }
       ({ data } = await this.#cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, this.#session, 30000));
     } catch {
       // Older builds refuse to capture past the viewport; make the viewport the page.
-      const height = Math.min(20000, await this.evaluate('Math.ceil(document.documentElement.scrollHeight)'));
+      const height = Math.min(SHOT_MAX, await this.evaluate('Math.ceil(document.documentElement.scrollHeight)'));
       await this.setViewport(await this.evaluate('document.documentElement.clientWidth'), height || 900);
       ({ data } = await this.#cdp.send('Page.captureScreenshot', { format: 'png' }, this.#session, 30000));
+    } finally {
+      if (this.#viewport.width !== shown.width || this.#viewport.height !== shown.height) await this.setViewport(shown.width, shown.height);
     }
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, Buffer.from(data, 'base64'));
@@ -505,6 +551,35 @@ export class Browser {
     await new Promise((r) => setTimeout(r, 50));
     fs.rmSync(this.#profile, { recursive: true, force: true });
   }
+}
+
+/** The tallest picture taken, in pixels: past this a browser runs out of texture. */
+const SHOT_MAX = 20000;
+
+/**
+ * How much of the page an inner scroller hides - the pixels the window would have to grow
+ * by to show it all - or 0 when nothing but the document scrolls, which capturing beyond
+ * the viewport already reaches. Run in the page, so it is written to stand alone.
+ *
+ * The scroller that counts is the one hiding the most: the page's main pane, not a code
+ * block or a list that scrolls inside it. Of two hiding as much, the deeper one wins.
+ */
+function innerOverflow() {
+  let best = 0;
+  let bestDepth = -1;
+  for (const el of Array.from(document.querySelectorAll('body *'))) {
+    const hidden = el.scrollHeight - el.clientHeight;
+    if (hidden <= 1) continue;
+    const y = getComputedStyle(el).overflowY;
+    if (y !== 'auto' && y !== 'scroll' && y !== 'overlay') continue;
+    let depth = 0;
+    for (let n = el.parentElement; n; n = n.parentElement) depth++;
+    if (hidden > best || (hidden === best && depth > bestDepth)) {
+      best = hidden;
+      bestDepth = depth;
+    }
+  }
+  return Math.ceil(best);
 }
 
 /** @param {string} url @returns {Promise<Cdp>} */

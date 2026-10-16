@@ -548,7 +548,7 @@ test('request_review falls back to the caller provider with a note when no other
   svc.shutdown();
 });
 
-test('a session started by a tool cannot start another, request a review, or make a task', async () => {
+test('a session started by a tool cannot start another or make a task, but can request a review', async () => {
   const { svc, project } = setup();
   const { session } = svc.createTask(project.id, { title: 'Top' });
   const r = await call(svc, session.id, 'start_session', { prompt: 'hi', title: 'Worker' });
@@ -557,20 +557,57 @@ test('a session started by a tool cannot start another, request a review, or mak
   const again = await call(svc, worker, 'start_session', { prompt: 'x' });
   assert.equal(again.error, true);
   assert.match(again.text, /^Refused: this session was itself started by a bench tool .* cannot start sessions/);
-  const review = await call(svc, worker, 'request_review', {});
-  assert.equal(review.error, true);
-  assert.match(review.text, /cannot request reviews/);
   const task = await call(svc, worker, 'create_task', { title: 'Nested', prompt: 'x' });
   assert.equal(task.error, true);
   assert.match(task.text, /cannot make tasks/);
+  // A review only reads, so it is the one thing such a session may still start.
+  const review = await call(svc, worker, 'request_review', { timeout_s: 30 });
+  assert.equal(review.error, false, review.text);
+  assert.match(review.text, /Recorded in the task's log/);
 
-  // A session in a task made by create_task is limited too, in the task's wording.
+  // A session in a task made by create_task is limited too, in the task's wording, and may
+  // ask for a review the same way - which is how a design task reaches design-review.
   const made = await call(svc, session.id, 'create_task', { title: 'Made', prompt: 'go' });
   const madeId = /Created task (\S+): Made/.exec(made.text)[1];
   const madeSession = svc.sessions({ taskId: madeId })[0];
-  const rev = await call(svc, madeSession.id, 'request_review', {});
-  assert.equal(rev.error, true);
-  assert.match(rev.text, /^Refused: this task was itself made with create_task .* cannot request reviews/);
+  const nested = await call(svc, madeSession.id, 'create_task', { title: 'Grandchild', prompt: 'x' });
+  assert.match(nested.text, /^Refused: this task was itself made with create_task .* cannot make tasks/);
+  const started = await call(svc, madeSession.id, 'start_session', { prompt: 'x' });
+  assert.match(started.text, /^Refused: this task was itself made with create_task .* cannot start sessions/);
+  const rev = await call(svc, madeSession.id, 'request_review', { timeout_s: 30 });
+  assert.equal(rev.error, false, rev.text);
+  svc.shutdown();
+});
+
+test('the reviewer a request_review starts cannot itself start a session, make a task, or ask for a review', async () => {
+  const { svc, project } = setup();
+  const { session } = svc.createTask(project.id, { title: 'Top' });
+  const made = await call(svc, session.id, 'create_task', { title: 'Made', prompt: 'go' });
+  const madeId = /Created task (\S+): Made/.exec(made.text)[1];
+  const madeSession = svc.sessions({ taskId: madeId })[0];
+  assert.equal((await call(svc, madeSession.id, 'request_review', { timeout_s: 30 })).error, false);
+  const reviewer = svc.sessions({ taskId: madeId }).find((s) => s.purpose === 'review');
+  assert.ok(reviewer);
+  assert.equal(reviewer.started_by_session, madeSession.id);
+
+  const before = svc.sessions({ projectId: project.id }).length;
+  const start = await call(svc, reviewer.id, 'start_session', { prompt: 'x' });
+  assert.match(start.text, /^Refused: .* cannot start sessions/);
+  const task = await call(svc, reviewer.id, 'create_task', { title: 'Nested', prompt: 'x' });
+  assert.match(task.text, /^Refused: .* cannot make tasks/);
+  const review = await call(svc, reviewer.id, 'request_review', { timeout_s: 30 });
+  assert.equal(review.error, true);
+  assert.match(review.text, /^Refused: this session is itself a review .* cannot request reviews/);
+  assert.equal(svc.sessions({ projectId: project.id }).length, before, 'the reviewer started nothing');
+
+  // Started by start_session rather than inside a made task, a reviewer is still a dead end.
+  const r = await call(svc, session.id, 'start_session', { prompt: 'hi', title: 'Worker' });
+  const worker = /Started session (\S+): Worker/.exec(r.text)[1];
+  assert.equal((await call(svc, worker, 'request_review', { timeout_s: 30 })).error, false);
+  const second = svc.sessions({ taskId: session.task_id }).find((s) => s.purpose === 'review' && s.started_by_session === worker);
+  assert.ok(second);
+  assert.match((await call(svc, second.id, 'request_review', {})).text, /^Refused: this session is itself a review/);
+  assert.match((await call(svc, second.id, 'start_session', { prompt: 'x' })).text, /^Refused: this session was itself started by a bench tool/);
   svc.shutdown();
 });
 

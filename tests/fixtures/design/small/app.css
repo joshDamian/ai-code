@@ -1,0 +1,9 @@
+/* The plain fixture with a 14px body: a project that decided on denser text passes when it
+   says so with --body-px 14, and is held to 16px when it does not. */
+body { margin: 0; padding: 24px; background-color: #ffffff; color: #1f2937; font-size: 14px; line-height: 1.5; }
+h1 { font-size: 32px; margin: 0 0 16px; }
+p { margin: 0 0 16px; font-size: 14px; }
+.muted { color: #4b5563; }
+button { min-height: 40px; padding: 8px 16px; background-color: #1d4ed8; color: #ffffff; border: 1px solid #d1d5db; font-size: 14px; }
+button:hover { background-color: #1e3a8a; }
+button:focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }

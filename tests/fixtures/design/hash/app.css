@@ -1,0 +1,10 @@
+/* The same page as the good fixture, with every value written out and no token file
+   anywhere. The colour and token rules are skipped for a project like this - holding it
+   to tokens it never wrote down would be the gate inventing a rule. */
+body { margin: 0; padding: 24px; background-color: #ffffff; color: #1f2937; font-size: 16px; line-height: 1.5; }
+h1 { font-size: 32px; margin: 0 0 16px; }
+p { margin: 0 0 16px; font-size: 16px; }
+.muted { color: #4b5563; }
+button { min-height: 40px; padding: 8px 16px; background-color: #1d4ed8; color: #ffffff; border: 1px solid #d1d5db; font-size: 16px; }
+button:hover { background-color: #1e3a8a; }
+button:focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }

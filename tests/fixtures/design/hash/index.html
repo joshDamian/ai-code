@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hash</title><link rel="stylesheet" href="/app.css"></head>
+<body>
+  <!-- A hash-routed app: one document, and the route after the # picks what it shows. -->
+  <main id="view"></main>
+  <script>
+    const views = {
+      '': '<h1>Home</h1><p class="muted">The first route.</p><div><button>Start</button></div>',
+      '#/settings': '<h1>Settings</h1><p class="muted">The second route, at /#/settings.</p><div><button>Save</button></div>',
+    };
+    const show = () => { document.getElementById('view').innerHTML = views[location.hash.replace(/^#\/?$/, '')] ?? '<h1>Not found</h1>'; };
+    window.addEventListener('hashchange', show);
+    show();
+  </script>
+</body></html>

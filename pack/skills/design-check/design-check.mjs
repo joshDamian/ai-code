@@ -28,10 +28,17 @@ const USAGE = `design-check - render a page and hold it to the mechanical rules.
   --width <px>          the viewport everything else is measured at (default: 1280)
   --themes <a,b>        themes contrast is checked in (default: light,dark)
   --grid <px>           the spacing grid (default: 8)
+  --body-px <px>        the smallest body text allowed; headings are exempt (default: 16)
   --ignore <sel,...>    selectors to leave alone
   --shots <dir>         also write screenshots here (they are the before/after evidence)
   --shots-widths <a,b>  widths for --shots (default: 1280,390)
   --shots-themes <a,b>  themes for --shots (default: light); any other adds "-<theme>" to the name
+  --theme-script <file> for an app that picks its theme itself rather than from
+                        prefers-color-scheme: JavaScript run in the page before the app's
+                        own scripts on every load, with \`theme\` ("light" or "dark") in
+                        scope, e.g. localStorage.setItem('app:theme', theme). Used for
+                        --themes and --shots-themes alike; without it only
+                        prefers-color-scheme is set
   --click <selector>    also shoot each route after clicking this, named "-<selector>"; repeatable
   --only-shots          screenshots only, no audit
   --label <name>        prefix for screenshot names, e.g. "after"
@@ -444,10 +451,11 @@ function contrastFindings(o) {
 }
 
 /**
- * A tap target a thumb can hit, and text a person can read without leaning in.
- * @param {any} seen @param {string} route @param {string} theme
+ * A tap target a thumb can hit, and text a person can read without leaning in. The body
+ * size is the project's to set - 16px unless it has decided on a smaller one.
+ * @param {any} seen @param {string} route @param {string} theme @param {number} [bodyPx]
  */
-function sizeFindings(seen, route, theme) {
+function sizeFindings(seen, route, theme, bodyPx = 16) {
   /** @type {Finding[]} */
   const out = [];
   for (const t of seen.targets) {
@@ -455,8 +463,8 @@ function sizeFindings(seen, route, theme) {
     out.push({ rule: 'target', route, theme, state: '', viewport: '', selector: t.selector, detail: `${t.w}x${t.h}px, under the 24x24px a touch target needs` });
   }
   for (const t of seen.texts) {
-    if (t.heading || t.size >= 16) continue;
-    out.push({ rule: 'type', route, theme, state: '', viewport: '', selector: t.selector, detail: `${t.size}px text, and body text is 16px at the smallest - "${t.text}"` });
+    if (t.heading || t.size >= bodyPx) continue;
+    out.push({ rule: 'type', route, theme, state: '', viewport: '', selector: t.selector, detail: `${t.size}px text, and body text is ${bodyPx}px at the smallest - "${t.text}"` });
   }
   return out;
 }
@@ -535,7 +543,7 @@ function motionFindings(motion, route) {
 /** @param {string[]} argv @param {Record<string, any>} base */
 function options(argv, base) {
   /** @type {Record<string, any>} */
-  const o = { routes: ['/'], widths: [280, 320, 414], themes: ['light', 'dark'], shotsWidths: [1280, 390], shotsThemes: ['light'], click: [], ignore: [], grid: 8, width: 1280, wait: 0, json: false, ...base };
+  const o = { routes: ['/'], widths: [280, 320, 414], themes: ['light', 'dark'], shotsWidths: [1280, 390], shotsThemes: ['light'], click: [], ignore: [], grid: 8, bodyPx: 16, width: 1280, wait: 0, json: false, ...base };
   const list = (/** @type {string} */ v) => String(v).split(',').map((s) => s.trim()).filter(Boolean);
   for (let i = 0; i < argv.length; i++) {
     const [flag, inline] = argv[i].includes('=') ? argv[i].split(/=(.*)/s) : [argv[i], null];
@@ -549,12 +557,14 @@ function options(argv, base) {
       case '--width': o.width = Number(next()); break;
       case '--themes': o.themes = list(next()); break;
       case '--grid': o.grid = Number(next()); break;
+      case '--body-px': o.bodyPx = Number(next()); break;
       // Added to what the config file already ignores, rather than replacing it: a run that
       // names one extra selector must not silently drop the project's own exceptions.
       case '--ignore': o.ignore = [...o.ignore, ...list(next())]; break;
       case '--shots': o.shots = next(); break;
       case '--shots-widths': o.shotsWidths = list(next()).map(Number); break;
       case '--shots-themes': o.shotsThemes = list(next()); break;
+      case '--theme-script': o.themeScript = next(); break;
       // One selector each, since a selector may itself hold a comma.
       case '--click': o.click = [...o.click, next()]; break;
       case '--only-shots': o.onlyShots = true; break;
@@ -668,6 +678,8 @@ async function main() {
   if (o.onlyShots && !o.shots) return couldNotLook('--only-shots needs --shots <dir>');
   if (!o.url) return couldNotLook(`no --url, and no url in ${o.config || 'a config file'}\n\n${USAGE}`);
   for (const theme of o.themes) if (!['light', 'dark'].includes(theme)) return couldNotLook(`--themes takes light or dark, not ${theme}`);
+  for (const theme of o.shotsThemes) if (!['light', 'dark'].includes(theme)) return couldNotLook(`--shots-themes takes light or dark, not ${theme}`);
+  if (!(o.bodyPx > 0)) return couldNotLook(`--body-px has to be a number of pixels, not ${o.bodyPx}`);
   for (const n of [...o.widths, o.width, ...o.shotsWidths]) if (!(n > 0)) return couldNotLook(`a width has to be a number of pixels, not ${n}`);
 
   const cwd = process.cwd();
@@ -679,6 +691,15 @@ async function main() {
       tokenFile = readTokens(path.resolve(cwd, tokens));
     } catch (e) {
       return couldNotLook(/** @type {Error} */ (e).message);
+    }
+  }
+  /** @type {string|null} */
+  let themeScript = null;
+  if (o.themeScript) {
+    try {
+      themeScript = fs.readFileSync(path.resolve(cwd, o.themeScript), 'utf8');
+    } catch (e) {
+      return couldNotLook(`could not read the theme script ${o.themeScript}: ${/** @type {Error} */ (e).message}`);
     }
   }
   if (!findBrowser(o.browser)) return couldNotLook(NO_BROWSER);
@@ -701,6 +722,36 @@ async function main() {
         return add.call(this, type, ...rest);
       };
     })();`);
+
+    /**
+     * Puts the page in a theme for every load after this one: the media query always, and
+     * the project's theme script too when it has one, for an app that keeps its theme in
+     * its own state - such a script set before the app's scripts run is the only way the
+     * app reads it on start.
+     * @param {'light'|'dark'} theme @param {boolean} [reducedMotion]
+     */
+    const setTheme = async (theme, reducedMotion = false) => {
+      await /** @type {Browser} */ (page).setMedia({ colorScheme: theme, reducedMotion });
+      if (themeScript === null) return;
+      await /** @type {Browser} */ (page).setInitScript('theme', `(() => {
+        const theme = ${JSON.stringify(theme)};
+        try {
+${themeScript}
+        } catch (e) {
+          globalThis.__bcThemeError = String((e && e.message) || e);
+        }
+      })();`);
+    };
+    /** Loads a page, and refuses one whose theme script threw: that theme was never shown. @param {string} url */
+    const load = async (url) => {
+      const nav = await /** @type {Browser} */ (page).goto(url);
+      if (nav.ok && themeScript !== null) {
+        const threw = await /** @type {Browser} */ (page).evaluate('globalThis.__bcThemeError || null');
+        if (threw) throw new Unrenderable(`the theme script ${o.themeScript} threw on ${url}: ${threw}`);
+      }
+      return nav;
+    };
+    await setTheme('light');
 
     for (const route of o.routes) {
       const url = join(o.url, route);
@@ -741,15 +792,15 @@ async function main() {
       }
 
       for (const theme of o.themes) {
-        await page.setMedia({ colorScheme: /** @type {'light'|'dark'} */ (theme) });
+        await setTheme(/** @type {'light'|'dark'} */ (theme));
         await page.setViewport(o.width, 900);
-        if (!(await page.goto(url)).ok) throw new Unrenderable(`${url} did not render in the ${theme} theme`);
+        if (!(await load(url)).ok) throw new Unrenderable(`${url} did not render in the ${theme} theme`);
         if (!(await page.evaluate(`matchMedia('(prefers-color-scheme: ${theme})').matches`))) throw new Unrenderable(`the browser would not pretend to be in the ${theme} theme`);
         if (o.onlyShots) continue;
 
         const plain = await page.evaluate(audit);
         findings.push(...contrastFindings({ texts: plain.texts, route, theme, state: 'default', interactiveOnly: false }));
-        findings.push(...sizeFindings(plain, route, theme));
+        findings.push(...sizeFindings(plain, route, theme, o.bodyPx));
         findings.push(...semanticsFindings(plain, route, theme));
         if (theme === o.themes[0]) findings.push(...overflowFindings(plain, route, theme, o.width));
 
@@ -768,15 +819,15 @@ async function main() {
       }
 
       if (!o.onlyShots) {
-        await page.setMedia({ colorScheme: 'light', reducedMotion: true });
+        await setTheme('light', true);
         await page.setViewport(o.width, 900);
-        if (!(await page.goto(url)).ok) throw new Unrenderable(`${url} did not render with prefers-reduced-motion`);
+        if (!(await load(url)).ok) throw new Unrenderable(`${url} did not render with prefers-reduced-motion`);
         findings.push(...motionFindings((await page.evaluate(audit)).motion, route));
 
         // The widths a page has to survive: a small phone, a phone, a large phone.
         for (const width of o.widths) {
           await page.setViewport(width, 900);
-          if (!(await page.goto(url)).ok) throw new Unrenderable(`${url} did not render at ${width}px`);
+          if (!(await load(url)).ok) throw new Unrenderable(`${url} did not render at ${width}px`);
           findings.push(...overflowFindings(await page.evaluate(audit), route, 'light', width));
         }
       }
@@ -786,9 +837,9 @@ async function main() {
           for (const width of o.shotsWidths) {
             // Each state from a fresh load, so one click's menu is not in the next one's picture.
             for (const click of [null, ...o.click]) {
-              await page.setMedia({ colorScheme: theme });
+              await setTheme(theme);
               await page.setViewport(width, 900);
-              if (!(await page.goto(url)).ok) throw new Unrenderable(`${url} did not render at ${width}px for its screenshot`);
+              if (!(await load(url)).ok) throw new Unrenderable(`${url} did not render at ${width}px for its screenshot`);
               if (click) {
                 const hit = await page.evaluate(`(() => { const el = document.querySelector(${JSON.stringify(click)}); if (!el) return false; el.click(); return true; })()`);
                 // Nothing to click here is not a picture of the clicked state, so none is taken.
