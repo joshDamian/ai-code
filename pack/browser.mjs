@@ -401,7 +401,12 @@ export class Browser {
       (e) => /** @type {Error} */ (e),
     );
     try {
-      await this.#cdp.send('Page.navigate', { url }, this.#session, timeoutMs);
+      const r = await this.#cdp.send('Page.navigate', { url }, this.#session, timeoutMs);
+      // The same URL again, or one that differs only after the `#` - every route of a
+      // hash-routed app - is a same-document navigation: no loader, so no load event,
+      // and the wait above would time out. Reload instead, which is the fresh page
+      // every other goto gives.
+      if (r && !r.errorText && !r.loaderId) await this.#cdp.send('Page.reload', {}, this.#session, timeoutMs);
     } catch (e) {
       nav.error = e instanceof Error ? e.message : String(e);
     }
