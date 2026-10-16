@@ -577,7 +577,9 @@ function join(url, route) {
 }
 
 /** `/settings/billing` reads as `settings-billing` in a file name. @param {string} route */
-const slug = (route) => route.replace(/[?#].*$/, '').replace(/[^\w]+/g, '-').replace(/^-|-$/g, '') || 'home';
+// The query goes but a hash route stays: in a hash-routed app `/#/settings` is the page,
+// and dropping it would name every route "home" and shoot each over the last.
+const slug = (route) => route.replace(/\?[^#]*/, '').replace(/[^\w]+/g, '-').replace(/^-|-$/g, '') || 'home';
 
 /** Where a project would keep a token file. @param {string} cwd */
 function findTokens(cwd) {
