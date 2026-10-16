@@ -37,6 +37,9 @@ const HELP = `bench - a workbench for Claude sessions
   bench task merge <id>       merge it into its base and clean up
                               --squash, --message <m>, --keep (leave worktree and sessions)
   bench task check <id>       run its check now; exits 1 if it fails
+  bench task loop <id>        keep going until its check passes: a failure sends the
+                              session back to work (--max-attempts <n>, --max-minutes <m>,
+                              --off to stop it). Needs a check; the person sets it, not a session
   bench sessions [project]    open sessions (--all adds archived ones)
   bench update                whether Bench can update from its checkout (--yes to do it)
   bench doctor                check git, node, claude, gh and the providers
@@ -399,6 +402,15 @@ async function findTask(given) {
 /** @param {import('./contract.mjs').Task} t */
 const checkWord = (t) => (!t.check_command ? 'no check' : t.check_status || 'unchecked');
 
+/** A task's loop in a word, for the detail view. @param {import('./contract.mjs').Task} t */
+function loopWord(t) {
+  const l = t.loop;
+  if (!l) return 'off';
+  if (l.state === 'looping') return `looping, attempt ${l.attempts} of ${l.max_attempts} (up to ${plural(l.max_minutes, 'minute')})`;
+  if (l.state === 'done') return `done: the check passed after ${plural(l.attempts, 'attempt')}`;
+  return `${l.state === 'gave-up' ? 'gave up' : 'stopped'}${l.reason ? `: ${l.reason}` : ''}`;
+}
+
 const newestFirst = (/** @type {{created_at: string}} */ a, /** @type {{created_at: string}} */ b) => b.created_at.localeCompare(a.created_at);
 
 /** @param {string[]} args */
@@ -446,6 +458,30 @@ async function taskCmd(args) {
     const end = tail(r.check_output);
     return out(`${r.check_status === 'passed' ? 'Passed' : 'Failed'}: ${r.check_command}${end ? `\n\n${end}` : ''}`);
   }
+  if (sub === 'loop') {
+    const { words, flags } = parseArgs(rest, ['max-attempts', 'max-minutes']);
+    const t = await findTask(words[0]);
+    if (flags.off) {
+      /** @type {import('./contract.mjs').Task} */
+      const off = await api('PATCH', `/api/tasks/${t.id}`, { loop: null });
+      if (flags.json) return out(off);
+      return out(`Loop off for ${shortId(t.id)} ${t.title}.${t.loop ? ' What it got through stays in the task log.' : ''}`);
+    }
+    const int = (/** @type {unknown} */ v, /** @type {string} */ name) => {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1) throw new Error(`--${name} takes a whole number of at least 1`);
+      return n;
+    };
+    /** @type {{max_attempts?:number, max_minutes?:number}} */
+    const caps = {};
+    if (flags['max-attempts'] !== undefined) caps.max_attempts = int(flags['max-attempts'], 'max-attempts');
+    if (flags['max-minutes'] !== undefined) caps.max_minutes = int(flags['max-minutes'], 'max-minutes');
+    /** @type {import('./contract.mjs').Task} */
+    const r = await api('PATCH', `/api/tasks/${t.id}`, { loop: caps });
+    if (flags.json) return out(r);
+    const loop = r.loop;
+    return out(`Looping ${shortId(t.id)} ${t.title}: \`${r.check_command}\` runs when its session goes idle, and a failure sends it back to work — up to ${plural(loop?.max_attempts ?? 0, 'attempt')} or ${plural(loop?.max_minutes ?? 0, 'minute')}. Then it writes up why it is stuck and stops. \`bench task loop ${shortId(t.id)} --off\` ends it.`);
+  }
   const { words, flags } = parseArgs(args);
   const t = await findTask(words[0]);
   /** @type {{task: import('./contract.mjs').Task, git: any, sessions: import('./contract.mjs').Session[]}} */
@@ -466,6 +502,7 @@ async function taskCmd(args) {
       ['done means', task.done || '-'],
       ['check', task.check_command || '-'],
       ['last check', task.check_command ? `${checkWord(task)}${task.check_at ? ` at ${task.check_at}` : ''}` : '-'],
+      ['loop', loopWord(task)],
       ['git', state.join(', ')],
     ]),
     '',

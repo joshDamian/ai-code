@@ -149,6 +149,9 @@ class Live {
     this.lastStderr = undefined;
     /** Stops a failing check has refused since the person last wrote. */
     this.checkTries = 0;
+    /** The turn in flight is a loop's read-only write-up: nothing it says is sent back to
+     * work, whatever the check says. */
+    this.writeUp = false;
   }
 
   /** @param {SDKUserMessage} m */
@@ -435,7 +438,8 @@ export class Runtime extends EventEmitter {
    * One message from the person. Starts or resumes the session's query when none is open.
    * Images go inline; any other file is saved and named in the message.
    * @param {string} id @param {string} text
-   * @param {{images?: {media_type:string, data:string}[], files?: {name:string, media_type?:string, data:string}[], uploads?: {file:string, type?:string}[]}} [o]
+   * `writeUp` marks the turn as a loop's last, read-only one: the check does not hold its stop.
+   * @param {{images?: {media_type:string, data:string}[], files?: {name:string, media_type?:string, data:string}[], uploads?: {file:string, type?:string}[], writeUp?:boolean}} [o]
    */
   send(id, text, o = {}) {
     const s = this.#session(id);
@@ -449,6 +453,7 @@ export class Runtime extends EventEmitter {
     const body = `${text}${note}${hint}`.trim();
     const live = this.live.get(id) || this.#start(s);
     live.checkTries = 0;
+    live.writeUp = !!o.writeUp;
     /** @type {any[]} */
     const content = [...images.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } })), ...(body ? [{ type: 'text', text: body }] : [])];
     live.push({ type: 'user', message: { role: 'user', content: images.length ? content : body }, parent_tool_use_id: null });
@@ -622,6 +627,7 @@ export class Runtime extends EventEmitter {
         output_tokens: Math.max(s.output_tokens, output),
         ...(m.is_error && m.subtype !== 'error_during_execution' ? { error: (m.errors || []).join('\n').slice(0, 2000) || null } : {}),
       });
+      live.writeUp = false;
       if (live.turns === 0) this.emit('turn-done', { session: this.store.getSession(id), ok: !m.is_error });
       return;
     }
@@ -772,6 +778,9 @@ export class Runtime extends EventEmitter {
    * times per message from the person. A result Bench already had - nothing changed since
    * it ran - never refuses one: the model was not asked to change anything, or changed
    * nothing, and sending it round again would be a loop.
+   *
+   * A loop's write-up turn is the one exception: it is read-only by design, so a check that
+   * fails there is the thing being written up, not a reason to send it back to work.
    * @param {string} id @param {{background_tasks?:unknown[]}} input @param {AbortSignal} signal
    * @returns {Promise<import('@anthropic-ai/claude-agent-sdk').HookJSONOutput>}
    */
@@ -779,7 +788,7 @@ export class Runtime extends EventEmitter {
     const s = this.store.getSession(id);
     const live = this.live.get(id);
     // Work still running in the background will wake the session again; check then.
-    if (!s?.task_id || !live || input.background_tasks?.length) return {};
+    if (!s?.task_id || !live || input.background_tasks?.length || live.writeUp) return {};
     const r = await this.check(s.task_id, { sessionId: id, signal });
     if (!r || r.ok || !r.fresh) return {};
     const t = /** @type {Task} */ (this.store.getTask(s.task_id));

@@ -42,6 +42,36 @@ export interface Model {
 /** A unit of work: a branch in its own worktree, cut from a base branch, landed by a person. */
 export type TaskState = 'active' | 'merged' | 'closed';
 
+/**
+ * How a task's loop ended. `looping` while it runs; `done` when the check passed;
+ * `gave-up` when a cap was reached with the check still failing; `stopped` when the
+ * person turned it off, or the task was closed or merged; `error` when its session did.
+ */
+export type TaskLoopState = 'looping' | 'done' | 'gave-up' | 'stopped' | 'error';
+
+/**
+ * A task's "loop until done", set by a person and by nobody else. While it is on and
+ * its session goes idle, Bench runs the task's check: a pass ends the loop, a failure
+ * sends that session back to work with the output. It always has a ceiling - a number
+ * of attempts and a wall-clock limit - and when one is reached with the check still
+ * failing, the session is asked once more, in Plan mode, to write up why it is stuck.
+ */
+export interface TaskLoop {
+  /** How many messages back to work the loop may send. */
+  max_attempts: number;
+  /** How long the loop may run, from `started_at`. */
+  max_minutes: number;
+  /** Messages sent so far. */
+  attempts: number;
+  state: TaskLoopState;
+  /** Why it ended, in words. Null while it is looping, and for a pass. */
+  reason: string | null;
+  started_at: string;
+  ended_at: string | null;
+  /** The session the loop feeds; null until one of the task's ends a turn. */
+  session_id: string | null;
+}
+
 export interface Task {
   id: string;
   project_id: string;
@@ -67,6 +97,8 @@ export interface Task {
   check_at: string | null;
   /** The session that made this task through the bench tool `create_task`, if one did. */
   created_by_session: string | null;
+  /** On when a person has set this task to loop until its check passes. Off is null. */
+  loop: TaskLoop | null;
   created_at: string;
   updated_at: string;
 }
@@ -76,8 +108,12 @@ export interface TaskLogEntry {
   id: number;
   task_id: string;
   session_id: string | null;
-  /** A decision with its evidence, or a review by another model: then `decision` names the reviewer and `evidence` holds its findings. */
-  kind: 'decision' | 'review';
+  /**
+   * A decision with its evidence; a review by another model, where `decision` names the
+   * reviewer and `evidence` holds its findings; or a loop's own record of an attempt
+   * ending, a cap being reached, and the write-up that follows.
+   */
+  kind: 'decision' | 'review' | 'loop';
   decision: string;
   /** What was measured or seen, not what was believed. */
   evidence: string;

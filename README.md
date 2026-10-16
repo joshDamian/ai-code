@@ -5,6 +5,7 @@ A workbench for Claude sessions, served from your own machine or a VPS and used 
 - **Tasks.** A task is a branch cut from any base branch, in its own worktree, with Claude sessions working in it. Its work lands on that base only when you merge it.
 - **Sessions in the checkout.** For quick work directly in the project's checked-out branch, with no worktree.
 - **Git without a terminal.** Switch branches (with a stash prompt), fetch, pull, push and commit from the project page. A task's changes, updates from its base, conflicts, merge (or squash), push and pull request all live on the task page.
+- **Loop until done.** Mark a task to loop and leave it: while its check fails, Bench sends the failure back to its session and lets it try again, up to the attempts and time you set. Stop it any time; when it gives up it asks the model to write up why it is stuck and stops. The loop needs a check to end on, and only you can start or stop one - a session cannot put itself into an unattended loop.
 - **Claude Code itself.** Sessions run on the Claude Agent SDK, so they behave as Claude Code does: the same tools, CLAUDE.md, slash commands and permission modes (Ask before edits, Accept edits, Plan, Auto, Bypass). Approvals, questions and plans appear as cards you answer from any device. Attach images, PDFs, Markdown, APKs or any file up to 300 MB by paste, picker or drag and drop; large files upload as you attach them, with progress. Any session also opens as `claude --resume` in a terminal.
 - **Providers.** Each session picks a provider and model: your Claude login, DeepSeek, OpenRouter or Fireworks.
 
@@ -61,6 +62,7 @@ bench share [--off] | pair | devices | revoke <id>
 bench service install | uninstall | status
 bench tasks [project] [--all]
 bench task <id> | task close <id> [--delete-branch] | task check <id>
+bench task loop <id> [--max-attempts N] [--max-minutes M] | task loop <id> --off
 bench task merge <id> [--squash] [--message <m>] [--keep]
 bench sessions [project] [--all]
 bench update [--yes]

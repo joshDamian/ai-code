@@ -83,7 +83,9 @@ export class Store {
     // last time Bench ran that command - its result and the working tree it ran against.
     // created_by_session: the session that made the task with the bench tool, if one did.
     // A task made that way may not make another, so a chain of tasks cannot grow.
-    for (const col of ['done', 'check_command', 'check_status', 'check_tree', 'check_output', 'check_at', 'created_by_session']) {
+    // loop: the task's unattended loop, as JSON - its caps, how far it got, and how it
+    // ended. Null when the task is not looping, which is what it is by default.
+    for (const col of ['done', 'check_command', 'check_status', 'check_tree', 'check_output', 'check_at', 'created_by_session', 'loop']) {
       if (!this.db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
     }
     // started_by_session: the session that started this one with a bench tool, if one did;
@@ -305,34 +307,43 @@ export class Store {
 
   // -- tasks ------------------------------------------------------------------
 
-  /** @param {Omit<Task,'state'|'merge_commit'|'merged_at'|'created_at'|'updated_at'|'done'|'check_command'|'check_status'|'check_tree'|'check_output'|'check_at'|'created_by_session'> & {created_at?:string, done?:string|null, check_command?:string|null, created_by_session?:string|null}} t @returns {Task} */
+  /** A task row, with its `loop` JSON read back into the shape the wire carries. @param {any} r @returns {Task|undefined} */
+  #task(r) {
+    if (!r) return r;
+    return { ...r, loop: r.loop ? JSON.parse(r.loop) : null };
+  }
+
+  /** @param {Omit<Task,'state'|'merge_commit'|'merged_at'|'created_at'|'updated_at'|'done'|'check_command'|'check_status'|'check_tree'|'check_output'|'check_at'|'created_by_session'|'loop'> & {created_at?:string, done?:string|null, check_command?:string|null, created_by_session?:string|null, loop?:Task['loop']}} t @returns {Task} */
   addTask(t) {
     const at = t.created_at || now();
     this.db
-      .prepare('INSERT INTO tasks(id,project_id,title,description,base_branch,base_commit,branch,worktree,state,done,check_command,created_by_session,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(t.id, t.project_id, t.title, t.description ?? null, t.base_branch, t.base_commit, t.branch, t.worktree, 'active', t.done ?? null, t.check_command ?? null, t.created_by_session ?? null, at, now());
+      .prepare('INSERT INTO tasks(id,project_id,title,description,base_branch,base_commit,branch,worktree,state,done,check_command,created_by_session,loop,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(t.id, t.project_id, t.title, t.description ?? null, t.base_branch, t.base_commit, t.branch, t.worktree, 'active', t.done ?? null, t.check_command ?? null, t.created_by_session ?? null, t.loop ? JSON.stringify(t.loop) : null, at, now());
     return /** @type {Task} */ (this.getTask(t.id));
   }
 
   /** @param {string} id @returns {Task|undefined} */
   getTask(id) {
-    return this.#one('SELECT * FROM tasks WHERE id=?', id);
+    return this.#task(this.#one('SELECT * FROM tasks WHERE id=?', id));
   }
 
   /** @param {string} [projectId] @returns {Task[]} */
   listTasks(projectId) {
-    return projectId ? this.#all('SELECT * FROM tasks WHERE project_id=? ORDER BY updated_at DESC', projectId) : this.#all('SELECT * FROM tasks ORDER BY updated_at DESC');
+    const rows = projectId ? this.#all('SELECT * FROM tasks WHERE project_id=? ORDER BY updated_at DESC', projectId) : this.#all('SELECT * FROM tasks ORDER BY updated_at DESC');
+    return /** @type {Task[]} */ (rows.map((r) => this.#task(r)));
   }
 
   /** @param {string} id @param {Partial<Task>} patch */
   updateTask(id, patch) {
-    this.#patch('tasks', id, { ...patch, updated_at: now() });
+    const { loop, ...rest } = patch;
+    this.#patch('tasks', id, { ...rest, ...(loop === undefined ? {} : { loop: loop === null ? null : JSON.stringify(loop) }), updated_at: now() });
     return /** @type {Task} */ (this.getTask(id));
   }
 
   /**
-   * For a review, `decision` names the reviewer and `evidence` holds its findings.
-   * @param {{task_id:string, session_id:string|null, decision:string, evidence:string, kind?:'decision'|'review'}} e @returns {TaskLogEntry}
+   * For a review, `decision` names the reviewer and `evidence` holds its findings. For a
+   * loop, it is what the loop did and what the check said when it did it.
+   * @param {{task_id:string, session_id:string|null, decision:string, evidence:string, kind?:TaskLogEntry['kind']}} e @returns {TaskLogEntry}
    */
   addLog(e) {
     const at = now();

@@ -58,7 +58,7 @@ const INSTRUCTIONS = `Bench runs this session. These tools show and act on the t
 
 Ids can be shortened to any unique prefix of 4 or more characters.
 
-Some things are deliberately not tools: merging or closing a task, changing any task's "done means" or check, and deleting anything. Those stay with the person - a session must not lower its own bar or land its own work. If one is needed, say so in your reply.
+Some things are deliberately not tools: merging or closing a task, changing any task's "done means" or check, turning on or stopping a task's loop-until-done, and deleting anything. Those stay with the person - a session must not lower its own bar, land its own work, or put itself into an unattended loop. If one is needed, say so in your reply.
 
 Limits: a session started by start_session, request_review or create_task cannot itself call any of those three - one level, never a chain. At most ${MAX_STARTED} sessions started by tools run at once in a project.
 
@@ -177,6 +177,17 @@ function taskReport(svc, t, me) {
     lines.push(`Changes: unknown (${/** @type {Error} */ (e).message})`);
   }
   if (t.created_by_session) lines.push(`Made by session ${short(t.created_by_session)} with create_task, so it cannot make tasks itself.`);
+  // Loop state is here to read, and to leave alone: only a person turns one on or off.
+  if (t.loop) {
+    const l = t.loop;
+    const state =
+      l.state === 'looping'
+        ? `on, attempt ${l.attempts} of ${l.max_attempts} (up to ${plural(l.max_minutes, 'minute')})`
+        : l.state === 'done'
+          ? `done — the check passed after ${plural(l.attempts, 'attempt')}`
+          : `${l.state === 'gave-up' ? 'gave up' : 'stopped'}${l.reason ? ` — ${l.reason}` : ''}`;
+    lines.push(`Loop: ${state}. ${l.state === 'looping' ? 'A failing check sends this session back to work; end the loop by making the check pass. Only the person can stop it.' : 'Only the person can turn it on again.'}`);
+  }
   const sessions = svc.sessions({ taskId: t.id });
   lines.push('', sessions.length ? 'Sessions in this task:' : 'No sessions in this task.');
   for (const s of sessions) lines.push(`- ${short(s.id)} "${s.title}" — ${s.status}, ${modelName(svc, s)}${s.id === me ? ' (this session)' : ''}`);

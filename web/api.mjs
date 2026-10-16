@@ -138,6 +138,7 @@ export const api = {
   renameTask: (/** @type {string} */ id, /** @type {string} */ title) => patch(`/api/tasks/${id}`, { title }),
   setTaskBar: (/** @type {string} */ id, /** @type {{done?:string|null, check?:string|null}} */ b) => patch(`/api/tasks/${id}`, b),
   checkTask: (/** @type {string} */ id) => post(`/api/tasks/${id}/check`),
+  setTaskLoop: (/** @type {string} */ id, /** @type {{max_attempts?:number, max_minutes?:number}|null} */ loop) => patch(`/api/tasks/${id}`, { loop }),
   taskGit: (/** @type {string} */ id) => get(`/api/tasks/${id}/git`),
   taskDiff: (/** @type {string} */ id) => get(`/api/tasks/${id}/diff`),
   taskLog: (/** @type {string} */ id) => get(`/api/tasks/${id}/log`),

@@ -237,6 +237,37 @@ test('a closed task can be reopened while its branch survives', () => {
   svc.shutdown();
 });
 
+test("a task's loop is a column of its own, whole through a fresh reader, and retunable in place", async () => {
+  const { svc, project, root } = setup();
+  // A check that takes its time, so the caps change while the loop's first one is running.
+  const { task } = svc.createTask(project.id, { title: 'Overnight', check: 'sleep 0.5; exit 1', loop: { max_attempts: 3, max_minutes: 30 } });
+  const started = svc.task(task.id).loop;
+  assert.equal(started.state, 'looping');
+  assert.equal(started.attempts, 0);
+
+  // Retuning a loop that is going keeps it, and how far it has got; a cap not named stays.
+  const retuned = svc.editTask(task.id, { loop: { max_attempts: 4 } });
+  assert.equal(retuned.loop.state, 'looping');
+  assert.equal(retuned.loop.started_at, started.started_at, 'the same loop, not a fresh one');
+  assert.equal(retuned.loop.max_attempts, 4);
+  assert.equal(retuned.loop.max_minutes, 30, 'the cap left out is the one it had');
+
+  // The new cap is the one that holds: the loop writes its attempts over the loop it found.
+  await until(() => svc.task(task.id).loop.state === 'gave-up');
+  const ended = svc.task(task.id).loop;
+  assert.equal(ended.attempts, 4);
+  assert.equal(ended.max_minutes, 30);
+  assert.match(ended.reason, /after 4 attempts/);
+
+  // It is the task's own row, so a reader opening the database sees the same loop.
+  const store = new Store(root);
+  const read = store.getTask(task.id).loop;
+  store.db.close();
+  assert.deepEqual(read, ended);
+  svc.editTask(task.id, { loop: null });
+  svc.shutdown();
+});
+
 test('a v1 database is backed up, its pipeline tables renamed, and live task worktrees imported', () => {
   const root = tmp('v1');
   const dir = repo();

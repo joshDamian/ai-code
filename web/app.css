@@ -1185,6 +1185,12 @@ button.side-settings{width:100%;text-align:left}
 .task-bar-done{min-width:0;flex:1 1 20ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .badge-btn{cursor:pointer;font:inherit;font-size:var(--text-xs)}
 .badge-btn:disabled{cursor:default}
+a.badge{text-decoration:none}
+/* A loop's line in the transcript, and its rows in the log. */
+.loop-line{color:var(--info)}
+.decision.loop{border-left:2px solid var(--info)}
+.loop-caps{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-3);align-items:start}
+@media (max-width:520px){.loop-caps{grid-template-columns:1fr}}
 .check-run summary{cursor:pointer;list-style:none}
 .check-run summary::-webkit-details-marker{display:none}
 .check-output{max-height:50vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:var(--text-xs);background:var(--surface-sunken);padding:var(--space-2) var(--space-3);margin:0;border-radius:var(--radius-sm)}

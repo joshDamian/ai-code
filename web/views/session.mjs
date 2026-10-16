@@ -341,6 +341,9 @@ function Entry({ event: e, results, reply }) {
   if (e.kind === 'init') return html`<div class="sys-line">Claude Code ${d.version || ''} · ${d.model} · ${MODES.find((m) => m.value === d.permissionMode)?.label || d.permissionMode}</div>`;
   if (e.kind === 'notice') return html`<div class="sys-line">${d.text}</div>`;
   if (e.kind === 'log') return html`<div class="sys-line log-line" title=${`Evidence: ${d.evidence}`}>Logged: ${d.decision}</div>`;
+  // The loop's own line. What it sends the session is a user message, right below; this
+  // says what the loop is doing and why, where a person reading back can see it.
+  if (e.kind === 'loop') return html`<div class="sys-line loop-line">${d.text}</div>`;
   if (e.kind === 'check') {
     const head = d.ok ? 'Check passed' : d.timedOut ? 'Check timed out' : `Check failed (exit ${d.code ?? '?'})`;
     return html`<details class="tool check-run ${d.ok ? '' : 'failed'}">

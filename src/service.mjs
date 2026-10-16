@@ -9,6 +9,7 @@ import { Store } from './store.mjs';
 import { Runtime, MODES } from './runtime.mjs';
 import { providerReady } from './providers.mjs';
 import { benchServer } from './tools.mjs';
+import { Loop, newLoop } from './loop.mjs';
 import * as g from './git.mjs';
 
 /** @typedef {import('./contract.mjs').Task} Task */
@@ -63,6 +64,11 @@ export class Service extends EventEmitter {
      * @type {((payload: {title:string, body:string, url?:string, tag?:string, sessionId?:string}) => Promise<number>) | null}
      */
     this.notifier = null;
+    /**
+     * Loop until done: what feeds a task's failing check back to its session. It listens for
+     * the runtime's turn-done, so a loop is driven by turns ending, not by a timer.
+     */
+    this.loop = new Loop(this);
     this.runtime.on('turn-done', ({ session }) => session && this.emit('git', session.project_id));
     this.runtime.on('task', (t) => this.emit('task', t));
     this.#importLegacy();
@@ -233,7 +239,9 @@ export class Service extends EventEmitter {
    * `done` says in words what finished looks like; `check` is the command Bench runs to
    * check it, and defaults to the project's. An empty `check` means none.
    * `createdBy` is the session that asked for the task through the bench tool.
-   * @param {{title?:string, prompt?:string, baseBranch?:string, providerId?:string, modelId?:string|null, mode?:PermissionMode, effort?:string|null, done?:string|null, check?:string|null, createdBy?:string|null}} o
+   * `loop` turns on the unattended loop at once, for its caps and nobody else's: it is not
+   * something a session can ask for through the bench tools.
+   * @param {{title?:string, prompt?:string, baseBranch?:string, providerId?:string, modelId?:string|null, mode?:PermissionMode, effort?:string|null, done?:string|null, check?:string|null, createdBy?:string|null, loop?:{max_attempts?:unknown, max_minutes?:unknown}|null}} o
    */
   createTask(projectId, o) {
     const p = this.project(projectId);
@@ -258,12 +266,15 @@ export class Service extends EventEmitter {
     }
     const done = (o.done || '').trim() || null;
     const check = (o.check === undefined ? p.check_command : o.check)?.trim() || null;
-    const task = this.store.addTask({ id, project_id: p.id, title, description: prompt || null, base_branch: base, base_commit: baseCommit, branch, worktree, done, check_command: check, created_by_session: o.createdBy || null });
+    // A loop with no check to end it would run to its caps and stop there every time.
+    const loop = o.loop ? newLoop(o.loop, check) : null;
+    const task = this.store.addTask({ id, project_id: p.id, title, description: prompt || null, base_branch: base, base_commit: baseCommit, branch, worktree, done, check_command: check, created_by_session: o.createdBy || null, loop });
     this.emit('task', task);
     this.emit('git', p.id);
     const session = this.createSession({ projectId: p.id, taskId: id, title, providerId: o.providerId, modelId: o.modelId, mode: o.mode, effort: o.effort, startedBy: o.createdBy || null });
     if (prompt) this.send(session.id, prompt);
-    return { task, session: this.store.getSession(session.id) };
+    if (loop) void this.loop.start(id);
+    return { task: this.task(id), session: this.store.getSession(session.id) };
   }
 
   /** How the task's branch stands. @param {string} id @returns {TaskGit} */
@@ -366,6 +377,8 @@ export class Service extends EventEmitter {
       const err = /** @type {any} */ (e);
       throw Object.assign(fail(err.message, err.code === 'CONFLICT' ? 409 : 400), { code: err.code, conflicts: err.conflicts });
     }
+    // The task is landed: there is nothing left for a loop to work towards.
+    this.loop.stop(id, 'stopped', 'the task was merged');
     const updated = this.store.updateTask(id, { state: 'merged', merge_commit: landed.commit, merged_at: new Date().toISOString() });
     if (o.cleanup) this.#cleanup(updated, true);
     this.emit('task', updated);
@@ -399,6 +412,7 @@ export class Service extends EventEmitter {
   closeTask(id, o = {}) {
     const t = this.task(id);
     if (t.state !== 'active') throw fail(`The task is already ${t.state}`, 409);
+    this.loop.stop(id, 'stopped', 'the task was closed');
     this.#cleanup(t, !!o.deleteBranch);
     const updated = this.store.updateTask(id, { state: 'closed' });
     this.emit('task', updated);
@@ -440,7 +454,12 @@ export class Service extends EventEmitter {
   /**
    * A new title, or a new bar for done. Changing the bar clears the last check's result,
    * which judged the old one, and closes the task's idle sessions so that each picks the
-   * new bar up when it resumes. @param {string} id @param {{title?:string, done?:string|null, check?:string|null}} patch
+   * new bar up when it resumes.
+   *
+   * `loop` turns the unattended loop on, retunes a running one's caps, or - with null -
+   * stops it. Like the bar, this is a person's to set: no bench tool reaches it.
+   * @param {string} id
+   * @param {{title?:string, done?:string|null, check?:string|null, loop?:{max_attempts?:unknown, max_minutes?:unknown}|null}} patch
    */
   editTask(id, patch) {
     const t0 = this.task(id);
@@ -454,8 +473,19 @@ export class Service extends EventEmitter {
     if (patch.done !== undefined) change.done = patch.done?.trim() || null;
     if (patch.check !== undefined) change.check_command = patch.check?.trim() || null;
     if (bar) Object.assign(change, { check_status: null, check_tree: null, check_output: null, check_at: null });
+    if (patch.loop !== undefined && patch.loop !== null) {
+      const check = bar ? change.check_command : t0.check_command;
+      change.loop = newLoop(patch.loop, check || null, t0.loop?.state === 'looping' ? t0.loop : null);
+    }
+    // Off is two things: the loop ends with a reason in the log, and the task stops carrying
+    // one at all. The log is where the audit trail of an overnight run stays.
+    if (patch.loop === null) {
+      this.loop.off(id);
+      change.loop = null;
+    }
     const t = this.store.updateTask(t0.id, change);
     if (bar) for (const s of this.store.listSessions({ taskId: id })) if (!this.runtime.busy(s.id)) this.runtime.close(s.id);
+    if (change.loop) void this.loop.start(id);
     this.emit('task', t);
     return t;
   }
@@ -579,7 +609,7 @@ export class Service extends EventEmitter {
     return this.session(s.id);
   }
 
-  /** @param {string} id @param {string} text @param {{images?: {media_type:string, data:string}[], files?: {name:string, media_type?:string, data:string}[], uploads?: {file:string, type?:string}[]}} [o] */
+  /** @param {string} id @param {string} text @param {{images?: {media_type:string, data:string}[], files?: {name:string, media_type?:string, data:string}[], uploads?: {file:string, type?:string}[], writeUp?:boolean}} [o] */
   send(id, text, o) {
     const s = this.session(id);
     if (s.task_id && this.task(s.task_id).state !== 'active') throw fail('The task is no longer active', 409);
@@ -622,6 +652,8 @@ export class Service extends EventEmitter {
   archiveSession(id, archived = true) {
     const s = this.session(id);
     if (archived) {
+      // A loop with nowhere to send its check has nothing left to do; the log says so.
+      this.loop.sessionGone(s);
       this.runtime.close(id);
       this.runtime.dropScratch(id);
     } else if (s.task_id && this.task(s.task_id).state !== 'active') throw fail('Reopen the task first', 409);
@@ -632,7 +664,7 @@ export class Service extends EventEmitter {
 
   /** @param {string} id */
   deleteSession(id) {
-    this.session(id);
+    this.loop.sessionGone(this.session(id), 'its session was deleted');
     this.runtime.close(id);
     fs.rmSync(this.runtime.attachmentsDir(id), { recursive: true, force: true });
     this.runtime.dropScratch(id);

@@ -314,6 +314,26 @@ test("create_task uses the person's defaults, records who made it, and a task ma
   svc.shutdown();
 });
 
+test('no tool starts, stops or tunes a loop, and no tool takes one as an argument', async () => {
+  const { svc, project } = setup();
+  // A loop that is on while the test looks: its check is still running, so it has not stopped.
+  const parent = svc.createTask(project.id, { title: 'Parent', check: 'sleep 1; exit 1', loop: { max_attempts: 4 } });
+  const server = benchServer(svc, parent.session.id);
+  assert.ok(!server.tools.some((t) => /loop/i.test(t.name)), 'a session must not be able to put itself into a loop');
+  for (const t of server.tools) {
+    const args = Object.getOwnPropertyNames(t.inputSchema || {});
+    assert.deepEqual(args.filter((a) => /loop|max_?attempts|max_?minutes/i.test(a)), [], `${t.name} takes no loop settings`);
+  }
+  assert.ok(!Object.getOwnPropertyNames(server.tools.find((t) => t.name === 'create_task').inputSchema).includes('loop'), 'so a task a session makes cannot be one that loops');
+
+  // A loop is readable from a session, and named there as the person's to stop.
+  const looping = await call(svc, parent.session.id, 'task_status');
+  assert.match(looping.text, /Loop: on, attempt \d+ of \d+/);
+  assert.match(looping.text, /A failing check sends this session back to work; end the loop by making the check pass\. Only the person can stop it\./);
+  svc.editTask(parent.task.id, { loop: null });
+  svc.shutdown();
+});
+
 test("list_sessions and session_status show the project's sessions, and a session's last reply as data", async () => {
   const { svc, project } = setup();
   const me = svc.createSession({ projectId: project.id, title: 'Me' });

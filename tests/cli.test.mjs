@@ -158,6 +158,41 @@ test('task check prints the result and exits 1 when it fails', async () => {
   assert.match(noCheck.stderr, /no check/);
 });
 
+test('task loop turns a loop on with caps, shows it, and turns it off', async () => {
+  // A check that takes a while, so the loop is still on its first one when the CLI looks.
+  const looped = (await api('POST', '/api/tasks', { projectId: project.id, title: 'Looped task', check: 'sleep 5; exit 1', done: 'the thing works' })).task;
+
+  // No check, no loop: there is nothing that would end one.
+  const refused = await bench(['task', 'loop', second.id.slice(0, 6)]);
+  assert.equal(refused.code, 1);
+  assert.equal(refused.stdout, '');
+  assert.match(refused.stderr, /needs a check/);
+
+  const on = await bench(['task', 'loop', looped.id.slice(0, 6), '--max-attempts', '3', '--max-minutes', '5']);
+  assert.equal(on.code, 0, on.stderr);
+  assert.match(on.stdout, /^Looping [0-9a-f]{8} Looped task: `sleep 5; exit 1` runs when its session goes idle/);
+  assert.match(on.stdout, /up to 3 attempts or 5 minutes\./);
+  assert.match(on.stdout, /--off` ends it\.\n$/);
+
+  // The caps have to be whole numbers, and the server refuses one no loop may be given.
+  const zero = await bench(['task', 'loop', looped.id.slice(0, 6), '--max-attempts', '0']);
+  assert.equal(zero.code, 1);
+  assert.match(zero.stderr, /whole number/);
+  const forever = await bench(['task', 'loop', looped.id.slice(0, 6), '--max-minutes', '100000']);
+  assert.equal(forever.code, 1);
+  assert.match(forever.stderr, /1 to 1440/);
+
+  const shown = await bench(['task', looped.id.slice(0, 6)]);
+  assert.equal(shown.code, 0, shown.stderr);
+  assert.match(shown.stdout, /loop\s+looping, attempt 0 of 3 \(up to 5 minutes\)/);
+
+  const off = await bench(['task', 'loop', looped.id.slice(0, 6), '--off']);
+  assert.equal(off.code, 0, off.stderr);
+  assert.match(off.stdout, /^Loop off for [0-9a-f]{8} Looped task\./);
+  assert.equal(JSON.parse((await bench(['task', looped.id.slice(0, 6), '--json'])).stdout).task.loop, null);
+  assert.match((await bench(['task', looped.id.slice(0, 6)])).stdout, /loop\s+off/);
+});
+
 test('task close removes the worktree and hides it from tasks unless --all', async () => {
   const r = await bench(['task', 'close', second.id.slice(0, 6), '--delete-branch']);
   assert.equal(r.code, 0, r.stderr);

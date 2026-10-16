@@ -289,6 +289,7 @@ function NewTask({ projectId, git }) {
   const [model, setModel] = useState(null);
   const [mode, setMode] = useState(null);
   const [effort, setEffort] = useState(undefined);
+  const [loop, setLoop] = useState(false);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
   useEffect(() => remember(key, prompt || null), [prompt]);
@@ -299,11 +300,12 @@ function NewTask({ projectId, git }) {
   const start = async () => {
     setBusy(true);
     try {
-      const r = await api.createTask({ projectId, prompt, title, done, ...(check === null ? {} : { check }), baseBranch, providerId: chosen.providerId, modelId: chosen.modelId, mode: mode || defaults.mode, effort: effort === undefined ? defaults.effort : effort });
+      const r = await api.createTask({ projectId, prompt, title, done, ...(check === null ? {} : { check }), ...(loop ? { loop: {} } : {}), baseBranch, providerId: chosen.providerId, modelId: chosen.modelId, mode: mode || defaults.mode, effort: effort === undefined ? defaults.effort : effort });
       setPrompt('');
       setTitle('');
       setDone('');
       setCheck(null);
+      setLoop(false);
       go(`#/p/${projectId}/t/${r.task.id}/s/${r.session.id}`);
     } catch (e) {
       toast(e);
@@ -330,6 +332,10 @@ function NewTask({ projectId, git }) {
               <label class="field field-wide"><span class="field-label">Done means (optional)</span><input class="input" placeholder="e.g. the CSV export keeps every row of the 60k fixture" value=${done} onInput=${(e) => setDone(e.target.value)} /></label>
               <label class="field field-wide"><span class="field-label">Check (optional)</span><input class="input mono-sm" placeholder="e.g. npm test. Runs when a session stops; a failure sends it back to work" value=${check ?? project?.check_command ?? ''} onInput=${(e) => setCheck(e.target.value)} /></label>
               ${git?.branches?.length ? html`<div class="field"><span class="field-label">Branch from</span><${BranchPicker} branches=${git.branches} value=${baseBranch} onChange=${setBase} /></div>` : null}
+              <label class="field" title=${(check ?? project?.check_command ?? '').trim() ? "Bench re-runs the check whenever this task's session goes idle and sends the failure back to it, up to 10 attempts or 2 hours, then asks it to write up why it is stuck. Retune the caps on the task page." : 'A loop needs a check command to end it.'}>
+                <span class="field-label">Loop until done</span>
+                <span class="row"><input type="checkbox" checked=${loop} disabled=${!(check ?? project?.check_command ?? '').trim()} onChange=${(e) => setLoop(e.target.checked)} /> <span class="muted">keep going through failures without you</span></span>
+              </label>
               <div class="field"><span class="field-label">Model</span><${ModelPicker} providers=${providers} value=${chosen} onChange=${setModel} /></div>
               <div class="field"><span class="field-label">Effort</span><${EffortPicker} value=${effort === undefined ? defaults.effort : effort} onChange=${setEffort} /></div>
               <div class="field"><span class="field-label">Permissions</span><${ModePicker} value=${mode || defaults.mode} onChange=${setMode} /></div>

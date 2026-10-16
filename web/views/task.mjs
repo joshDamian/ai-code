@@ -108,7 +108,7 @@ export function TaskView({ projectId, taskId, sessionId, tab }) {
         </div>
       </header>
 
-      ${active || task.check_command || task.done ? html`<${TaskBar} task=${task} active=${active} onEdit=${() => setDialog('bar')} onOutput=${() => setDialog('output')} />` : null}
+      ${active || task.check_command || task.done ? html`<${TaskBar} task=${task} active=${active} onEdit=${() => setDialog('bar')} onOutput=${() => setDialog('output')} onLoop=${() => setDialog('loop')} />` : null}
 
       <nav class="task-tabs" role="tablist">
         ${sessions.map(
@@ -177,6 +177,7 @@ export function TaskView({ projectId, taskId, sessionId, tab }) {
       ${dialog === 'pr' ? html`<${PrDialog} task=${task} onClose=${() => setDialog(null)} />` : null}
       ${dialog === 'close' ? html`<${CloseDialog} task=${task} onClose=${() => setDialog(null)} />` : null}
       ${dialog === 'bar' ? html`<${BarDialog} task=${task} onClose=${() => setDialog(null)} />` : null}
+      ${dialog === 'loop' ? html`<${LoopDialog} task=${task} onClose=${() => setDialog(null)} />` : null}
       ${dialog === 'output' ? html`<${Dialog} wide title=${`Last check: ${task.check_command}`} onClose=${() => setDialog(null)}><pre class="check-output">${task.check_output || '(no output)'}</pre><//>` : null}
     </div>
   `;
@@ -269,12 +270,13 @@ function DecisionLog({ task, sessions }) {
     api.taskLog(task.id).then(setLog).catch(toast);
   }, [task.id, task.updated_at]);
   if (log === null) return html`<div class="muted pane-empty">Loading…</div>`;
-  if (!log.length) return html`<div class="muted pane-empty">No decisions logged yet. Sessions add them with the <code>log</code> tool, each with the evidence behind it.</div>`;
+  if (!log.length) return html`<div class="muted pane-empty">No decisions logged yet. Sessions add them with the <code>log</code> tool, each with the evidence behind it. A loop writes here too: every attempt, and why it ended.</div>`;
   const titled = (id) => sessions.find((s) => s.id === id)?.title || (id ? id.slice(0, 8) : '');
   return html`
     <ol class="decision-log">
       ${log.map(
-        (e) => html`<li key=${e.id} class="decision">
+        (e) => html`<li key=${e.id} class="decision ${e.kind === 'loop' ? 'loop' : ''}">
+          ${e.kind === 'loop' ? html`<span class="badge badge-info">Loop</span>` : null}
           <div class="decision-text">${e.decision}</div>
           <div class="decision-evidence"><span class="muted">Evidence:</span> ${e.evidence}</div>
           <div class="muted mono-sm">${new Date(e.created_at).toLocaleString()}${e.session_id ? html` · <a href=${`#/p/${task.project_id}/t/${task.id}/s/${e.session_id}`}>${titled(e.session_id)}</a>` : null}</div>
@@ -377,7 +379,22 @@ const CHECK_STATE = { passed: ['Check passed', 'badge-good'], failed: ['Check fa
  * and how the last run went. A session that stops is checked against it by the server;
  * Run check is for a person who wants to see it now.
  */
-function TaskBar({ task, active, onEdit, onOutput }) {
+/** The loop, in the bar: on and how far it has got, or how it ended and why. @param {any} task */
+function LoopBadge({ task }) {
+  const l = task.loop;
+  const word = l.state === 'looping' ? `Looping · ${l.attempts} of ${l.max_attempts}` : l.state === 'done' ? 'Loop done' : l.state === 'gave-up' ? 'Loop gave up' : 'Loop stopped';
+  const cls = l.state === 'looping' ? 'badge-info badge-working' : l.state === 'done' ? 'badge-good' : l.state === 'gave-up' ? 'badge-bad' : 'badge-neutral';
+  const title =
+    l.state === 'looping'
+      ? `Bench runs ${task.check_command} whenever this task's session goes idle. A failure sends it back to work, up to ${l.max_attempts} attempts or ${l.max_minutes} minutes, and then it writes up why it is stuck. Click to stop.`
+      : `Loop ${l.state === 'done' ? 'ended: the check passed' : l.reason || 'stopped'}. Click for the log.`;
+  if (l.state === 'looping') {
+    return html`<button class="badge ${cls} badge-btn" type="button" title=${title} onClick=${() => api.setTaskLoop(task.id, null).then(() => showToast('Loop stopped', 'success')).catch(toast)}>${word}</button>`;
+  }
+  return html`<a class="badge ${cls} badge-btn" href=${`#/p/${task.project_id}/t/${task.id}/log`} title=${title}>${word}</a>`;
+}
+
+function TaskBar({ task, active, onEdit, onOutput, onLoop }) {
   const [busy, setBusy] = useState(false);
   if (!task.check_command && !task.done) {
     return html`<div class="task-bar"><button class="btn sm ghost" type="button" onClick=${onEdit}>Say what done means…</button></div>`;
@@ -401,10 +418,51 @@ function TaskBar({ task, active, onEdit, onOutput }) {
             <code class="mono-sm task-bar-cmd" title=${task.check_command}>${task.check_command}</code>`
         : null}
       ${task.done ? html`<span class="task-bar-done" title=${task.done}><span class="muted">Done means:</span> ${task.done}</span>` : null}
+      ${task.loop ? html`<${LoopBadge} task=${task} />` : null}
       <span class="tab-gap"></span>
+      ${active && task.check_command && task.loop?.state !== 'looping' ? html`<button class="btn sm secondary" type="button" onClick=${onLoop} title="Keep going until the check passes, on its own">Loop until done…</button>` : null}
       ${active && task.check_command ? html`<button class="btn sm secondary" type="button" disabled=${busy || task.check_status === 'running'} onClick=${run}>${busy || task.check_status === 'running' ? 'Checking…' : 'Run check'}</button>` : null}
       ${active ? html`<button class="btn sm ghost" type="button" onClick=${onEdit}>Edit</button>` : null}
     </div>
+  `;
+}
+
+/**
+ * Turning the loop on: the two caps, and nothing else. A loop has no ceiling of its own, so
+ * both are asked for; a task with no check cannot loop at all, and says so.
+ */
+function LoopDialog({ task, onClose }) {
+  const [attempts, setAttempts] = useState(String(task.loop?.max_attempts ?? 10));
+  const [minutes, setMinutes] = useState(String(task.loop?.max_minutes ?? 120));
+  const [busy, setBusy] = useState(false);
+  const whole = (v) => Number.isInteger(Number(v)) && Number(v) >= 1 && String(v).trim() !== '';
+  const ok = whole(attempts) && whole(minutes);
+  const start = async () => {
+    setBusy(true);
+    try {
+      await api.setTaskLoop(task.id, { max_attempts: Number(attempts), max_minutes: Number(minutes) });
+      showToast('Looping until the check passes', 'success');
+      onClose();
+    } catch (e) {
+      toast(e);
+      setBusy(false);
+    }
+  };
+  return html`
+    <${Dialog}
+      title="Loop until done"
+      onClose=${onClose}
+      actions=${html`<button class="btn ghost" type="button" onClick=${onClose}>Cancel</button><button class="btn primary" type="button" disabled=${busy || !ok} onClick=${start}>${busy ? 'Starting…' : 'Start looping'}</button>`}
+    >
+      ${task.check_command
+        ? html`<p class="muted">Bench runs <code>${task.check_command}</code> in the worktree whenever this task's session goes idle. A failure is sent straight back to the session, with the output, so it keeps working without you. It stops when the check passes, or at one of these limits — and then it asks the session to write up why it is stuck.</p>`
+        : html`<p class="notice notice-bad">This task has no check command, so there is nothing to tell a loop when it is done. Set one under Edit first.</p>`}
+      <div class="loop-caps">
+        <label class="field"><span class="field-label">Most attempts</span><input class="input" type="number" min="1" max="100" value=${attempts} onInput=${(e) => setAttempts(e.target.value)} /></label>
+        <label class="field"><span class="field-label">Most minutes</span><input class="input" type="number" min="1" max="1440" value=${minutes} onInput=${(e) => setMinutes(e.target.value)} /></label>
+      </div>
+      <p class="muted">Only you can start, retune or stop a loop; a session cannot put itself into one. You can stop it here or with <code>bench task loop ${task.id.slice(0, 8)} --off</code>.</p>
+    <//>
   `;
 }
 
